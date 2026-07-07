@@ -438,6 +438,390 @@ pub fn frame_checksum(frame_header: &[u8], page_image: &[u8], salt: u64) -> u64 
 }
 
 // ---------------------------------------------------------------------------
+// Vector pages — docs/FORMAT.md §6
+// ---------------------------------------------------------------------------
+
+/// Bytes per dimension for the only representation v1 writes (f32; i8
+/// quantization is reserved for M3, `embedding_quant = 1`).
+const VECTOR_STRIDE_F32: usize = 4;
+
+/// Slot capacity of a VECTOR page at the given page size and embedding
+/// dimensionality. `entry_count` counts occupied slots, filled in order (a
+/// bump allocator — vectors are never removed in place, only orphaned like
+/// overflow chains until `vacuum`), so a page is full once `entry_count`
+/// reaches this value.
+pub fn vector_slots_per_page(page_size: u32, dims: u16) -> usize {
+    let stride = usize::from(dims) * VECTOR_STRIDE_F32;
+    if stride == 0 {
+        return 0;
+    }
+    (page_size as usize - PAGE_HEADER_LEN - PAGE_TRAILER_LEN) / stride
+}
+
+/// Appends one L2-normalized vector to a VECTOR page at its next free slot.
+/// `page` must already be a valid (possibly empty/fresh) VECTOR page of the
+/// recorded `dims`. Returns the slot index. `None` = page is full.
+pub fn vector_page_push(page: &mut [u8], dims: u16, vector: &[f32]) -> Result<Option<u16>> {
+    if vector.len() != usize::from(dims) {
+        return Err(Error::InvalidArgument("vector length != header dims"));
+    }
+    let page_size = page.len() as u32;
+    let capacity = vector_slots_per_page(page_size, dims);
+    let header = PageHeader::decode(page).ok_or(Error::InvalidArgument("not a valid page"))?;
+    if header.page_type != PageType::Vector {
+        return Err(Error::InvalidArgument("not a VECTOR page"));
+    }
+    let used = header.entry_count as usize;
+    if used >= capacity {
+        return Ok(None);
+    }
+    let stride = usize::from(dims) * VECTOR_STRIDE_F32;
+    let offset = PAGE_HEADER_LEN + used * stride;
+    for (i, v) in vector.iter().enumerate() {
+        write_bytes(page, offset + i * VECTOR_STRIDE_F32, &v.to_le_bytes());
+    }
+    PageHeader {
+        page_type: PageType::Vector,
+        entry_count: used as u32 + 1,
+        next_page: header.next_page,
+    }
+    .encode_into(page);
+    Ok(Some(used as u16))
+}
+
+/// Reads back the vector at `slot` of a VECTOR page.
+pub fn vector_page_get(page: &[u8], dims: u16, slot: u16, page_no: u64) -> Result<Vec<f32>> {
+    let header = PageHeader::decode(page).ok_or(Error::MalformedPage {
+        page_no,
+        what: "page header",
+    })?;
+    if header.page_type != PageType::Vector {
+        return Err(Error::MalformedPage {
+            page_no,
+            what: "not a VECTOR page",
+        });
+    }
+    if u32::from(slot) >= header.entry_count {
+        return Err(Error::MalformedPage {
+            page_no,
+            what: "vector slot out of range",
+        });
+    }
+    let stride = usize::from(dims) * VECTOR_STRIDE_F32;
+    let offset = PAGE_HEADER_LEN + usize::from(slot) * stride;
+    let bytes = page
+        .get(offset..offset + stride)
+        .ok_or(Error::MalformedPage {
+            page_no,
+            what: "vector slot bounds",
+        })?;
+    Ok(bytes
+        .chunks_exact(VECTOR_STRIDE_F32)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+/// Initializes a fresh, empty VECTOR page in place.
+pub fn init_vector_page(page: &mut [u8]) {
+    PageHeader {
+        page_type: PageType::Vector,
+        entry_count: 0,
+        next_page: 0,
+    }
+    .encode_into(page);
+}
+
+// ---------------------------------------------------------------------------
+// HNSW pages — docs/FORMAT.md §7
+// ---------------------------------------------------------------------------
+
+/// Neighbor cap per layer (`docs/adr/0002`): `M` at layers >= 1, `2*M` at
+/// layer 0 (the HNSW paper's standard doubling for the base layer).
+pub const HNSW_DEFAULT_M: u16 = 16;
+/// Default `ef_construction` (`docs/adr/0002`).
+pub const HNSW_DEFAULT_EF_CONSTRUCTION: u16 = 200;
+/// Default `ef_search` (`docs/adr/0002`); callers may raise it per query.
+pub const HNSW_DEFAULT_EF_SEARCH: u16 = 64;
+
+/// Decoded HNSW_META page: index parameters and the graph entry point.
+/// **Fixed size** — it never grows with the index. There is no node location
+/// table: graph adjacency addresses HNSW_NODE pages directly by `page_no`
+/// (`docs/adr/0008`), so the index scales to any node count with O(1) meta
+/// I/O per insert and one page read per traversal hop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HnswMeta {
+    /// Max neighbors per node at layers >= 1 (layer 0 uses `2 * m`).
+    pub m: u16,
+    /// Candidate list size during insertion.
+    pub ef_construction: u16,
+    /// Highest occupied layer across all nodes; `0` = empty or single-layer.
+    pub max_layer: u8,
+    /// Page of the current entry-point node; meaningful only if
+    /// `node_count > 0` (and then it is never 0).
+    pub entry_point_page: u64,
+    /// Total nodes in the graph. Also seeds the deterministic level
+    /// assignment for the next insert.
+    pub node_count: u64,
+}
+
+impl HnswMeta {
+    /// A fresh, empty index at the default parameters.
+    pub fn new() -> Self {
+        HnswMeta {
+            m: HNSW_DEFAULT_M,
+            ef_construction: HNSW_DEFAULT_EF_CONSTRUCTION,
+            max_layer: 0,
+            entry_point_page: 0,
+            node_count: 0,
+        }
+    }
+
+    /// Encodes into `page`, which must be exactly one page.
+    pub fn encode(&self, page: &mut [u8]) -> Result<()> {
+        if self.m == 0 {
+            return Err(Error::InvalidArgument("hnsw m must be >= 1"));
+        }
+        if self.node_count > 0 && self.entry_point_page == 0 {
+            return Err(Error::InvalidArgument(
+                "non-empty hnsw index requires an entry point",
+            ));
+        }
+        page.fill(0);
+        PageHeader {
+            page_type: PageType::HnswMeta,
+            entry_count: 0, // reserved (FORMAT.md §2)
+            next_page: 0,
+        }
+        .encode_into(page);
+        let mut off = PAGE_HEADER_LEN;
+        write_u16(page, off, self.m);
+        off += 2;
+        write_u16(page, off, self.ef_construction);
+        off += 2;
+        page[off] = self.max_layer;
+        off += 1;
+        write_u64(page, off, self.entry_point_page);
+        off += 8;
+        write_u64(page, off, self.node_count);
+        stamp_page_checksum(page);
+        Ok(())
+    }
+
+    /// Decodes and validates an HNSW_META page.
+    pub fn decode(page: &[u8], page_no: u64) -> Result<Self> {
+        let header = PageHeader::decode(page).ok_or(Error::MalformedPage {
+            page_no,
+            what: "page header",
+        })?;
+        if header.page_type != PageType::HnswMeta {
+            return Err(Error::MalformedPage {
+                page_no,
+                what: "not an HNSW_META page",
+            });
+        }
+        let mut off = PAGE_HEADER_LEN;
+        let m = read_u16(page, off).ok_or(Error::MalformedPage { page_no, what: "m" })?;
+        off += 2;
+        if m == 0 {
+            return Err(Error::MalformedPage {
+                page_no,
+                what: "hnsw m is zero",
+            });
+        }
+        let ef_construction = read_u16(page, off).ok_or(Error::MalformedPage {
+            page_no,
+            what: "ef_construction",
+        })?;
+        off += 2;
+        let max_layer = *page.get(off).ok_or(Error::MalformedPage {
+            page_no,
+            what: "max_layer",
+        })?;
+        off += 1;
+        let entry_point_page = read_u64(page, off).ok_or(Error::MalformedPage {
+            page_no,
+            what: "entry_point_page",
+        })?;
+        off += 8;
+        let node_count = read_u64(page, off).ok_or(Error::MalformedPage {
+            page_no,
+            what: "node_count",
+        })?;
+        if node_count > 0 && entry_point_page == 0 {
+            return Err(Error::MalformedPage {
+                page_no,
+                what: "hnsw entry point missing",
+            });
+        }
+        Ok(HnswMeta {
+            m,
+            ef_construction,
+            max_layer,
+            entry_point_page,
+            node_count,
+        })
+    }
+}
+
+/// Highest level a node may be assigned so that a **full** node (every layer
+/// at its neighbor cap) still fits one page. `None` = even a full layer-0
+/// node does not fit — this `(page_size, m)` combination cannot host an
+/// index (a misconfiguration or hostile meta page, reported as a typed error
+/// by the index layer). At the default page size and `M` the level cap is far
+/// above what the level distribution ever produces (29 at 4 KiB, M=16), so
+/// level assignment clamps to it and `HnswNode::encode` can never fail for a
+/// well-formed index.
+pub fn max_hnsw_level(page_size: u32, m: u16) -> Option<usize> {
+    let usable = page_size as usize - PAGE_HEADER_LEN - PAGE_TRAILER_LEN;
+    let fixed = 16 + 8 + 2 + 1; // record_id + vec_page + vec_slot + layer_count
+    let layer0 = 2 + usize::from(m) * 2 * 8; // u16 count + 2*M neighbors (u64)
+    let upper = 2 + usize::from(m) * 8; // u16 count + M neighbors (u64)
+    usable
+        .checked_sub(fixed + layer0)
+        .map(|rest| (rest / upper).min(31))
+}
+
+impl Default for HnswMeta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Decoded HNSW_NODE: the embedding a graph node indexes and its per-layer
+/// adjacency (`docs/FORMAT.md` §7). Neighbors are **HNSW_NODE page numbers**
+/// (u64) — direct addressing, no id-to-page table (`docs/adr/0008`).
+/// Adjacency is bounded (`<= m` per layer, `<= 2*m` at layer 0) and the level
+/// is capped by [`max_hnsw_level`], so a node always fits one page. The
+/// vector location is duplicated here (also reachable via the memory
+/// record's `vec_ref`) so search reads one page per candidate instead of a
+/// B-tree lookup per hop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HnswNode {
+    /// The memory record this node embeds.
+    pub record_id: ulid::Ulid,
+    /// VECTOR page holding this node's embedding.
+    pub vec_page: u64,
+    /// Slot within that page.
+    pub vec_slot: u16,
+    /// Per-layer neighbor lists (HNSW_NODE page numbers), layer 0 first.
+    pub layers: Vec<Vec<u64>>,
+}
+
+impl HnswNode {
+    /// Encodes into a fresh page. `None` = does not fit at this page size —
+    /// impossible for nodes built by the engine (level is clamped to
+    /// [`max_hnsw_level`] and adjacency to the layer caps), so callers treat
+    /// it as an internal error.
+    pub fn encode(&self, page_size: u32) -> Option<Vec<u8>> {
+        if self.layers.len() > u8::MAX as usize {
+            return None;
+        }
+        let mut body = Vec::with_capacity(16 + 8 + 2 + 1 + self.layers.len() * 8);
+        body.extend_from_slice(&self.record_id.to_bytes());
+        body.extend_from_slice(&self.vec_page.to_le_bytes());
+        body.extend_from_slice(&self.vec_slot.to_le_bytes());
+        body.push(self.layers.len() as u8);
+        for layer in &self.layers {
+            let count = u16::try_from(layer.len()).ok()?;
+            body.extend_from_slice(&count.to_le_bytes());
+            for &n in layer {
+                body.extend_from_slice(&n.to_le_bytes());
+            }
+        }
+        let total = PAGE_HEADER_LEN + body.len();
+        if total > page_size as usize - PAGE_TRAILER_LEN {
+            return None;
+        }
+        let mut page = vec![0u8; page_size as usize];
+        PageHeader {
+            page_type: PageType::HnswNode,
+            entry_count: 0, // reserved (FORMAT.md §2)
+            next_page: 0,
+        }
+        .encode_into(&mut page);
+        page[PAGE_HEADER_LEN..PAGE_HEADER_LEN + body.len()].copy_from_slice(&body);
+        stamp_page_checksum(&mut page);
+        Some(page)
+    }
+
+    /// Decodes an HNSW_NODE page.
+    pub fn decode(page: &[u8], page_no: u64) -> Result<Self> {
+        let header = PageHeader::decode(page).ok_or(Error::MalformedPage {
+            page_no,
+            what: "page header",
+        })?;
+        if header.page_type != PageType::HnswNode {
+            return Err(Error::MalformedPage {
+                page_no,
+                what: "not an HNSW_NODE page",
+            });
+        }
+        let mut off = PAGE_HEADER_LEN;
+        let record_id_bytes: [u8; 16] = page
+            .get(off..off + 16)
+            .and_then(|b| b.try_into().ok())
+            .ok_or(Error::MalformedPage {
+                page_no,
+                what: "hnsw record_id",
+            })?;
+        off += 16;
+        let vec_page = read_u64(page, off).ok_or(Error::MalformedPage {
+            page_no,
+            what: "hnsw vec_page",
+        })?;
+        off += 8;
+        let vec_slot = read_u16(page, off).ok_or(Error::MalformedPage {
+            page_no,
+            what: "hnsw vec_slot",
+        })?;
+        off += 2;
+        let layer_count = *page.get(off).ok_or(Error::MalformedPage {
+            page_no,
+            what: "hnsw layer_count",
+        })? as usize;
+        off += 1;
+        let mut layers = Vec::with_capacity(layer_count);
+        for _ in 0..layer_count {
+            let count = read_u16(page, off).ok_or(Error::MalformedPage {
+                page_no,
+                what: "hnsw neighbor count",
+            })? as usize;
+            off += 2;
+            // Guard before allocating: `count` neighbors need `count * 8`
+            // bytes of remaining page (fuzz rule, docs/TESTING.md §3).
+            if count * 8 > page.len().saturating_sub(off) {
+                return Err(Error::MalformedPage {
+                    page_no,
+                    what: "hnsw neighbor count exceeds page",
+                });
+            }
+            let mut neighbors = Vec::with_capacity(count);
+            for _ in 0..count {
+                let n = read_u64(page, off).ok_or(Error::MalformedPage {
+                    page_no,
+                    what: "hnsw neighbor page",
+                })?;
+                if n == 0 {
+                    return Err(Error::MalformedPage {
+                        page_no,
+                        what: "hnsw null neighbor page",
+                    });
+                }
+                neighbors.push(n);
+                off += 8;
+            }
+            layers.push(neighbors);
+        }
+        Ok(HnswNode {
+            record_id: ulid::Ulid::from_bytes(record_id_bytes),
+            vec_page,
+            vec_slot,
+            layers,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Little-endian field helpers (bounds-checked; no panics, no raw memcpy)
 // ---------------------------------------------------------------------------
 
@@ -638,5 +1022,212 @@ mod tests {
         let mut bad = image.clone();
         bad[0] ^= 1;
         assert_eq!(WalFrameHeader::decode(&enc, &bad, 111), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Vector pages
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn vector_page_push_get_roundtrip_and_fills() {
+        const DIMS: u16 = 384;
+        let page_size = DEFAULT_PAGE_SIZE;
+        let mut page = vec![0u8; page_size as usize];
+        init_vector_page(&mut page);
+        let cap = vector_slots_per_page(page_size, DIMS);
+        assert!(cap > 0);
+
+        let v0: Vec<f32> = (0..DIMS).map(|i| i as f32 * 0.001).collect();
+        let slot0 = vector_page_push(&mut page, DIMS, &v0).unwrap().unwrap();
+        assert_eq!(slot0, 0);
+        assert_eq!(vector_page_get(&page, DIMS, slot0, 1).unwrap(), v0);
+
+        let v1: Vec<f32> = (0..DIMS).map(|i| -(i as f32)).collect();
+        let slot1 = vector_page_push(&mut page, DIMS, &v1).unwrap().unwrap();
+        assert_eq!(slot1, 1);
+        assert_eq!(vector_page_get(&page, DIMS, slot1, 1).unwrap(), v1);
+        // First vector still intact after the second push.
+        assert_eq!(vector_page_get(&page, DIMS, slot0, 1).unwrap(), v0);
+
+        // Fill to capacity, then the next push reports "full" (None), not an error.
+        let mut fresh = vec![0u8; page_size as usize];
+        init_vector_page(&mut fresh);
+        let filler = vec![1.0f32; DIMS as usize];
+        for _ in 0..cap {
+            assert!(
+                vector_page_push(&mut fresh, DIMS, &filler)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(vector_page_push(&mut fresh, DIMS, &filler).unwrap(), None);
+    }
+
+    #[test]
+    fn vector_page_rejects_wrong_dims_and_bad_page() {
+        const DIMS: u16 = 8;
+        let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
+        init_vector_page(&mut page);
+        assert!(matches!(
+            vector_page_push(&mut page, DIMS, &[0.0; 4]),
+            Err(Error::InvalidArgument(_))
+        ));
+        let mut not_vector = vec![0u8; DEFAULT_PAGE_SIZE as usize];
+        PageHeader {
+            page_type: PageType::BtreeLeaf,
+            entry_count: 0,
+            next_page: 0,
+        }
+        .encode_into(&mut not_vector);
+        assert!(matches!(
+            vector_page_push(&mut not_vector, DIMS, &[0.0; 8]),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            vector_page_get(&not_vector, DIMS, 0, 9),
+            Err(Error::MalformedPage { page_no: 9, .. })
+        ));
+    }
+
+    // -----------------------------------------------------------------
+    // HNSW pages
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn hnsw_meta_roundtrip() {
+        let meta = HnswMeta {
+            m: 16,
+            ef_construction: 200,
+            max_layer: 3,
+            entry_point_page: 42,
+            node_count: 100_000,
+        };
+        let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
+        meta.encode(&mut page).unwrap();
+        assert_eq!(HnswMeta::decode(&page, 7).unwrap(), meta);
+    }
+
+    #[test]
+    fn hnsw_meta_empty_roundtrip() {
+        let meta = HnswMeta::new();
+        let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
+        meta.encode(&mut page).unwrap();
+        assert_eq!(HnswMeta::decode(&page, 0).unwrap(), meta);
+    }
+
+    #[test]
+    fn hnsw_meta_rejects_inconsistent_state() {
+        // node_count > 0 without an entry point: invalid to encode…
+        let mut meta = HnswMeta::new();
+        meta.node_count = 5;
+        let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
+        assert!(matches!(
+            meta.encode(&mut page),
+            Err(Error::InvalidArgument(_))
+        ));
+
+        // …and malformed to decode (tampered on-disk bytes).
+        let valid = HnswMeta {
+            m: 16,
+            ef_construction: 200,
+            max_layer: 0,
+            entry_point_page: 9,
+            node_count: 1,
+        };
+        valid.encode(&mut page).unwrap();
+        write_u64(&mut page, PAGE_HEADER_LEN + 5, 0); // zero the entry_point_page
+        stamp_page_checksum(&mut page);
+        assert!(matches!(
+            HnswMeta::decode(&page, 3),
+            Err(Error::MalformedPage { page_no: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn hnsw_node_roundtrip_multi_layer() {
+        let node = HnswNode {
+            record_id: ulid::Ulid::from_parts(1_700_000_000_000, 7),
+            vec_page: 5,
+            vec_slot: 3,
+            layers: vec![vec![1, 2, 3, 4], vec![5, 6], vec![7]],
+        };
+        let page = node.encode(DEFAULT_PAGE_SIZE).unwrap();
+        assert_eq!(HnswNode::decode(&page, 1).unwrap(), node);
+    }
+
+    #[test]
+    fn hnsw_node_roundtrip_no_neighbors() {
+        let node = HnswNode {
+            record_id: ulid::Ulid::from_parts(0, 0),
+            vec_page: 1,
+            vec_slot: 0,
+            layers: vec![vec![]],
+        };
+        let page = node.encode(DEFAULT_PAGE_SIZE).unwrap();
+        assert_eq!(HnswNode::decode(&page, 1).unwrap(), node);
+    }
+
+    #[test]
+    fn hnsw_node_rejects_when_too_large_for_page() {
+        let node = HnswNode {
+            record_id: ulid::Ulid::from_parts(0, 0),
+            vec_page: 1,
+            vec_slot: 0,
+            layers: vec![(1..=2000u64).collect()],
+        };
+        assert_eq!(node.encode(MIN_PAGE_SIZE), None);
+    }
+
+    #[test]
+    fn max_hnsw_level_guarantees_full_nodes_fit() {
+        for page_size in [MIN_PAGE_SIZE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE] {
+            for m in [4u16, 16, 48] {
+                let Some(level) = max_hnsw_level(page_size, m) else {
+                    // Combination cannot host an index (e.g. M=48 at 512 B):
+                    // reported, not guessed at.
+                    assert_eq!((page_size, m), (MIN_PAGE_SIZE, 48));
+                    continue;
+                };
+                // Build a node with every layer at its cap; it must encode.
+                let mut layers: Vec<Vec<u64>> = vec![(1..=u64::from(m) * 2).collect()];
+                for _ in 0..level {
+                    layers.push((1..=u64::from(m)).collect());
+                }
+                let node = HnswNode {
+                    record_id: ulid::Ulid::from_parts(1, 1),
+                    vec_page: 1,
+                    vec_slot: 0,
+                    layers,
+                };
+                assert!(
+                    node.encode(page_size).is_some(),
+                    "full node at page_size {page_size}, m {m}, level {level} must fit"
+                );
+            }
+        }
+        // Default configuration leaves ample headroom (levels beyond ~10 are
+        // astronomically unlikely with mL = 1/ln(16)).
+        assert!(max_hnsw_level(DEFAULT_PAGE_SIZE, HNSW_DEFAULT_M).unwrap() >= 16);
+    }
+
+    #[test]
+    fn hnsw_page_decode_never_panics_on_arbitrary_bytes() {
+        let mut state = 0xA5A5A5A5A5A5A5A5u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..2000 {
+            let len = [64usize, 512, 4096][(next() % 3) as usize];
+            let mut buf = vec![0u8; len];
+            for b in &mut buf {
+                *b = next() as u8;
+            }
+            let _ = HnswMeta::decode(&buf, 1);
+            let _ = HnswNode::decode(&buf, 1);
+            let _ = vector_page_get(&buf, 384, (next() % 8) as u16, 1);
+        }
     }
 }

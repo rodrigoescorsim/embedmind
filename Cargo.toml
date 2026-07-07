@@ -22,6 +22,13 @@ thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 ulid = "1"
+# Embeddings (DESIGN.md §10 — the two heaviest deps, isolated behind
+# `embed::Embedder`, workspace-pinned so both crate and any future bindings
+# stay in lockstep). `ort` default features include `download-binaries`,
+# fetching the ONNX Runtime shared library at build time — no system install
+# required, keeping the "one command" promise (ROADMAP 1.6).
+ort = "2.0.0-rc.12"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 # The engine forbids unsafe code; the only future exception (an isolated mmap
 # module, if ever) must opt out explicitly and be auditable. See CONTRIBUTING.md.

@@ -165,10 +165,29 @@ B-tree delete operation in v1.
 
 ## 7. HNSW index pages
 
-- **HNSW_META** (one page): `M` (u16), `ef_construction` (u16), `max_layer` (u8), `entry_point_node` (u32), `node_count` (u32), plus a length-prefixed table mapping `node_id: u32 → (page_no, slot)`. If the table outgrows the page, it chains via `next_page`.
-- **HNSW_NODE** pages hold nodes: `node_id` (u32), `record_id` (ULID, 16 bytes), `layer_count` (u8), then per layer a `u16` neighbor count + neighbor `node_id: u32` array.
-- Node adjacency is bounded (`≤ M` per layer, `≤ M×2` at layer 0), so node size is statically bounded and nodes never overflow.
+The graph uses **direct page addressing** (ADR 0008): adjacency lists hold HNSW_NODE
+*page numbers*, not logical node ids. There is no id-to-page location table — nothing
+in the index grows with node count except the node pages themselves, so the meta page
+is fixed-size forever, an insert touches O(M) pages regardless of index size, and one
+traversal hop costs one page read.
+
+- **HNSW_META** (exactly one page, fixed size): after the common header
+  (`entry_count` reserved/zero, `next_page` = 0): `M` (u16) · `ef_construction` (u16) ·
+  `max_layer` (u8) · `entry_point_page` (u64, page of the entry-point node; must be
+  non-zero iff `node_count > 0`) · `node_count` (u64).
+- **HNSW_NODE** pages hold one node each: after the common header (`entry_count`
+  reserved/zero): `record_id` (ULID, 16 bytes) · `vec_page: u64` + `vec_slot: u16`
+  (the node's embedding location, duplicated from the record's `vec_ref` so search
+  reads one page per candidate instead of a B-tree lookup per hop) · `layer_count`
+  (u8) · then per layer a `u16` neighbor count + neighbor `page_no: u64` array.
+  Neighbor page numbers are never 0 (page 0 is the header).
+- Node adjacency is bounded (`≤ M` per layer, `≤ M×2` at layer 0) and a node's level
+  is clamped so a **full** node always fits one page (`max_hnsw_level(page_size, M)`);
+  nodes never overflow. A `(page_size, M)` combination whose full layer-0 node cannot
+  fit one page is invalid and refused.
 - Graph mutations during insert are ordinary page writes: touched HNSW pages enter the WAL like any other page (§8). No separate index journal.
+- Because adjacency references pages directly, any operation that relocates node pages
+  (`embedmind vacuum`) rebuilds the index — which vacuum does anyway (§5, ADR 0003).
 
 ## 8. WAL sidecar (`.mind-wal`)
 

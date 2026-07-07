@@ -117,10 +117,11 @@ MemoryRecord {
 **[DECIDIDO] HNSW próprio, persistido em páginas — não biblioteca externa in-memory.** Justificativa: as libs prontas (hnsw_rs, usearch) assumem grafo em RAM e serialização monolítica; a promessa do produto é abrir arquivo de 1 GB sem carregar tudo. O HNSW é ~800 linhas bem testáveis; é exatamente a barreira técnica que É o moat — não terceirizar o moat.
 
 - Parâmetros default: `M=16`, `ef_construction=200`, `ef_search=64` (ajustável por query). Distância: coseno (vetores normalizados na inserção → produto interno).
-- **Layout:** nós do grafo em páginas próprias; vizinhanças como arrays de u32 (node id → page offset via tabela). Camadas superiores (pequenas) podem residir integralmente em cache.
+- **Layout — endereçamento direto de páginas (ADR 0008):** nós do grafo em páginas próprias; vizinhanças como arrays de `page_no: u64` apontando direto para as páginas dos vizinhos — **sem tabela node_id → página**. A meta page tem tamanho fixo para sempre; insert toca O(M) páginas independentemente do tamanho do índice; um hop de busca = uma leitura de página. Camadas superiores (pequenas) podem residir integralmente em cache (otimização futura).
+- **Seleção de vizinhos com heurística de diversidade** (Algoritmo 4 do paper HNSW, como hnswlib/faiss), com `keepPrunedConnections` — recall melhor em dados clusterizados (embeddings de texto) sem custo de formato.
 - **Inserção incremental** dentro da transação (as páginas tocadas do grafo entram no WAL como quaisquer outras).
 - **Vetores:** f32 no v0.1; **[ABERTO]** quantização i8 (SQ) como opção de build do índice no M3 — 4× menos espaço, perda de recall ~1–2%, decidir com o harness de benchmark.
-- Tombstones filtrados na busca (`ef_search` aumenta adaptativamente se a taxa de tombstone > 20%, até o vacuum).
+- Tombstones filtrados na busca; se o filtro deixar o resultado incompleto, `ef_search` cresce adaptativamente (×4 por rodada, teto = node_count) até preencher ou esgotar o grafo — degrada rumo a scan honesto até o vacuum, nunca sub-retorna em silêncio.
 
 ## 6. Embeddings
 
@@ -169,7 +170,7 @@ Sem tokio na engine (I/O síncrono; o servidor MCP stdio não precisa de async �
 
 ## 11. Decisões registradas (mini-ADRs)
 
-> Versões completas (contexto, alternativas, consequências) em [docs/adr/](docs/adr/README.md) — um arquivo por decisão. Questões do §12, quando resolvidas, viram ADRs novos (0008+). A tabela abaixo é o resumo.
+> Versões completas (contexto, alternativas, consequências) em [docs/adr/](docs/adr/README.md) — um arquivo por decisão. Questões do §12, quando resolvidas, viram ADRs novos (0009+). A tabela abaixo é o resumo.
 
 | # | Decisão | Alternativa rejeitada | Por quê |
 |---|---|---|---|
@@ -180,6 +181,7 @@ Sem tokio na engine (I/O síncrono; o servidor MCP stdio não precisa de async �
 | 5 | RRF para fusão híbrida | pesos aprendidos/calibrados | zero tuning, explicável, bom o suficiente |
 | 6 | Single-writer | MVCC | um agente/usuário por arquivo é o caso real |
 | 7 | Criptografia reservada no formato, não implementada | implementar já | formato não quebra depois; feature é premium |
+| 8 | HNSW com endereçamento direto de páginas (sem tabela de localização) | tabela node_id→página na meta (encadeada) | meta O(1) para sempre; insert O(M); sem teto de nós |
 
 ## 12. Questões em aberto (resolver no M1, com default)
 

@@ -6,7 +6,7 @@ conforme convenção do [CLAUDE.md](../../CLAUDE.md).
 
 O [DESIGN.md](../DESIGN.md) §11 mantém a tabela-resumo; a versão completa de cada decisão
 vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvidas
-(próximos números: 0008+).
+(próximos números: 0009+).
 
 | # | Decisão | Status |
 |---|---|---|
@@ -17,5 +17,6 @@ vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvi
 | [0005](0005-rrf-para-fusao-hibrida.md) | RRF para fusão híbrida de scores | Aceito |
 | [0006](0006-single-writer.md) | Single-writer / multi-reader, sem MVCC | Aceito |
 | [0007](0007-criptografia-reservada-no-formato.md) | Criptografia reservada no formato, não implementada | Aceito |
+| [0008](0008-hnsw-enderecamento-direto-de-paginas.md) | HNSW com endereçamento direto de páginas (sem tabela de localização) | Aceito |
 
 Template: `Status · Contexto · Decisão · Alternativas rejeitadas · Consequências`.

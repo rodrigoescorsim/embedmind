@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::format::{
-    DEFAULT_PAGE_SIZE, HEADER_PEEK_LEN, Header, page_checksum_is_valid, stamp_page_checksum,
+    DEFAULT_PAGE_SIZE, HEADER_PEEK_LEN, Header, MAX_MODEL_ID_LEN, page_checksum_is_valid,
+    stamp_page_checksum,
 };
 use crate::storage::vfs::{OpenMode, Vfs, VfsFile};
 use crate::storage::wal::{self, Wal};
@@ -190,6 +191,8 @@ impl Pager {
             dirty: BTreeMap::new(),
             page_count,
             root_btree: None,
+            hnsw_meta: None,
+            embedding: None,
         })
     }
 
@@ -257,9 +260,15 @@ impl Pager {
         dirty: BTreeMap<u64, Vec<u8>>,
         new_page_count: u64,
         new_root_btree: Option<u64>,
+        new_hnsw_meta: Option<u64>,
+        new_embedding: Option<(String, u16)>,
     ) -> Result<u64> {
         self.ensure_usable()?;
-        if dirty.is_empty() && new_page_count == self.header.page_count && new_root_btree.is_none()
+        if dirty.is_empty()
+            && new_page_count == self.header.page_count
+            && new_root_btree.is_none()
+            && new_hnsw_meta.is_none()
+            && new_embedding.is_none()
         {
             return Ok(self.header.txn_counter); // empty transaction: no-op
         }
@@ -268,6 +277,13 @@ impl Pager {
         new_header.page_count = new_page_count;
         if let Some(root) = new_root_btree {
             new_header.root_btree_page = root;
+        }
+        if let Some(hnsw_meta) = new_hnsw_meta {
+            new_header.hnsw_meta_page = hnsw_meta;
+        }
+        if let Some((model_id, dims)) = new_embedding {
+            new_header.embedding_model_id = model_id;
+            new_header.embedding_dims = dims;
         }
         new_header.txn_counter += 1;
         let txn_id = new_header.txn_counter;
@@ -314,6 +330,13 @@ pub struct Txn<'p> {
     /// Pending B-tree root move; applied to the header atomically with the
     /// commit frame (the root pointer lives in page 0).
     root_btree: Option<u64>,
+    /// Pending HNSW meta page move; applied to the header atomically with the
+    /// commit frame, same as `root_btree`.
+    hnsw_meta: Option<u64>,
+    /// Pending embedding model id + dims stamp (set once on a fresh store,
+    /// `docs/adr/0004`); applied to the header atomically with the commit
+    /// frame, discarded on rollback.
+    embedding: Option<(String, u16)>,
 }
 
 impl Txn<'_> {
@@ -394,6 +417,32 @@ impl Txn<'_> {
         self.root_btree = Some(page_no);
     }
 
+    /// HNSW meta page as seen by this transaction (its own pending move
+    /// included); 0 = no vector index yet.
+    pub fn hnsw_meta_page(&self) -> u64 {
+        self.hnsw_meta.unwrap_or(self.pager.header.hnsw_meta_page)
+    }
+
+    /// Moves the HNSW meta page pointer. Becomes durable with the commit
+    /// frame; discarded on rollback like any other buffered write.
+    pub fn set_hnsw_meta_page(&mut self, page_no: u64) {
+        self.hnsw_meta = Some(page_no);
+    }
+
+    /// Stamps the header's embedding `model_id` + `dims` — done once against a
+    /// fresh store so that mixing embeddings from different models in one file
+    /// is impossible (`docs/adr/0004`, `docs/FORMAT.md` §6). Becomes durable
+    /// with the commit frame; discarded on rollback.
+    pub fn set_embedding_model(&mut self, model_id: &str, dims: u16) -> Result<()> {
+        if model_id.len() > MAX_MODEL_ID_LEN {
+            return Err(Error::InvalidArgument(
+                "embedding_model_id exceeds 64 bytes",
+            ));
+        }
+        self.embedding = Some((model_id.to_owned(), dims));
+        Ok(())
+    }
+
     /// Commits: appends all dirty pages + the updated header to the WAL and
     /// fsyncs. Returns the transaction id. Durable iff `Ok` (guarantee G2).
     pub fn commit(self) -> Result<u64> {
@@ -402,8 +451,10 @@ impl Txn<'_> {
             dirty,
             page_count,
             root_btree,
+            hnsw_meta,
+            embedding,
         } = self;
-        pager.commit_txn(dirty, page_count, root_btree)
+        pager.commit_txn(dirty, page_count, root_btree, hnsw_meta, embedding)
     }
 }
 
@@ -665,5 +716,29 @@ mod tests {
         let txn = pager.begin().unwrap();
         assert_eq!(txn.commit().unwrap(), 0);
         assert_eq!(pager.header().txn_counter, 0);
+    }
+
+    #[test]
+    fn hnsw_meta_move_commits_rolls_back_and_survives_reopen() {
+        let (vfs, _) = sim();
+        let mut pager = Pager::create(Arc::clone(&vfs), path(), opts()).unwrap();
+        let mut txn = pager.begin().unwrap();
+        let p = txn.allocate_page().unwrap();
+        txn.write_page(p, &filled(2)).unwrap();
+        assert_eq!(txn.hnsw_meta_page(), 0);
+        txn.set_hnsw_meta_page(p);
+        assert_eq!(txn.hnsw_meta_page(), p);
+        txn.commit().unwrap();
+        assert_eq!(pager.header().hnsw_meta_page, p);
+
+        // Rollback discards a pending hnsw_meta move.
+        let mut txn = pager.begin().unwrap();
+        txn.set_hnsw_meta_page(0);
+        drop(txn);
+        assert_eq!(pager.header().hnsw_meta_page, p);
+
+        drop(pager); // reopen via WAL recovery
+        let pager = Pager::open(vfs, path(), opts()).unwrap();
+        assert_eq!(pager.header().hnsw_meta_page, p);
     }
 }

@@ -1,32 +1,43 @@
-//! Public API of the engine: [`Store`], [`Memory`], [`MemoryDraft`].
+//! Public API of the engine: [`Store`], [`Memory`], [`MemoryDraft`], [`Query`].
 //!
 //! This is the only module the shells (`embedmind-mcp`, `embedmind-cli`) and
 //! future bindings are allowed to depend on. Data model: `DESIGN.md` §3.2.
 //!
 //! M1 item 1.2 scope: durable KV over the record B-tree — `remember`, `get`,
-//! `forget` (tombstone, `docs/adr/0003`), timeline iteration. Vector recall
-//! (`Query`) arrives with the index layer (item 1.3) as a non-breaking
-//! addition.
+//! `forget` (tombstone, `docs/adr/0003`), timeline iteration. M1 item 1.3
+//! adds vector recall: when a [`Store`] has an [`Embedder`], `remember`
+//! embeds the content and indexes it (`index::insert`); [`Store::recall`]
+//! runs a nearest-neighbor search (`index::search`) filtered to live,
+//! in-scope memories. A `Store` without an embedder behaves exactly as
+//! before — vector recall is a non-breaking addition, not a requirement.
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use ulid::Ulid;
 
+use crate::embed::{Embedder, OnnxEmbedder};
 use crate::error::{Error, Result};
-use crate::record::{MemoryRecord, Provenance, Scalar};
+use crate::index::{self, SearchParams};
+use crate::record::{MemoryRecord, Provenance, Scalar, VecRef};
 use crate::storage::btree;
 use crate::storage::{Pager, PagerOptions, RealVfs, Vfs};
 
 /// Store tuning knobs. The defaults are right for almost everyone.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct StoreOptions {
     /// Page size for newly created files (existing files use the size
     /// recorded in their header).
     pub page_size: u32,
     /// WAL size, in bytes, at which a commit triggers a checkpoint.
     pub checkpoint_threshold: u64,
+    /// Embedder used to index `remember`ed content for vector recall.
+    /// `None` = KV-only store (no embedding, no indexing, no `recall`) —
+    /// what the crash harness, fuzzers and KV-focused tests want, since
+    /// loading a real model costs real time. [`Store::create`]/[`Store::open`]
+    /// default this to the embedded ONNX model; use `*_with` to opt out.
+    pub embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl Default for StoreOptions {
@@ -35,12 +46,13 @@ impl Default for StoreOptions {
         StoreOptions {
             page_size: p.page_size,
             checkpoint_threshold: p.checkpoint_threshold,
+            embedder: None,
         }
     }
 }
 
 impl StoreOptions {
-    fn pager(self) -> PagerOptions {
+    fn pager(&self) -> PagerOptions {
         PagerOptions {
             page_size: self.page_size,
             checkpoint_threshold: self.checkpoint_threshold,
@@ -48,55 +60,123 @@ impl StoreOptions {
     }
 }
 
+/// Lazily-initialized process-wide default embedder, shared across every
+/// [`Store::create`]/[`Store::open`] call so opening several stores (or
+/// reopening one) does not reinitialize the ONNX Runtime session each time.
+fn default_embedder() -> Result<Arc<dyn Embedder>> {
+    static DEFAULT: OnceLock<std::result::Result<Arc<dyn Embedder>, String>> = OnceLock::new();
+    DEFAULT
+        .get_or_init(|| {
+            OnnxEmbedder::load()
+                .map(|e| Arc::new(e) as Arc<dyn Embedder>)
+                .map_err(|e| e.to_string())
+        })
+        .clone()
+        .map_err(|msg| Error::Internal(Box::leak(msg.into_boxed_str())))
+}
+
 /// A memory store: one crash-safe `.mind` file. Single writer per file
 /// (`docs/adr/0006`); every mutating call is one durable transaction —
 /// when it returns `Ok`, the data survives `kill -9` and power loss.
 pub struct Store {
     pager: Pager,
+    embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl Store {
-    /// Creates a new store at `path`. Fails if the file exists.
+    /// Creates a new store at `path`, with vector recall enabled via the
+    /// default embedded ONNX model. Fails if the file exists.
     pub fn create(path: &Path) -> Result<Store> {
-        Self::create_with(Arc::new(RealVfs), path, StoreOptions::default())
+        let opts = StoreOptions {
+            embedder: Some(default_embedder()?),
+            ..StoreOptions::default()
+        };
+        Self::create_with(Arc::new(RealVfs), path, opts)
     }
 
-    /// Opens an existing store (recovery runs automatically).
+    /// Opens an existing store (recovery runs automatically), with vector
+    /// recall enabled via the default embedded ONNX model.
     pub fn open(path: &Path) -> Result<Store> {
-        Self::open_with(Arc::new(RealVfs), path, StoreOptions::default())
+        let opts = StoreOptions {
+            embedder: Some(default_embedder()?),
+            ..StoreOptions::default()
+        };
+        Self::open_with(Arc::new(RealVfs), path, opts)
     }
 
     /// Opens `path`, creating it first if it does not exist — what the
-    /// shells use on startup.
+    /// shells use on startup. Vector recall enabled via the default
+    /// embedded ONNX model.
     pub fn open_or_create(path: &Path) -> Result<Store> {
         let vfs: Arc<dyn Vfs> = Arc::new(RealVfs);
+        let opts = StoreOptions {
+            embedder: Some(default_embedder()?),
+            ..StoreOptions::default()
+        };
         if vfs.exists(path) {
-            Self::open_with(vfs, path, StoreOptions::default())
+            Self::open_with(vfs, path, opts)
         } else {
-            Self::create_with(vfs, path, StoreOptions::default())
+            Self::create_with(vfs, path, opts)
         }
     }
 
     /// [`Store::create`] with an explicit [`Vfs`] and options — the seam the
-    /// crash harness and fuzzers use; embedders may too.
+    /// crash harness, fuzzers, and tests that don't need embeddings use.
     pub fn create_with(vfs: Arc<dyn Vfs>, path: &Path, opts: StoreOptions) -> Result<Store> {
-        Ok(Store {
-            pager: Pager::create(vfs, path, opts.pager())?,
-        })
+        let embedder = opts.embedder.clone();
+        let pager = Pager::create(vfs, path, opts.pager())?;
+        let mut store = Store { pager, embedder };
+        store.init_embedding_header()?;
+        Ok(store)
     }
 
     /// [`Store::open`] with an explicit [`Vfs`] and options.
     pub fn open_with(vfs: Arc<dyn Vfs>, path: &Path, opts: StoreOptions) -> Result<Store> {
-        Ok(Store {
-            pager: Pager::open(vfs, path, opts.pager())?,
-        })
+        let embedder = opts.embedder.clone();
+        let pager = Pager::open(vfs, path, opts.pager())?;
+        let mut store = Store { pager, embedder };
+        store.init_embedding_header()?;
+        Ok(store)
+    }
+
+    /// Stamps the header's `embedding_dims`/`embedding_model_id` from this
+    /// store's embedder the first time it is used against a fresh file
+    /// (`embedding_dims == 0`), and refuses to open a file whose recorded
+    /// model does not match — mixing embeddings from different models in one
+    /// file is exactly the corruption-by-config-drift `docs/adr/0004` rules
+    /// out. A store with no embedder never touches these fields.
+    fn init_embedding_header(&mut self) -> Result<()> {
+        let Some(embedder) = self.embedder.clone() else {
+            return Ok(());
+        };
+        let header = self.pager.header();
+        // One embedding must fit a VECTOR page (`docs/FORMAT.md` §6): fail
+        // clearly at open time, not with an internal error mid-`remember`.
+        if crate::format::vector_slots_per_page(header.page_size, embedder.dims()) == 0 {
+            return Err(Error::InvalidArgument(
+                "page size too small for this embedder's dimensionality",
+            ));
+        }
+        if header.embedding_dims == 0 && header.embedding_model_id.is_empty() {
+            let mut txn = self.pager.begin()?;
+            txn.set_embedding_model(embedder.id(), embedder.dims())?;
+            txn.commit()?;
+        } else if header.embedding_model_id != embedder.id()
+            || header.embedding_dims != embedder.dims()
+        {
+            return Err(Error::InvalidArgument(
+                "store's embedding model does not match this Embedder; use `embedmind reembed`",
+            ));
+        }
+        Ok(())
     }
 
     /// Stores one memory durably and returns it (with its generated id and
-    /// timestamp). The embedding is attached by the index layer (M1 1.3);
-    /// until then memories are stored without vectors.
+    /// timestamp). If this store has an [`Embedder`], the content is embedded
+    /// and indexed for [`Store::recall`] in the same transaction; otherwise
+    /// the memory is stored without a vector, exactly as in a KV-only store.
     pub fn remember(&mut self, draft: MemoryDraft) -> Result<Memory> {
-        let record = MemoryRecord {
+        let mut record = MemoryRecord {
             id: Ulid::new(),
             tombstone: false,
             content: draft.content,
@@ -109,11 +189,73 @@ impl Store {
             },
             metadata: draft.metadata,
         };
-        let bytes = record.encode()?;
+
         let mut txn = self.pager.begin()?;
+        if let Some(embedder) = &self.embedder {
+            let mut vector = embedder.embed(&record.content)?;
+            index::normalize(&mut vector);
+            let (page_no, slot) = index::insert(&mut txn, embedder.dims(), record.id, &vector)?;
+            record.vec_ref = Some(VecRef { page_no, slot });
+        }
+        let bytes = record.encode()?;
         btree::insert(&mut txn, record.id.to_bytes(), &bytes)?;
         txn.commit()?;
         Ok(Memory::from_record(record))
+    }
+
+    /// Nearest-neighbor search over `remember`ed content. Requires this store
+    /// to have an [`Embedder`] (`StoreOptions::embedder` / [`Store::create`]);
+    /// returns [`Error::InvalidArgument`] otherwise. Tombstoned memories are
+    /// always excluded (`docs/adr/0003`); `query.scope` additionally filters
+    /// by project (DESIGN.md §7).
+    pub fn recall(&self, query: Query) -> Result<Vec<Memory>> {
+        let Some(embedder) = &self.embedder else {
+            return Err(Error::InvalidArgument(
+                "this store has no embedder; recall requires one (see StoreOptions::embedder)",
+            ));
+        };
+        let mut vector = embedder.embed(&query.text)?;
+        index::normalize(&mut vector);
+        let root = self.pager.header().root_btree_page;
+        let hnsw_meta_page = self.pager.header().hnsw_meta_page;
+        let pager = &self.pager;
+        let scope = query.scope.clone();
+        let hits = index::search(
+            &self.pager,
+            hnsw_meta_page,
+            embedder.dims(),
+            &vector,
+            query.limit,
+            SearchParams {
+                ef_search: query.ef_search,
+            },
+            |record_id| {
+                // Re-check liveness/scope against the record itself: the
+                // HNSW graph only stores record ids, never tombstone/project
+                // state, which can change (forget) after a node was indexed.
+                match btree::get(pager, root, &record_id.to_bytes()) {
+                    Ok(Some(bytes)) => match MemoryRecord::decode(&bytes) {
+                        Ok(rec) => {
+                            !rec.tombstone
+                                && match &scope {
+                                    Scope::All => true,
+                                    Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
+                                }
+                        }
+                        Err(_) => false,
+                    },
+                    _ => false,
+                }
+            },
+        )?;
+
+        let mut out = Vec::with_capacity(hits.len());
+        for hit in hits {
+            if let Some(bytes) = btree::get(&self.pager, root, &hit.record_id.to_bytes())? {
+                out.push(Memory::from_record(MemoryRecord::decode(&bytes)?));
+            }
+        }
+        Ok(out)
     }
 
     /// Fetches one memory by id. Tombstoned (forgotten) memories return
@@ -237,6 +379,76 @@ impl MemoryDraft {
     /// Attaches one typed metadata entry (last write per key wins).
     pub fn meta(mut self, key: impl Into<String>, value: Scalar) -> Self {
         self.metadata.insert(key.into(), value);
+        self
+    }
+}
+
+/// How far a [`Store::recall`] looks. Defaults to [`Scope::All`]; the MCP
+/// shell narrows it to the current project (DESIGN.md §7) while keeping the
+/// explicit global fallback available.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// Every memory in the store, regardless of project.
+    #[default]
+    All,
+    /// Only memories scoped to this exact project.
+    Project(String),
+}
+
+/// Default number of hits [`Store::recall`] returns when the caller does not
+/// set [`Query::limit`] (DESIGN.md §8).
+pub const DEFAULT_RECALL_LIMIT: usize = 8;
+
+/// A nearest-neighbor recall request. Build with [`Query::new`] plus the
+/// chainable setters; the defaults (limit 8, all projects, the index's
+/// default `ef_search`) match DESIGN.md §8.
+#[derive(Debug, Clone)]
+pub struct Query {
+    /// The text embedded and searched for.
+    text: String,
+    /// Maximum hits to return.
+    limit: usize,
+    /// Project filter.
+    scope: Scope,
+    /// HNSW candidate list size at layer 0 (`docs/adr/0002`): higher trades
+    /// latency for recall.
+    ef_search: u16,
+}
+
+impl Query {
+    /// A query for `text` at the defaults (limit 8, [`Scope::All`], default
+    /// `ef_search`).
+    pub fn new(text: impl Into<String>) -> Self {
+        Query {
+            text: text.into(),
+            limit: DEFAULT_RECALL_LIMIT,
+            scope: Scope::All,
+            ef_search: crate::format::HNSW_DEFAULT_EF_SEARCH,
+        }
+    }
+
+    /// Caps the number of hits returned.
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    /// Restricts the search to a scope (see [`Scope`]).
+    pub fn scope(mut self, scope: Scope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// Convenience for `scope(Scope::Project(project))`.
+    pub fn project(mut self, project: impl Into<String>) -> Self {
+        self.scope = Scope::Project(project.into());
+        self
+    }
+
+    /// Overrides the HNSW `ef_search` for this query (default
+    /// [`crate::format::HNSW_DEFAULT_EF_SEARCH`]).
+    pub fn ef_search(mut self, ef_search: u16) -> Self {
+        self.ef_search = ef_search;
         self
     }
 }

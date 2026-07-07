@@ -31,9 +31,13 @@ const STORE: &str = "memory.mind";
 /// Small pages: leaf splits and overflow chains happen within a short
 /// workload, so the sweep stays fast (it runs on every PR).
 fn options() -> StoreOptions {
+    // No embedder: this sweep exercises the record B-tree + WAL, and loading
+    // a real ONNX model per crash iteration would make it far too slow. Vector
+    // recall is covered by its own integration test (`recall.rs`).
     StoreOptions {
         page_size: 512,
         checkpoint_threshold: 16 * 1024,
+        ..StoreOptions::default()
     }
 }
 
