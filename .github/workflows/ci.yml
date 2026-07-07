@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nightly long fuzz pass (docs/TESTING.md §3): 1h per target.
+    - cron: "0 3 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,6 +14,7 @@ env:
 jobs:
   test:
     name: test (${{ matrix.os }})
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -30,10 +34,44 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
-  # The crash harness (fault-injection sweep, docs/TESTING.md §2) runs as part
-  # of `cargo test` above, on every platform in the matrix — including Windows,
-  # which is first-class, not a port.
+  # The crash harnesses (pager-level `crash.rs` + record-level
+  # `crash_records.rs`, docs/TESTING.md §2) run inside `cargo test` above on
+  # every platform in the matrix — including Windows, which is first-class.
   #
-  # Remaining placeholders for M1 item 1.8:
-  #   - cargo-fuzz short pass (Linux) — targets from docs/TESTING.md §3
+  # The fuzz bodies also run a stable smoke pass inside `cargo test`
+  # (embedmind-core::fuzz); the job below runs the same bodies
+  # coverage-guided with libFuzzer.
+  fuzz:
+    name: fuzz (${{ github.event_name == 'schedule' && 'nightly, 1h/target' || 'short pass' }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Restore accumulated corpus
+        # The seed corpus is committed; coverage-driven additions accumulate
+        # across runs through this cache (docs/TESTING.md §3).
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Fuzz all targets
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then per_target=3600; else per_target=120; fi
+          for target in fuzz_header fuzz_page fuzz_record fuzz_wal_replay fuzz_open_full; do
+            cargo fuzz run "$target" -- -max_total_time="$per_target" -rss_limit_mb=4096
+          done
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
+  # Remaining placeholder for M1 item 1.8/1.7:
   #   - benchmark regression guard (see docs/BENCHMARKS.md §5)

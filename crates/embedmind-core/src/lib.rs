@@ -27,6 +27,9 @@ pub mod recall;
 pub mod record;
 pub mod storage;
 
+#[doc(hidden)]
+pub mod fuzz;
+
 pub use api::{Memory, MemoryDraft, Store, StoreOptions};
 pub use error::{Error, Result};
 pub use record::Scalar;

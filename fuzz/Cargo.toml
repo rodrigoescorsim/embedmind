@@ -1,0 +1,58 @@
+# cargo-fuzz targets (docs/TESTING.md §3). Each binary is a one-line wrapper
+# around `embedmind_core::fuzz::*`, so the fuzzed code also compiles and
+# smoke-tests on stable on every platform. Run on Linux with:
+#   cargo +nightly fuzz run <target>
+
+[package]
+name = "embedmind-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+embedmind-core = { path = "../crates/embedmind-core" }
+
+[[bin]]
+name = "fuzz_header"
+path = "fuzz_targets/fuzz_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_page"
+path = "fuzz_targets/fuzz_page.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_record"
+path = "fuzz_targets/fuzz_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_wal_replay"
+path = "fuzz_targets/fuzz_wal_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_open_full"
+path = "fuzz_targets/fuzz_open_full.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+
+[workspace]
+members = ["."]
