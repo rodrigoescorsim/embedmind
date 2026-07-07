@@ -368,6 +368,8 @@ version = "0.1.0-dev"
 dependencies = [
  "clap",
  "embedmind-core",
+ "embedmind-mcp",
+ "serde_json",
 ]
 
 [[package]]

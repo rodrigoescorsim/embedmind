@@ -256,6 +256,13 @@ pub fn search(
     }
 }
 
+/// Number of entries in the HNSW graph — one per indexed chunk, so a chunked
+/// memory (DESIGN §6) counts once per chunk. 0 when no index exists yet.
+/// Feeds `Store::stats` (`embedmind stats`).
+pub fn node_count(src: &dyn PageSource, hnsw_meta_page: u64) -> Result<u64> {
+    Ok(load_meta(src, hnsw_meta_page)?.map_or(0, |meta| meta.node_count))
+}
+
 // ---------------------------------------------------------------------------
 // Per-operation read cache
 // ---------------------------------------------------------------------------

@@ -1,0 +1,214 @@
+//! End-to-end tests of the `embedmind` binary (M1 item 1.6): the README
+//! quickstart flow, driven through real processes against a real file —
+//! exactly what a user gets after `cargo install embedmind`.
+//!
+//! Each invocation loads the embedded ONNX model, so the flow is packed
+//! into few processes. The working directory is a scratch dir with no
+//! project markers, keeping project auto-detection out of the picture
+//! except where a test creates markers on purpose.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// Scratch directory (unique per test) under the system temp dir, removed
+/// on drop. Also serves as a marker-free cwd for the spawned processes.
+struct Scratch(PathBuf);
+impl Scratch {
+    fn new(tag: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("embedmind-cli-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+    fn store(&self) -> PathBuf {
+        self.0.join("memory.mind")
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Runs `embedmind` with `args`, cwd at `dir`. Returns (exit ok, stdout,
+/// stderr).
+fn run(dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_embedmind"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("binary must spawn");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn quickstart_flow_remember_recall_forget_stats() {
+    let scratch = Scratch::new("flow");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    // remember (global: scratch dir has no project markers)
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "remember",
+            "we decided to use tokio for async, see ADR-003",
+        ],
+    );
+    assert!(ok, "remember failed: {stderr}");
+    assert!(stdout.contains("(global)"), "no project context: {stdout}");
+    let id = stdout.split_whitespace().next().unwrap().to_string();
+    assert_eq!(id.len(), 26, "first token must be the ULID: {stdout}");
+
+    // recall finds it, with score and id
+    let (ok, stdout, stderr) = run(scratch.path(), &["--file", file, "recall", "why tokio?"]);
+    assert!(ok, "recall failed: {stderr}");
+    assert!(stdout.contains(&id), "hit must show the id: {stdout}");
+    assert!(stdout.contains("tokio for async"), "hit must show content");
+    assert!(
+        stderr.contains("searching all projects"),
+        "scope echoed: {stderr}"
+    );
+
+    // stats reflects one live memory and the embedded model
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "stats"]);
+    assert!(ok);
+    assert!(stdout.contains("live memories:      1"), "{stdout}");
+    assert!(stdout.contains("all-MiniLM-L6-v2-int8"), "{stdout}");
+
+    // forget, then recall no longer returns it
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "forget", &id]);
+    assert!(ok);
+    assert!(stdout.contains("forgotten"));
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "recall", "why tokio?"]);
+    assert!(ok);
+    assert!(!stdout.contains(&id), "forgotten memory must not appear");
+
+    // forgetting again is a clear error, not silence
+    let (ok, _, stderr) = run(scratch.path(), &["--file", file, "forget", &id]);
+    assert!(!ok);
+    assert!(stderr.contains("no live memory"), "{stderr}");
+
+    // stats now shows the tombstone
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "stats"]);
+    assert!(ok);
+    assert!(stdout.contains("live memories:      0"), "{stdout}");
+    assert!(stdout.contains("forgotten:          1"), "{stdout}");
+}
+
+#[test]
+fn project_detection_scopes_cli_remember_and_recall() {
+    let scratch = Scratch::new("proj");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    // A fake repo root: directory name is the project.
+    let repo = scratch.path().join("myproj");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+
+    let (ok, stdout, stderr) = run(&repo, &["--file", file, "remember", "note inside the repo"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("(project: myproj)"), "{stdout}");
+
+    // From inside the repo: scoped by default.
+    let (ok, _, stderr) = run(&repo, &["--file", file, "recall", "note"]);
+    assert!(ok);
+    assert!(stderr.contains("searching project: myproj"), "{stderr}");
+
+    // From outside with --all: still findable.
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "recall", "note", "--all"]);
+    assert!(ok);
+    assert!(stdout.contains("note inside the repo"), "{stdout}");
+
+    // --global overrides detection.
+    let (ok, stdout, _) = run(
+        &repo,
+        &["--file", file, "remember", "global note", "--global"],
+    );
+    assert!(ok);
+    assert!(stdout.contains("(global)"), "{stdout}");
+}
+
+#[test]
+fn vacuum_is_a_clear_not_implemented_error() {
+    let scratch = Scratch::new("vacuum");
+    let store = scratch.store();
+    let (ok, _, stderr) = run(
+        scratch.path(),
+        &["--file", store.to_str().unwrap(), "vacuum"],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("not implemented"), "{stderr}");
+}
+
+/// `embedmind serve` speaks MCP over stdio — the exact integration the
+/// README promises (`claude mcp add embedmind -- embedmind serve`).
+#[test]
+fn serve_speaks_mcp_over_stdio() {
+    let scratch = Scratch::new("serve");
+    let store = scratch.store();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_embedmind"))
+        .args(["--file", store.to_str().unwrap(), "serve"])
+        .current_dir(scratch.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("serve must spawn");
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin
+            .write_all(
+                concat!(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-test","version":"0"}}}"#,
+                    "\n",
+                    r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"remember","arguments":{"content":"memory via mcp serve"}}}"#,
+                    "\n",
+                    r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recall","arguments":{"query":"memory via serve","scope":"all"}}}"#,
+                    "\n",
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+    drop(child.stdin.take()); // EOF ends the serve loop cleanly
+
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "serve must exit 0 on EOF: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let responses: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0]["result"]["serverInfo"]["name"], "embedmind");
+    let id = responses[1]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap();
+    let hits = responses[2]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h["id"] == id),
+        "served memory must be recallable"
+    );
+}

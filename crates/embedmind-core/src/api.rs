@@ -322,6 +322,33 @@ impl Store {
         }
     }
 
+    /// Counts and sizes for `embedmind stats` (README quickstart). Walks the
+    /// whole record tree — O(N), fine for a diagnostics command, not meant
+    /// for hot paths.
+    pub fn stats(&self) -> Result<StoreStats> {
+        let mut live_memories = 0u64;
+        let mut forgotten_memories = 0u64;
+        for memory in self.iter_all() {
+            if memory?.tombstone {
+                forgotten_memories += 1;
+            } else {
+                live_memories += 1;
+            }
+        }
+        let header = self.pager.header();
+        Ok(StoreStats {
+            live_memories,
+            forgotten_memories,
+            index_entries: index::node_count(&self.pager, header.hnsw_meta_page)?,
+            page_size: header.page_size,
+            page_count: header.page_count,
+            file_bytes: u64::from(header.page_size) * header.page_count,
+            embedding_model_id: (!header.embedding_model_id.is_empty())
+                .then(|| header.embedding_model_id.clone()),
+            embedding_dims: header.embedding_dims,
+        })
+    }
+
     /// Cleanly closes the store: checkpoint + WAL removal, leaving a single
     /// file on disk. Dropping without closing is safe (recovery handles it);
     /// closing is just tidier.
@@ -496,6 +523,29 @@ impl Memory {
     }
 }
 
+/// What [`Store::stats`] reports — the numbers behind `embedmind stats`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreStats {
+    /// Memories that `iter`/`get`/`recall` can see.
+    pub live_memories: u64,
+    /// Tombstoned memories awaiting `vacuum` (`docs/adr/0003`).
+    pub forgotten_memories: u64,
+    /// HNSW graph entries — one per indexed chunk, so a long memory
+    /// (DESIGN §6) counts once per chunk. 0 = no vector index yet.
+    pub index_entries: u64,
+    /// Page size recorded in the header.
+    pub page_size: u32,
+    /// Total pages in the main file.
+    pub page_count: u64,
+    /// Main file size in bytes (`page_size × page_count`; the WAL sidecar,
+    /// when present, is extra and transient).
+    pub file_bytes: u64,
+    /// Embedding model recorded in the header; `None` = KV-only so far.
+    pub embedding_model_id: Option<String>,
+    /// Embedding dimensionality (0 until a model is recorded).
+    pub embedding_dims: u16,
+}
+
 /// One [`Store::recall`] hit: the memory plus its similarity score. Derefs
 /// to [`Memory`], so `hit.content`, `hit.id`, … read naturally.
 #[derive(Debug, Clone, PartialEq)]
@@ -646,6 +696,30 @@ mod tests {
         store.close().unwrap();
         let store = Store::open_with(vfs, Path::new("m.mind"), StoreOptions::default()).unwrap();
         assert_eq!(store.get(m.id).unwrap().unwrap().content, big);
+    }
+
+    #[test]
+    fn stats_reports_counts_and_layout() {
+        let (_, mut store) = store();
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.live_memories, 0);
+        assert_eq!(stats.forgotten_memories, 0);
+        assert_eq!(stats.index_entries, 0);
+        assert_eq!(stats.embedding_model_id, None, "KV-only store: no model");
+
+        let keep = store.remember(MemoryDraft::new("keep")).unwrap();
+        let doomed = store.remember(MemoryDraft::new("doomed")).unwrap();
+        store.forget(doomed.id).unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.live_memories, 1);
+        assert_eq!(stats.forgotten_memories, 1);
+        assert_eq!(
+            stats.file_bytes,
+            u64::from(stats.page_size) * stats.page_count
+        );
+        assert!(stats.page_count >= 2, "header + at least one data page");
+        assert!(store.get(keep.id).unwrap().is_some());
     }
 
     #[test]

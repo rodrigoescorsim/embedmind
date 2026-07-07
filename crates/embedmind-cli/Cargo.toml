@@ -13,7 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 embedmind-core = { workspace = true }
+# `embedmind serve` runs the same MCP server as the standalone binary — one
+# installed command covers both the CLI and the agent integration (item 1.6).
+embedmind-mcp = { path = "../embedmind-mcp" }
 clap = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
