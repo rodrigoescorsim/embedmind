@@ -1,0 +1,19 @@
+[package]
+name = "embedmind"
+description = "Persistent memory for AI agents — single file, local, no server. CLI + MCP server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "embedmind"
+path = "src/main.rs"
+
+[dependencies]
+embedmind-core = { workspace = true }
+clap = { workspace = true }
+
+[lints]
+workspace = true

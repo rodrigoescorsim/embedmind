@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/embedmind-core",
+    "crates/embedmind-mcp",
+    "crates/embedmind-cli",
+]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+license = "MIT"
+authors = ["Rodrigo Escorsim <rodrigo.escorsim@gmail.com>"]
+rust-version = "1.90"
+
+[workspace.dependencies]
+embedmind-core = { path = "crates/embedmind-core" }
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+
+# The engine forbids unsafe code; the only future exception (an isolated mmap
+# module, if ever) must opt out explicitly and be auditable. See CONTRIBUTING.md.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

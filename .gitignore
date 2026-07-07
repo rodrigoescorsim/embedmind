@@ -1,0 +1,5 @@
+/target
+*.mind
+*.mind-wal
+fuzz/target
+fuzz/artifacts

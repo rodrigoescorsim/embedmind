@@ -1,0 +1,20 @@
+[package]
+name = "embedmind-mcp"
+description = "MCP memory server for AI agents: remember / recall / forget over a single local file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "embedmind-mcp"
+path = "src/main.rs"
+
+[dependencies]
+embedmind-core = { workspace = true }
+# MCP transport dependency (rmcp vs. hand-rolled stdio JSON-RPC) is an open
+# question to resolve in week 1 — see DESIGN.md §12. Add it here once decided.
+
+[lints]
+workspace = true
