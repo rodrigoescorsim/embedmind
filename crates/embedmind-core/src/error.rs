@@ -47,4 +47,19 @@ pub enum Error {
     /// Another process holds the write lock on this file.
     #[error("another process is writing to this file (single-writer; see docs/adr/0006)")]
     WriteLocked,
+
+    /// A page number outside the file was requested. Engine bug or corrupt
+    /// pointer — surfaced as a typed error, never a panic.
+    #[error("page {page_no} is out of bounds (page_count {page_count})")]
+    PageOutOfBounds {
+        /// Requested page number.
+        page_no: u64,
+        /// Current total page count.
+        page_count: u64,
+    },
+
+    /// An API precondition was violated by the caller (wrong buffer size,
+    /// unsupported page size, …). The engine never panics on misuse.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(&'static str),
 }

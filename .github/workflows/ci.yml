@@ -30,7 +30,10 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
-  # Placeholders for M1 item 1.8 — wired up together with the storage layer:
-  #   - crash-harness job (fault-injection sweep, Linux + Windows)
-  #   - cargo-fuzz short pass (Linux)
+  # The crash harness (fault-injection sweep, docs/TESTING.md §2) runs as part
+  # of `cargo test` above, on every platform in the matrix — including Windows,
+  # which is first-class, not a port.
+  #
+  # Remaining placeholders for M1 item 1.8:
+  #   - cargo-fuzz short pass (Linux) — targets from docs/TESTING.md §3
   #   - benchmark regression guard (see docs/BENCHMARKS.md §5)

@@ -17,6 +17,7 @@ rust-version = "1.90"
 embedmind-core = { path = "crates/embedmind-core" }
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # The engine forbids unsafe code; the only future exception (an isolated mmap
 # module, if ever) must opt out explicitly and be auditable. See CONTRIBUTING.md.
