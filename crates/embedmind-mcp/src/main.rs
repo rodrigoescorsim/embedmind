@@ -1,17 +1,82 @@
-//! MCP server shell: stdio JSON-RPC exposing `remember` / `recall` / `forget`
-//! plus automatic project-context scoping (M1 items 1.4–1.5).
+//! `embedmind-mcp` binary: opens (or creates) the memory file and serves MCP
+//! over stdio (`docs/adr/0009`). Logs go to stderr — stdout is the protocol
+//! channel and carries nothing else.
 //!
-//! Architectural rule (CLAUDE.md decision #2): this crate contains ZERO domain
-//! logic — parse request → call `embedmind_core::api` → serialize response.
-//! Replacing MCP with another protocol must stay a ~300-line job.
+//! Usage: `embedmind-mcp [--file <path>]`. Default file:
+//! `~/.embedmind/memory.mind` (README quickstart).
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use embedmind_core::Store;
+use embedmind_mcp::McpServer;
+
 fn main() -> ExitCode {
-    eprintln!(
-        "embedmind-mcp {}: not implemented yet (M1 item 1.4 — blocked on the \
-         rmcp-vs-direct decision, DESIGN.md §12)",
-        env!("CARGO_PKG_VERSION")
-    );
-    ExitCode::FAILURE
+    let file = match parse_args() {
+        Ok(file) => file,
+        Err(message) => {
+            eprintln!("embedmind-mcp: {message}");
+            eprintln!("usage: embedmind-mcp [--file <path>]");
+            return ExitCode::FAILURE;
+        }
+    };
+    let file = match file.map_or_else(default_memory_file, Ok) {
+        Ok(file) => file,
+        Err(message) => {
+            eprintln!("embedmind-mcp: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(parent) = file.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("embedmind-mcp: cannot create {}: {e}", parent.display());
+        return ExitCode::FAILURE;
+    }
+
+    let store = match Store::open_or_create(&file) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("embedmind-mcp: cannot open {}: {e}", file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("embedmind-mcp: serving memories from {}", file.display());
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut server = McpServer::new(store);
+    match server.serve(stdin.lock(), stdout.lock()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("embedmind-mcp: transport error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Parses `[--file <path>]`. Kept by hand: one flag does not justify a clap
+/// dependency in the server binary.
+fn parse_args() -> Result<Option<PathBuf>, String> {
+    let mut args = std::env::args_os().skip(1);
+    let mut file = None;
+    while let Some(arg) = args.next() {
+        if arg == "--file" {
+            let value = args.next().ok_or("--file requires a path")?;
+            file = Some(PathBuf::from(value));
+        } else {
+            return Err(format!("unknown argument: {}", arg.to_string_lossy()));
+        }
+    }
+    Ok(file)
+}
+
+/// `~/.embedmind/memory.mind`, cross-platform (`USERPROFILE` on Windows,
+/// `HOME` elsewhere).
+fn default_memory_file() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or("cannot determine home directory (HOME/USERPROFILE unset); pass --file")?;
+    Ok(PathBuf::from(home).join(".embedmind").join("memory.mind"))
 }

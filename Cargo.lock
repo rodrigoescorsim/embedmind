@@ -387,6 +387,7 @@ name = "embedmind-mcp"
 version = "0.1.0-dev"
 dependencies = [
  "embedmind-core",
+ "serde_json",
 ]
 
 [[package]]

@@ -29,6 +29,8 @@ ulid = "1"
 # required, keeping the "one command" promise (ROADMAP 1.6).
 ort = "2.0.0-rc.12"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+# Shells only (DESIGN.md §10): the binary format never uses serde.
+serde_json = "1"
 
 # The engine forbids unsafe code; the only future exception (an isolated mmap
 # module, if ever) must opt out explicitly and be auditable. See CONTRIBUTING.md.

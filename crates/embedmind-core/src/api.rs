@@ -212,12 +212,13 @@ impl Store {
         Ok(Memory::from_record(record))
     }
 
-    /// Nearest-neighbor search over `remember`ed content. Requires this store
-    /// to have an [`Embedder`] (`StoreOptions::embedder` / [`Store::create`]);
-    /// returns [`Error::InvalidArgument`] otherwise. Tombstoned memories are
-    /// always excluded (`docs/adr/0003`); `query.scope` additionally filters
-    /// by project (DESIGN.md §7).
-    pub fn recall(&self, query: Query) -> Result<Vec<Memory>> {
+    /// Nearest-neighbor search over `remember`ed content, best match first,
+    /// each hit carrying its similarity score. Requires this store to have an
+    /// [`Embedder`] (`StoreOptions::embedder` / [`Store::create`]); returns
+    /// [`Error::InvalidArgument`] otherwise. Tombstoned memories are always
+    /// excluded (`docs/adr/0003`); `query.scope` additionally filters by
+    /// project (DESIGN.md §7).
+    pub fn recall(&self, query: Query) -> Result<Vec<Recalled>> {
         let Some(embedder) = &self.embedder else {
             return Err(Error::InvalidArgument(
                 "this store has no embedder; recall requires one (see StoreOptions::embedder)",
@@ -261,7 +262,10 @@ impl Store {
         let mut out = Vec::with_capacity(hits.len());
         for hit in hits {
             if let Some(bytes) = btree::get(&self.pager, root, &hit.record_id.to_bytes())? {
-                out.push(Memory::from_record(MemoryRecord::decode(&bytes)?));
+                out.push(Recalled {
+                    memory: Memory::from_record(MemoryRecord::decode(&bytes)?),
+                    score: hit.score,
+                });
             }
         }
         Ok(out)
@@ -489,6 +493,24 @@ impl Memory {
             provenance: record.provenance,
             tombstone: record.tombstone,
         }
+    }
+}
+
+/// One [`Store::recall`] hit: the memory plus its similarity score. Derefs
+/// to [`Memory`], so `hit.content`, `hit.id`, … read naturally.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recalled {
+    /// The recalled memory.
+    pub memory: Memory,
+    /// Cosine similarity to the query, in `[-1, 1]`; higher is closer. For a
+    /// chunked memory this is its best chunk's score (DESIGN §6).
+    pub score: f32,
+}
+
+impl std::ops::Deref for Recalled {
+    type Target = Memory;
+    fn deref(&self) -> &Memory {
+        &self.memory
     }
 }
 

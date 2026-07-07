@@ -140,7 +140,7 @@ MemoryRecord {
 
 ## 8. Camada MCP
 
-- Transporte **stdio JSON-RPC** (o denominador comum dos hosts MCP hoje); SDK Rust oficial (`rmcp`) **[ABERTO]** vs. implementação direta do protocolo (é pequeno; avaliar maturidade do SDK na semana 1).
+- Transporte **stdio JSON-RPC** (o denominador comum dos hosts MCP hoje). **[DECIDIDO — ADR 0009] Implementação direta do protocolo, sem SDK:** o subconjunto necessário (`initialize`, `ping`, `tools/list`, `tools/call`) é minúsculo e o `rmcp` traria tokio + stack async para um servidor síncrono de um cliente por processo. Única dependência nova: `serde_json`. Logs em stderr; stdout é canal exclusivo do protocolo.
 - Tools expostas (schemas estáveis — são API pública):
   - `remember(content, metadata?, project?)` → `{id}`
   - `recall(query, limit?=8, scope?, filters?)` → `[{id, content, score, provenance, created_at}]`
@@ -166,7 +166,7 @@ MemoryRecord {
 | `clap` | CLI | |
 | `proptest`, `cargo-fuzz` | dev/teste | |
 
-Sem tokio na engine (I/O síncrono; o servidor MCP stdio não precisa de async — **[ABERTO]** rever se o SDK MCP escolhido exigir).
+Sem tokio em lugar nenhum do workspace (I/O síncrono; o servidor MCP stdio é implementado direto, sem SDK — ADR 0009).
 
 ## 11. Decisões registradas (mini-ADRs)
 
@@ -182,10 +182,11 @@ Sem tokio na engine (I/O síncrono; o servidor MCP stdio não precisa de async �
 | 6 | Single-writer | MVCC | um agente/usuário por arquivo é o caso real |
 | 7 | Criptografia reservada no formato, não implementada | implementar já | formato não quebra depois; feature é premium |
 | 8 | HNSW com endereçamento direto de páginas (sem tabela de localização) | tabela node_id→página na meta (encadeada) | meta O(1) para sempre; insert O(M); sem teto de nós |
+| 9 | MCP stdio JSON-RPC direto, sem SDK | `rmcp` (SDK oficial) | evita tokio/async; superfície usada é minúscula; casca continua substituível |
 
 ## 12. Questões em aberto (resolver no M1, com default)
 
-- [ ] SDK MCP `rmcp` vs. protocolo direto → *default: direto, se o SDK trouxer tokio+peso*
+- [x] SDK MCP `rmcp` vs. protocolo direto → **resolvido: direto (ADR 0009)** — o SDK traz tokio+peso, confirmando o default
 - [ ] Full-text próprio vs. tantivy (decisão só no M2) → *default: próprio*
 - [ ] Política fsync `batched` opt-in → *default: só `full` na v0.1*
 - [ ] Quantização i8 de vetores → *decidir com benchmark no M3*

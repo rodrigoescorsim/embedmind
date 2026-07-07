@@ -30,7 +30,7 @@ pub mod storage;
 #[doc(hidden)]
 pub mod fuzz;
 
-pub use api::{Memory, MemoryDraft, Query, Scope, Store, StoreOptions};
+pub use api::{Memory, MemoryDraft, Query, Recalled, Scope, Store, StoreOptions};
 pub use error::{Error, Result};
 pub use record::Scalar;
 pub use ulid::Ulid;

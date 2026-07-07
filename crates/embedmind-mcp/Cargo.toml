@@ -13,8 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 embedmind-core = { workspace = true }
-# MCP transport dependency (rmcp vs. hand-rolled stdio JSON-RPC) is an open
-# question to resolve in week 1 — see DESIGN.md §12. Add it here once decided.
+# The MCP protocol is implemented directly over stdio JSON-RPC (docs/adr/0009)
+# — no SDK, no tokio. serde_json is the only wire-format dependency.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
