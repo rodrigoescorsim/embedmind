@@ -1,5 +1,5 @@
-<title>EmbedMind — Diário de Engenharia, M1</title>
-<meta name="description" content="Mapa do progresso técnico do EmbedMind: o que foi construído, como as camadas se encaixam, e os próximos passos do M1.">
+<title>EmbedMind — Diário de Engenharia, M1 (atualizado 07 jul 2026)</title>
+<meta name="description" content="Mapa do progresso técnico do EmbedMind: engine, MCP, CLI, HNSW, embeddings, contexto de projeto — e o que falta para fechar o M1.">
 
 <style>
 /* ============ FONTES (placeholder substituído por script) ============ */
@@ -532,13 +532,13 @@ footer .mono{color:var(--ink-faint);}
 
   <header class="doc-header">
     <p class="eyebrow"><span class="dot"></span>Diário de engenharia · EmbedMind · repositório privado</p>
-    <h1>O que existe hoje na <em>engine</em>, camada por camada</h1>
-    <p class="doc-sub">Mapa técnico do progresso em <code>embedmind-core</code> até agora: o que foi implementado, como as peças se encaixam no arquivo <code>.mind</code>, o que os testes provam, e o que vem a seguir no M1 — e por quê.</p>
+    <h1>O que existe hoje no <em>EmbedMind</em>, camada por camada</h1>
+    <p class="doc-sub">Mapa técnico do progresso na engine (<code>embedmind-core</code>) e nas cascas (<code>embedmind-mcp</code>, <code>embedmind-cli</code>) até agora: o que foi implementado, como as peças se encaixam no arquivo <code>.mind</code>, o que os testes provam, e o que falta para fechar o M1.</p>
     <div class="meta-row">
-      <span><strong>Data</strong> 07 jul 2026</span>
+      <span><strong>Data</strong> 07 jul 2026 (atualizado)</span>
       <span><strong>Fase</strong> M1 · Semana 1 de 4</span>
-      <span><strong>Commits</strong> 5 no <code>main</code></span>
-      <span><strong>Testes</strong> 65 verdes</span>
+      <span><strong>Commits</strong> 11 no <code>main</code> · HEAD <code>be30a71</code></span>
+      <span><strong>Testes</strong> 126 verdes</span>
     </div>
   </header>
 
@@ -546,11 +546,12 @@ footer .mono{color:var(--ink-faint);}
     <p class="rail-title">Roadmap M1</p>
     <div class="rail-item is-done"><a href="#item-11">1.1 Formato + WAL</a><span class="rail-date">feito</span></div>
     <div class="rail-item is-done"><a href="#item-12">1.2 KV store + API</a><span class="rail-date">feito</span></div>
+    <div class="rail-item is-done"><a href="#item-13">1.3 HNSW + embeddings</a><span class="rail-date">feito</span></div>
+    <div class="rail-item is-done"><a href="#item-14">1.4 Servidor MCP</a><span class="rail-date">feito</span></div>
+    <div class="rail-item is-done"><a href="#item-15">1.5 Contexto de projeto</a><span class="rail-date">feito</span></div>
+    <div class="rail-item is-active"><a href="#item-16">1.6 CLI + instalação</a><span class="rail-date">parcial</span></div>
     <div class="rail-item is-done"><a href="#item-18">1.8 Crash + fuzzing</a><span class="rail-date">feito</span></div>
-    <div class="rail-item is-active"><a href="#item-13">1.3 HNSW + embeddings</a><span class="rail-date">próximo</span></div>
-    <div class="rail-item is-future"><a href="#roadmap">1.4 Servidor MCP</a><span class="rail-date">a fazer</span></div>
-    <div class="rail-item is-future"><a href="#roadmap">1.5 Contexto de projeto</a><span class="rail-date">a fazer</span></div>
-    <div class="rail-item is-future"><a href="#roadmap">1.6–1.7 Instalação + README</a><span class="rail-date">a fazer</span></div>
+    <div class="rail-item is-future"><a href="#proximos">1.7 README + benchmark</a><span class="rail-date">a fazer</span></div>
   </nav>
 
   <main>
@@ -559,14 +560,14 @@ footer .mono{color:var(--ink-faint);}
     <section id="resumo">
       <div class="section-head">
         <p class="section-kicker">Resumo executivo</p>
-        <h2>A fundação crash-safe está pronta; falta o que torna isto "memória"</h2>
+        <h2>De arquivo cru a memória que um agente já consegue usar</h2>
       </div>
-      <p class="lede">Em uma semana de M1, o EmbedMind ganhou uma engine de armazenamento completa — arquivo único, WAL, B-tree de registros, API pública — com uma rede de segurança de testes desproporcional ao tamanho do código: dois harnesses de crash e cinco alvos de fuzzing. O que ainda não existe é a única coisa que faz disto uma <em>memória semântica</em>: busca vetorial. É o próximo passo, e é o maior item técnico do M1.</p>
+      <p class="lede">O pipeline inteiro do v0.1 já fecha ponta a ponta: um agente conectado por MCP (ou um humano pelo CLI) consegue <code>remember</code>, <code>recall</code> semântico e <code>forget</code> contra um único arquivo <code>.mind</code> — com HNSW próprio paginado, embeddings ONNX embarcados (zero rede) e escopo automático de projeto. Restam dois itens: fechar a instalação em 1 comando (binários de release + teste com um segundo agente) e escrever o README final com benchmark honesto — o portão de saída do M1.</p>
 
       <div class="metrics">
-        <div class="metric"><span class="n">3</span><span class="l">itens do roadmap M1 concluídos (1.1, 1.2, 1.8)</span></div>
-        <div class="metric"><span class="n">65</span><span class="l">testes automatizados passando</span></div>
-        <div class="metric"><span class="n">~4.400</span><span class="l">linhas de Rust na engine</span></div>
+        <div class="metric"><span class="n">6</span><span class="l">itens do roadmap M1 concluídos (1.1–1.5, 1.8) — 1.6 parcial, só falta 1.7</span></div>
+        <div class="metric"><span class="n">126</span><span class="l">testes automatizados passando</span></div>
+        <div class="metric"><span class="n">~8.800</span><span class="l">linhas de Rust em 3 crates (core, mcp, cli)</span></div>
         <div class="metric"><span class="n">2×</span><span class="l">harnesses de crash confirmaram pegar bugs reais</span></div>
       </div>
     </section>
@@ -580,21 +581,21 @@ footer .mono{color:var(--ink-faint);}
       <p>O EmbedMind segue uma regra estrita de dependência: cada camada só enxerga a de baixo. As cascas (CLI, servidor MCP) não têm permissão de conter lógica de domínio — isso vive inteiramente em <code>embedmind-core</code>. O diagrama abaixo é o real <code>lib.rs</code> hoje, de cima para baixo:</p>
 
       <div class="stack">
-        <div class="stack-row shell">
+        <div class="stack-row done">
           <div class="stack-label">embedmind-cli / -mcp</div>
-          <div class="stack-desc">Cascas finas. Ainda respondem apenas "não implementado (pré-v0.1)" — chegam nos itens 1.4–1.6.</div>
+          <div class="stack-desc"><span class="chip done">feito · 1.4–1.6</span> Servidor MCP (stdio JSON-RPC, ADR 0009) e CLI (<code>serve</code>/<code>remember</code>/<code>recall</code>/<code>forget</code>/<code>stats</code>) sobre a mesma API — falta só empacotar (1.6 🔶).</div>
         </div>
         <div class="stack-row future">
-          <div class="stack-label">recall</div>
-          <div class="stack-desc"><span class="chip pending">planejado · M2</span> Fusão híbrida de score (RRF) entre busca vetorial e full-text.</div>
+          <div class="stack-label">recall híbrido</div>
+          <div class="stack-desc"><span class="chip pending">planejado · M2</span> Fusão por RRF entre a lista vetorial (já em produção) e full-text. <code>Store::recall</code> já existe hoje — é busca puramente vetorial por enquanto.</div>
         </div>
-        <div class="stack-row active">
+        <div class="stack-row done">
           <div class="stack-label">index</div>
-          <div class="stack-desc"><span class="chip active">próximo · 1.3</span> HNSW paginado + pipeline de embeddings ONNX. Ainda não existe.</div>
+          <div class="stack-desc"><span class="chip done">feito · 1.3</span> HNSW paginado com endereçamento direto de páginas + pipeline de embeddings ONNX embarcado.</div>
         </div>
         <div class="stack-row done">
           <div class="stack-label">api</div>
-          <div class="stack-desc"><span class="chip done">feito · 1.2</span> <code>Store</code>, <code>Memory</code>, <code>MemoryDraft</code> — a única superfície pública que as cascas podem tocar.</div>
+          <div class="stack-desc"><span class="chip done">feito · 1.2</span> <code>Store</code>, <code>Memory</code>, <code>MemoryDraft</code>, <code>Recalled</code>, <code>StoreStats</code> — a única superfície pública que as cascas podem tocar.</div>
         </div>
         <div class="stack-row done">
           <div class="stack-label">record</div>
@@ -613,7 +614,7 @@ footer .mono{color:var(--ink-faint);}
           <div class="stack-desc"><span class="chip done">feito · 1.1</span> Layout binário do <code>.mind</code>: header, checksums xxh3, framing do WAL.</div>
         </div>
       </div>
-      <figcaption>Cada camada só chama a que está abaixo dela na pilha. <b>index</b> e <b>recall</b> (em cinza) ainda não têm código — são os próximos itens do roadmap.</figcaption>
+      <figcaption>Cada camada só chama a que está abaixo dela na pilha. Só o <b>recall híbrido</b> (fusão RRF com full-text, em cinza) ainda não tem código — chega no M2, quando full-text e filtros de metadados existirem.</figcaption>
     </section>
 
     <!-- ================= ITEM 1.1 ================= -->
@@ -631,7 +632,8 @@ footer .mono{color:var(--ink-faint);}
           <div class="filemap-seg"><span class="tag">página 0</span><div class="txt"><b>Header</b> — magic <code>MINDFMT1</code>, versão, page_size, ponteiros para a raiz da B-tree/HNSW/freelist, contador de transação, checksum xxh3 dos últimos 8 bytes.</div></div>
           <div class="filemap-seg"><span class="tag">páginas 1..N</span><div class="txt"><b>B-tree de registros</b> — folhas e nós internos com as memórias (item 1.2).</div></div>
           <div class="filemap-seg"><span class="tag">páginas 1..N</span><div class="txt"><b>Overflow</b> — continuação de registros grandes demais para uma página.</div></div>
-          <div class="filemap-seg"><span class="tag">futuro</span><div class="txt"><b>Vetores + HNSW + freelist</b> — chegam no item 1.3.</div></div>
+          <div class="filemap-seg"><span class="tag">páginas 1..N</span><div class="txt"><b>Vetores + HNSW</b> — páginas <code>VECTOR</code> com embeddings f32 normalizados; nós do grafo em páginas <code>HNSW_NODE</code>; meta fixa em <code>HNSW_META</code> (item 1.3, ADR 0008).</div></div>
+          <div class="filemap-seg"><span class="tag">futuro</span><div class="txt"><b>Freelist + full-text</b> — reclamação de espaço via <code>vacuum</code>; índice invertido no M2.</div></div>
         </div>
       </div>
 
@@ -654,7 +656,7 @@ footer .mono{color:var(--ink-faint);}
     <!-- ================= ITEM 1.2 ================= -->
     <section id="item-12">
       <div class="section-head">
-        <p class="section-kicker">Item 1.2 · concluído nesta sessão</p>
+        <p class="section-kicker">Item 1.2 · concluído</p>
         <h2>A B-tree de registros e a API pública</h2>
       </div>
       <p>Esta é a peça que transforma "um arquivo com checksums" em "uma loja de chave-valor de verdade". Chaves são ULIDs de 16 bytes — ordenados por tempo, então a ordem de leitura da árvore já é a linha do tempo, de graça. Valores são registros de memória codificados byte a byte.</p>
@@ -745,7 +747,7 @@ footer .mono{color:var(--ink-faint);}
       </div>
 
       <h3>API pública em uso</h3>
-      <p>Esta é a superfície que <code>embedmind-mcp</code> e <code>embedmind-cli</code> vão chamar — nada abaixo dela é visível de fora do crate:</p>
+      <p>Esta é a superfície que <code>embedmind-mcp</code> e <code>embedmind-cli</code> chamam — nada abaixo dela é visível de fora do crate:</p>
       <div class="tasktable-wrap">
         <table class="tasktable">
           <thead><tr><th>Chamada</th><th>O que faz</th><th>Garantia</th></tr></thead>
@@ -753,17 +755,127 @@ footer .mono{color:var(--ink-faint);}
             <tr><td class="desc"><code>Store::remember(draft)</code></td><td class="desc">Grava uma memória nova, gera o ULID e o timestamp.</td><td class="desc">1 transação durável por chamada</td></tr>
             <tr><td class="desc"><code>Store::get(id)</code></td><td class="desc">Busca por id; memórias esquecidas retornam <code>None</code>.</td><td class="desc">idêntico a "não existe"</td></tr>
             <tr><td class="desc"><code>Store::forget(id)</code></td><td class="desc">Marca tombstone (soft delete).</td><td class="desc">forget redundante grava zero bytes</td></tr>
+            <tr><td class="desc"><code>Store::recall(query)</code></td><td class="desc">Busca semântica ANN; retorna <code>Recalled</code> (memória + score).</td><td class="desc">requer embedder; filtra tombstone/escopo na leitura</td></tr>
+            <tr><td class="desc"><code>Store::stats()</code></td><td class="desc">Contagens, layout do arquivo, entradas HNSW, modelo gravado.</td><td class="desc">O(N) — comando de diagnóstico</td></tr>
             <tr><td class="desc"><code>Store::iter()</code> / <code>iter_all()</code></td><td class="desc">Itera em ordem de id = ordem de tempo.</td><td class="desc">erro tipado em vez de pânico em arquivo corrupto</td></tr>
           </tbody>
         </table>
       </div>
       <p style="margin-top:1rem">Uma decisão deliberada: <strong>não existe delete na B-tree.</strong> "Esquecer" é uma atualização que liga o bit de tombstone; o espaço — e qualquer cadeia de overflow associada — só é recuperado por um futuro <code>embedmind vacuum</code>. Simples, honesto, e documentado como dívida técnica aceita (ADR 0003), não como bug.</p>
+
+      <div class="callout">
+        <p>Desde então a superfície cresceu sem quebrar essa base: <code>Store::recall</code> (busca semântica, item 1.3, abaixo) e <code>Store::stats</code> (diagnóstico do arquivo — contagens, layout, modelo de embedding, item 1.6) são construídas inteiramente sobre esta mesma B-tree e este mesmo <code>Vfs</code>.</p>
+      </div>
+    </section>
+
+    <!-- ================= ITEM 1.3 ================= -->
+    <section id="item-13">
+      <div class="section-head">
+        <p class="section-kicker">Item 1.3 · concluído · commits <code>c9a3fea</code> + <code>6c4cfda</code></p>
+        <h2>Busca vetorial: HNSW paginado + embeddings ONNX embarcados</h2>
+      </div>
+      <p>O KV store vira <em>memória semântica</em> aqui: cada <code>remember</code> com embedder embeda o texto, normaliza o vetor (coseno → produto interno) e insere um nó no grafo HNSW — tudo na mesma transação durável que grava o registro na B-tree. <code>recall</code> faz busca aproximada de vizinho mais próximo (ANN) filtrando tombstones e escopo de projeto na hora da leitura, nunca confiando no grafo para saber se uma memória ainda existe.</p>
+
+      <h3>Decisões de estado da arte (ADRs 0002, 0004, 0008)</h3>
+      <div class="tasktable-wrap">
+        <table class="tasktable">
+          <thead><tr><th>Peça</th><th>Decisão</th><th>Por quê</th></tr></thead>
+          <tbody>
+            <tr><td class="desc"><strong>HNSW próprio paginado</strong></td><td class="desc">Grafo em páginas do <code>.mind</code>, não lib in-memory</td><td class="desc">Abrir 1 GB sem carregar tudo — promessa do produto (ADR 0002)</td></tr>
+            <tr><td class="desc"><strong>Endereçamento direto</strong></td><td class="desc">Vizinhos = <code>page_no: u64</code>, sem tabela id→página</td><td class="desc">Meta page fixa para sempre; insert O(M); sem teto de nós (ADR 0008)</td></tr>
+            <tr><td class="desc"><strong>MiniLM int8 embarcado</strong></td><td class="desc"><code>ort</code> CPU-only + <code>include_bytes!</code></td><td class="desc">Zero rede, zero API key — "nada sai da máquina" (ADR 0004)</td></tr>
+            <tr><td class="desc"><strong>Heurística de diversidade</strong></td><td class="desc">Algoritmo 4 do paper + keepPrunedConnections</td><td class="desc">Recall melhor em embeddings clusterizados (texto real)</td></tr>
+            <tr><td class="desc"><strong><code>ef_search</code> adaptativo</strong></td><td class="desc">×4 por rodada enquanto filtros sub-preenchem <code>k</code></td><td class="desc">Stores tombstonados não sub-retornam em silêncio</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Chunking de memórias longas (DESIGN §6)</h3>
+      <p>Texto com mais de 510 tokens de conteúdo é dividido em janelas sobrepostas (overlap 64) via <code>Embedder::embed_chunks</code>; cada janela vira <strong>um nó a mais no HNSW</strong> apontando para o mesmo <code>record_id</code>. O registro permanece inteiro — chunking existe só no índice. A busca deduplica por <code>record_id</code> (fica o melhor chunk) e devolve a memória completa. Teto: 128 chunks (~57k tokens); acima disso <code>remember</code> falha com erro tipado.</p>
+
+      <div class="callout accent">
+        <p><strong>API:</strong> <code>Store::recall(Query)</code> retorna <code>Vec&lt;Recalled&gt;</code> (memória + score de similaridade). <code>Scope::All</code> / <code>Scope::Project</code> filtram na leitura. Testes: recall@10 ≥ 0,9 vs. força bruta em 300 vetores aleatórios; E2E com ONNX real; conteúdo enterrado na cauda longa é recallável após chunking.</p>
+      </div>
+    </section>
+
+    <!-- ================= ITEM 1.4 ================= -->
+    <section id="item-14">
+      <div class="section-head">
+        <p class="section-kicker">Item 1.4 · concluído · commit <code>f5d48f2</code> · ADR 0009</p>
+        <h2>Servidor MCP: <code>remember</code> / <code>recall</code> / <code>forget</code></h2>
+      </div>
+      <p>Casca fina em stdio JSON-RPC 2.0 (newline-delimited): <strong>implementação direta do protocolo</strong>, sem SDK <code>rmcp</code> e sem tokio — o subconjunto que um servidor de tools precisa cabe num loop síncrono read-dispatch-write. Logs vão para stderr; stdout é canal exclusivo do protocolo.</p>
+
+      <h3>Superfície exposta</h3>
+      <div class="tasktable-wrap">
+        <table class="tasktable">
+          <thead><tr><th>Método / tool</th><th>Comportamento</th></tr></thead>
+          <tbody>
+            <tr><td class="desc"><code>initialize</code></td><td class="desc">Handshake; ecoa <code>protocolVersion</code> suportada; registra <code>clientInfo.name</code> como agente de proveniência.</td></tr>
+            <tr><td class="desc"><code>ping</code></td><td class="desc">Liveness check.</td></tr>
+            <tr><td class="desc"><code>tools/list</code></td><td class="desc">Três tools com schemas estáveis (API pública).</td></tr>
+            <tr><td class="desc"><code>remember</code></td><td class="desc">→ <code>{id, project}</code>. Falha da engine = tool result com <code>isError: true</code>, nunca crash.</td></tr>
+            <tr><td class="desc"><code>recall</code></td><td class="desc">→ <code>{hits, scope}</code> com scores. Escopo default vem do item 1.5.</td></tr>
+            <tr><td class="desc"><code>forget</code></td><td class="desc">→ <code>{count}</code> por id (v0.1). Bulk delete por query fica para depois.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:1rem"><strong>8 testes de protocolo</strong> em <code>embedmind-mcp/tests/protocol.rs</code> — handshake, erros JSON-RPC tipados (<code>-32700</code>/<code>-32601</code>/<code>-32602</code>), roundtrip remember→recall→forget com ONNX real, sessão MCP inteira via pipes in-memory.</p>
+    </section>
+
+    <!-- ================= ITEM 1.5 ================= -->
+    <section id="item-15">
+      <div class="section-head">
+        <p class="section-kicker">Item 1.5 · concluído · commit <code>803130d</code></p>
+        <h2>Memória automática de contexto de projeto</h2>
+      </div>
+      <p>"Memória para agentes" sem escopo vira ruído — o servidor infere o projeto a partir do <code>cwd</code> do agente (hosts MCP iniciam o processo com o workspace como diretório de trabalho). A lógica vive na casca (<code>embedmind-mcp/src/project.rs</code>), não na engine: "em qual projeto o agente está" é questão de ambiente, não de domínio.</p>
+
+      <h3>Regras de detecção (a mais próxima vence, subindo a árvore)</h3>
+      <ol>
+        <li><code>.embedmind.toml</code> com chave top-level <code>project = "nome"</code> — override explícito (monorepos).</li>
+        <li>Entrada <code>.git</code> (diretório ou arquivo — worktrees) → nome da pasta raiz do repositório.</li>
+        <li>Sem marcador → memórias globais; <code>recall</code> busca tudo.</li>
+      </ol>
+
+      <div class="callout">
+        <p><strong>Semântica nas tools:</strong> <code>remember</code> sem <code>project</code> estampa o detectado; <code>project: null</code> força global. <code>recall</code> escopa ao projeto detectado por default; <code>scope: "all"</code> é o fallback global explícito; a resposta ecoa o escopo aplicado. <strong>6 testes unitários</strong> de detecção + <strong>3 testes de protocolo</strong> cobrindo o escopo automático.</p>
+      </div>
+    </section>
+
+    <!-- ================= ITEM 1.6 ================= -->
+    <section id="item-16">
+      <div class="section-head">
+        <p class="section-kicker">Item 1.6 · parcial · commit <code>151283c</code></p>
+        <h2>CLI + instalação em 1 comando</h2>
+      </div>
+      <p>O binário <code>embedmind</code> (<code>embedmind-cli</code>) implementa a superfície do README quickstart: <code>serve</code> roda o <em>mesmo</em> servidor MCP que <code>embedmind-mcp</code> — um único <code>cargo install</code> cobre uso standalone e integração com agentes (<code>claude mcp add embedmind -- embedmind serve</code>).</p>
+
+      <h3>Comandos implementados</h3>
+      <div class="tasktable-wrap">
+        <table class="tasktable">
+          <thead><tr><th>Comando</th><th>Estado</th></tr></thead>
+          <tbody>
+            <tr><td class="desc"><code>embedmind serve</code></td><td class="desc"><span class="chip done">feito</span> MCP stdio + detecção de projeto</td></tr>
+            <tr><td class="desc"><code>embedmind remember</code></td><td class="desc"><span class="chip done">feito</span> Estampa projeto detectado; <code>--global</code> override</td></tr>
+            <tr><td class="desc"><code>embedmind recall</code></td><td class="desc"><span class="chip done">feito</span> Scores + conteúdo; <code>--all</code> busca global</td></tr>
+            <tr><td class="desc"><code>embedmind forget</code></td><td class="desc"><span class="chip done">feito</span> Por ULID</td></tr>
+            <tr><td class="desc"><code>embedmind stats</code></td><td class="desc"><span class="chip done">feito</span> <code>Store::stats</code> — contagens, páginas, modelo</td></tr>
+            <tr><td class="desc"><code>embedmind vacuum</code></td><td class="desc"><span class="chip pending">v0.2</span> Erro explícito "not implemented"</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout accent">
+        <p><strong>4 testes E2E</strong> em <code>embedmind-cli/tests/cli.rs</code> executam o binário real (<code>CARGO_BIN_EXE</code>): fluxo quickstart remember→recall→forget→stats, detecção de projeto com repo fake, vacuum rejeitado, sessão MCP via <code>serve</code>.</p>
+        <p style="margin-top:.75rem"><strong>Ainda falta para fechar 1.6:</strong> workflow de release com binários pré-compilados (GitHub Actions) + dogfooding manual com Claude Code e mais um agente MCP.</p>
+      </div>
     </section>
 
     <!-- ================= ITEM 1.8 ================= -->
     <section id="item-18">
       <div class="section-head">
-        <p class="section-kicker">Item 1.8 · concluído nesta sessão</p>
+        <p class="section-kicker">Item 1.8 · concluído junto com 1.1/1.2</p>
         <h2>A rede de segurança: dois harnesses de crash e cinco fuzzers</h2>
       </div>
       <p>A marca do EmbedMind é "nunca corrompe sua memória". Isso não é uma frase de marketing — é testado mecanicamente, e testado <em>contra si mesmo</em>: antes de confiar no harness, ele precisa provar que pega bugs reais.</p>
@@ -827,11 +939,11 @@ footer .mono{color:var(--ink-faint);}
           <tbody>
             <tr class="is-done"><td class="num">1.1</td><td class="desc"><strong>Formato de arquivo único + WAL/crash-safety básica</strong><span>Fundação de tudo o resto.</span></td><td><span class="chip done">feito</span></td></tr>
             <tr class="is-done"><td class="num">1.2</td><td class="desc"><strong>KV store + API Rust limpa</strong><span>Registros, B-tree, Store pública.</span></td><td><span class="chip done">feito</span></td></tr>
-            <tr><td class="num">1.3</td><td class="desc"><strong>Busca vetorial HNSW + embeddings ONNX embarcados</strong><span>O próximo passo — ver abaixo.</span></td><td><span class="chip active">próximo</span></td></tr>
-            <tr><td class="num">1.4</td><td class="desc"><strong>Servidor MCP: remember / recall / forget</strong><span>Depende de 1.2 (feito) e 1.3.</span></td><td><span class="chip pending">a fazer</span></td></tr>
-            <tr><td class="num">1.5</td><td class="desc"><strong>Memória automática de contexto de projeto</strong><span>Depende de 1.4.</span></td><td><span class="chip pending">a fazer</span></td></tr>
-            <tr><td class="num">1.6</td><td class="desc"><strong>Instalação em 1 comando</strong><span>Testado com Claude Code + 1 outro agente.</span></td><td><span class="chip pending">a fazer</span></td></tr>
-            <tr><td class="num">1.7</td><td class="desc"><strong>README final: GIF + benchmark honesto</strong><span>vs. sqlite-vec e zvec.</span></td><td><span class="chip pending">a fazer</span></td></tr>
+            <tr class="is-done"><td class="num">1.3</td><td class="desc"><strong>Busca vetorial HNSW + embeddings ONNX embarcados</strong><span>HNSW paginado (ADR 0008), MiniLM int8 (ADR 0004), chunking de memórias longas.</span></td><td><span class="chip done">feito</span></td></tr>
+            <tr class="is-done"><td class="num">1.4</td><td class="desc"><strong>Servidor MCP: remember / recall / forget</strong><span>Stdio JSON-RPC direto (ADR 0009), 8 testes de protocolo.</span></td><td><span class="chip done">feito</span></td></tr>
+            <tr class="is-done"><td class="num">1.5</td><td class="desc"><strong>Memória automática de contexto de projeto</strong><span>Raiz git / <code>.embedmind.toml</code>; escopo default no recall.</span></td><td><span class="chip done">feito</span></td></tr>
+            <tr><td class="num">1.6</td><td class="desc"><strong>Instalação em 1 comando</strong><span>CLI completo; falta release de binários + teste com 2 agentes.</span></td><td><span class="chip active">parcial</span></td></tr>
+            <tr><td class="num">1.7</td><td class="desc"><strong>README final: GIF + benchmark honesto</strong><span>vs. sqlite-vec e zvec — portão de saída do M1.</span></td><td><span class="chip pending">a fazer</span></td></tr>
             <tr class="is-done"><td class="num">1.8</td><td class="desc"><strong>Testes de crash-recovery + fuzzing no CI</strong><span>Construído junto com 1.1 e 1.2, por princípio do projeto.</span></td><td><span class="chip done">feito</span></td></tr>
           </tbody>
         </table>
@@ -842,33 +954,32 @@ footer .mono{color:var(--ink-faint);}
     <section id="proximos">
       <div class="section-head">
         <p class="section-kicker">Próximos passos</p>
-        <h2>O que vem a seguir, e por que nessa ordem</h2>
+        <h2>O que falta para fechar o M1</h2>
       </div>
-      <p>A ordem não é arbitrária — vem do gráfico de dependências do próprio ROADMAP.md: nada de busca semântica sem vetor persistido; nada de MCP sem uma API estável embaixo dele.</p>
+      <p>O núcleo técnico já fecha ponta a ponta — agente ou humano consegue <code>remember</code>/<code>recall</code>/<code>forget</code> hoje. Restam itens voltados para <em>fora</em>: empacotamento, demonstração e honestidade de benchmark.</p>
 
       <div class="next-list">
         <div class="next-item priority">
-          <span class="idx">1.3</span>
+          <span class="idx">1.6</span>
           <div>
-            <h3>HNSW paginado + embeddings ONNX embarcados</h3>
-            <p>O maior item técnico do M1. Um índice HNSW <strong>próprio</strong>, persistido em páginas do mesmo arquivo — não uma biblioteca pronta que assume o grafo inteiro em RAM. Embeddings via <code>all-MiniLM-L6-v2</code> quantizado (int8, ~23 MB, 384 dimensões), rodando 100% localmente via ONNX Runtime, sem chave de API.</p>
-            <p class="why"><b>Por que agora:</b> é a peça que transforma um KV store em <em>memória semântica</em> — o motivo do produto existir. Também é a barreira técnica deliberadamente não terceirizada: bibliotecas prontas (hnsw_rs, usearch) exigem carregar o grafo inteiro na memória, o que quebra a promessa de abrir um arquivo de 1 GB sem travar. É "a moat", nas palavras do próprio DESIGN.md — por isso não é terceirizada.</p>
+            <h3>Fechar instalação em 1 comando</h3>
+            <p>O CLI já funciona via <code>cargo install --path crates/embedmind-cli</code> e os testes E2E provam o binário. Falta: workflow GitHub Actions que publique binários pré-compilados (Windows/Linux/macOS) + dogfooding manual registrado com <strong>Claude Code</strong> e mais um host MCP (Cursor, Windsurf, …).</p>
+            <p class="why"><b>Por que agora:</b> sem binário de release, o "1 comando" do README ainda é aspiracional para quem não compila Rust.</p>
           </div>
         </div>
         <div class="next-item">
-          <span class="idx">1.4</span>
+          <span class="idx">1.7</span>
           <div>
-            <h3>Servidor MCP — <code>remember</code> / <code>recall</code> / <code>forget</code></h3>
-            <p>Casca fina em stdio JSON-RPC sobre a API que já existe. Zero lógica de domínio aqui — só parse, chamada, serialize.</p>
-            <p class="why"><b>Por que depois do 1.3:</b> <code>recall</code> sem busca vetorial seria só um <code>get</code> disfarçado — não vale a pena expor via protocolo antes de ter algo semântico para devolver.</p>
+            <h3>README final: GIF de demo + benchmark honesto</h3>
+            <p>Harness público seguindo <code>docs/BENCHMARKS.md</code>: recall@k, latência, tamanho de arquivo, RAM — vs. sqlite-vec e zvec. <strong>Mostrar onde perdemos</strong> — honestidade técnica é diferencial de marca. GIF de 30s mostrando remember→recall via agente.</p>
+            <p class="why"><b>Por que fecha o M1:</b> é o portão de saída para o lançamento público do dia 35 (≈ 11 ago). Sem benchmark, o README promete números que não existem.</p>
           </div>
         </div>
         <div class="next-item">
-          <span class="idx">1.5–1.7</span>
+          <span class="idx">M2</span>
           <div>
-            <h3>Contexto automático de projeto, instalação em 1 comando, README com benchmark</h3>
-            <p>A camada de UX que faz o produto parecer mágico: o servidor infere o projeto pelo <code>cwd</code> do agente, filtra <code>recall</code> por escopo, e tudo isso é instalável com um único <code>cargo install</code>.</p>
-            <p class="why"><b>Por que por último:</b> são os itens voltados para fora — precisam de algo funcionando embaixo para demonstrar. O benchmark honesto (mesmo perdendo em algo) é a peça que fecha o M1 e destrava o lançamento público do dia 35.</p>
+            <h3>Depois do M1: full-text, filtros, bindings Python</h3>
+            <p>Full-text na engine, fusão RRF com a lista vetorial (já em produção), filtros de metadados no <code>recall</code>, repo público + lançamento coordenado. Não começar antes de fechar 1.6/1.7 — escopo do M1 ainda governa.</p>
           </div>
         </div>
       </div>
@@ -877,7 +988,7 @@ footer .mono{color:var(--ink-faint);}
   </main>
 
   <footer>
-    <span class="mono">embedmind-core · commit b396cbf · main</span>
+    <span class="mono">embedmind · commit be30a71 · main · 126 testes · ~8.800 linhas Rust</span>
     <span>Documento gerado a partir do estado real do repositório — sem dados fictícios.</span>
   </footer>
 
