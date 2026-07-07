@@ -62,4 +62,25 @@ pub enum Error {
     /// unsupported page size, …). The engine never panics on misuse.
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),
+
+    /// A page passed its checksum but its structure is invalid (bad page
+    /// type, out-of-range slot offsets, unsorted keys, broken chain, …).
+    /// Distinct from [`Error::CorruptPage`] so tampering/logic corruption is
+    /// distinguishable from bit rot.
+    #[error("malformed {what} on page {page_no}")]
+    MalformedPage {
+        /// Page number within the `.mind` file.
+        page_no: u64,
+        /// What failed to parse, for diagnostics.
+        what: &'static str,
+    },
+
+    /// A memory record failed to deserialize (`docs/FORMAT.md` §5).
+    #[error("malformed memory record: {0}")]
+    MalformedRecord(&'static str),
+
+    /// An internal invariant was violated — an engine bug, surfaced as a
+    /// typed error instead of a panic (production paths never panic).
+    #[error("internal engine error: {0} (please report this)")]
+    Internal(&'static str),
 }

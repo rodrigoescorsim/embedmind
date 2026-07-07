@@ -189,6 +189,7 @@ impl Pager {
             pager: self,
             dirty: BTreeMap::new(),
             page_count,
+            root_btree: None,
         })
     }
 
@@ -251,14 +252,23 @@ impl Pager {
         Ok(())
     }
 
-    fn commit_txn(&mut self, dirty: BTreeMap<u64, Vec<u8>>, new_page_count: u64) -> Result<u64> {
+    fn commit_txn(
+        &mut self,
+        dirty: BTreeMap<u64, Vec<u8>>,
+        new_page_count: u64,
+        new_root_btree: Option<u64>,
+    ) -> Result<u64> {
         self.ensure_usable()?;
-        if dirty.is_empty() && new_page_count == self.header.page_count {
+        if dirty.is_empty() && new_page_count == self.header.page_count && new_root_btree.is_none()
+        {
             return Ok(self.header.txn_counter); // empty transaction: no-op
         }
 
         let mut new_header = self.header.clone();
         new_header.page_count = new_page_count;
+        if let Some(root) = new_root_btree {
+            new_header.root_btree_page = root;
+        }
         new_header.txn_counter += 1;
         let txn_id = new_header.txn_counter;
         let mut page0 = vec![0u8; self.header.page_size as usize];
@@ -301,6 +311,9 @@ pub struct Txn<'p> {
     dirty: BTreeMap<u64, Vec<u8>>,
     /// Working page count (grows with allocations).
     page_count: u64,
+    /// Pending B-tree root move; applied to the header atomically with the
+    /// commit frame (the root pointer lives in page 0).
+    root_btree: Option<u64>,
 }
 
 impl Txn<'_> {
@@ -364,6 +377,23 @@ impl Txn<'_> {
         self.page_count
     }
 
+    /// Page size of the underlying store.
+    pub fn page_size(&self) -> u32 {
+        self.pager.header.page_size
+    }
+
+    /// Record B-tree root as seen by this transaction (its own pending move
+    /// included); 0 = no tree yet.
+    pub fn root_btree_page(&self) -> u64 {
+        self.root_btree.unwrap_or(self.pager.header.root_btree_page)
+    }
+
+    /// Moves the record B-tree root. Becomes durable with the commit frame;
+    /// discarded on rollback like any other buffered write.
+    pub fn set_root_btree_page(&mut self, page_no: u64) {
+        self.root_btree = Some(page_no);
+    }
+
     /// Commits: appends all dirty pages + the updated header to the WAL and
     /// fsyncs. Returns the transaction id. Durable iff `Ok` (guarantee G2).
     pub fn commit(self) -> Result<u64> {
@@ -371,8 +401,9 @@ impl Txn<'_> {
             pager,
             dirty,
             page_count,
+            root_btree,
         } = self;
-        pager.commit_txn(dirty, page_count)
+        pager.commit_txn(dirty, page_count, root_btree)
     }
 }
 
@@ -601,6 +632,30 @@ mod tests {
             Pager::open(vfs, path(), opts()),
             Err(Error::BadHeader)
         ));
+    }
+
+    #[test]
+    fn root_btree_move_commits_rolls_back_and_survives_reopen() {
+        let (vfs, _) = sim();
+        let mut pager = Pager::create(Arc::clone(&vfs), path(), opts()).unwrap();
+        let mut txn = pager.begin().unwrap();
+        let p = txn.allocate_page().unwrap();
+        txn.write_page(p, &filled(1)).unwrap();
+        assert_eq!(txn.root_btree_page(), 0);
+        txn.set_root_btree_page(p);
+        assert_eq!(txn.root_btree_page(), p);
+        txn.commit().unwrap();
+        assert_eq!(pager.header().root_btree_page, p);
+
+        // Rollback discards a pending root move.
+        let mut txn = pager.begin().unwrap();
+        txn.set_root_btree_page(0);
+        drop(txn);
+        assert_eq!(pager.header().root_btree_page, p);
+
+        drop(pager); // reopen via WAL recovery
+        let pager = Pager::open(vfs, path(), opts()).unwrap();
+        assert_eq!(pager.header().root_btree_page, p);
     }
 
     #[test]

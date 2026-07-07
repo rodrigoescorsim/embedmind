@@ -12,7 +12,7 @@
 //! index    — HNSW (M1) · full-text, metadata (M2)
 //! embed    — ONNX pipeline behind the `Embedder` trait
 //! storage  — pager, WAL, page cache, B-tree
-//! format   — binary layout, checksums
+//! format   — binary layout, checksums (incl. `record`, FORMAT.md §5)
 //! ```
 //!
 //! Hard rules enforced here: no network access, no telemetry, no `unsafe`
@@ -24,6 +24,10 @@ pub mod error;
 pub mod format;
 pub mod index;
 pub mod recall;
+pub mod record;
 pub mod storage;
 
+pub use api::{Memory, MemoryDraft, Store, StoreOptions};
 pub use error::{Error, Result};
+pub use record::Scalar;
+pub use ulid::Ulid;

@@ -62,10 +62,70 @@ pub enum PageType {
     Overflow = 0x07,
 }
 
+impl PageType {
+    /// Parses the on-disk `page_type` byte. `None` = unknown type (corrupt
+    /// page or a future minor-compatible type this build must not guess at).
+    pub fn from_u8(v: u8) -> Option<PageType> {
+        match v {
+            0x01 => Some(PageType::BtreeInner),
+            0x02 => Some(PageType::BtreeLeaf),
+            0x03 => Some(PageType::Vector),
+            0x04 => Some(PageType::HnswNode),
+            0x05 => Some(PageType::HnswMeta),
+            0x06 => Some(PageType::Freelist),
+            0x07 => Some(PageType::Overflow),
+            _ => None,
+        }
+    }
+}
+
 /// Returns `true` if `page_size` is a supported value (power of two within
 /// [`MIN_PAGE_SIZE`], [`MAX_PAGE_SIZE`]).
 pub fn page_size_is_valid(page_size: u32) -> bool {
     (MIN_PAGE_SIZE..=MAX_PAGE_SIZE).contains(&page_size) && page_size.is_power_of_two()
+}
+
+/// Size of the common page header on every page except page 0
+/// (`docs/FORMAT.md` §3).
+pub const PAGE_HEADER_LEN: usize = 16;
+
+/// Common 16-byte header of every page except page 0 (`docs/FORMAT.md` §3):
+/// `page_type` (1) · reserved (3, zero) · `entry_count` (u32) ·
+/// `next_page` (u64). The meaning of `entry_count` and `next_page` depends on
+/// the page type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageHeader {
+    /// What this page holds.
+    pub page_type: PageType,
+    /// Type-dependent count (slots in a B-tree leaf, keys in an inner node,
+    /// payload bytes in an overflow page, …).
+    pub entry_count: u32,
+    /// Type-dependent chain pointer (overflow/freelist); 0 = none.
+    pub next_page: u64,
+}
+
+impl PageHeader {
+    /// Writes the header into the first [`PAGE_HEADER_LEN`] bytes of `page`
+    /// (reserved bytes zeroed). `page` must be at least that long.
+    pub fn encode_into(&self, page: &mut [u8]) {
+        write_bytes(page, 0, &[self.page_type as u8, 0, 0, 0]);
+        write_u32(page, 4, self.entry_count);
+        write_u64(page, 8, self.next_page);
+    }
+
+    /// Decodes the common header from the start of a page. `None` = not a
+    /// valid page header (unknown type or short buffer); the caller attaches
+    /// the page number to the resulting typed error.
+    pub fn decode(page: &[u8]) -> Option<Self> {
+        if page.len() < PAGE_HEADER_LEN {
+            return None;
+        }
+        Some(PageHeader {
+            page_type: PageType::from_u8(*page.first()?)?,
+            entry_count: read_u32(page, 4)?,
+            next_page: read_u64(page, 8)?,
+        })
+    }
 }
 
 /// Computes the checksum of a full page: xxh3_64 over `[0, len - 8)`
@@ -525,6 +585,21 @@ mod tests {
             let _ = WalHeader::decode(&buf);
             let _ = WalFrameHeader::decode(&buf, &buf, next());
         }
+    }
+
+    #[test]
+    fn page_header_roundtrip_and_rejects() {
+        let h = PageHeader {
+            page_type: PageType::BtreeLeaf,
+            entry_count: 17,
+            next_page: 99,
+        };
+        let mut page = vec![0u8; 64];
+        h.encode_into(&mut page);
+        assert_eq!(PageHeader::decode(&page), Some(h));
+        page[0] = 0xEE; // unknown page type
+        assert_eq!(PageHeader::decode(&page), None);
+        assert_eq!(PageHeader::decode(&[0u8; 4]), None); // short buffer
     }
 
     #[test]

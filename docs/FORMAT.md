@@ -97,7 +97,7 @@ without a format break. v1 writers zero them; v1 readers MUST refuse files with 
 
 Records are keyed by **ULID** (16 bytes, time-ordered — gives the timeline for free).
 Leaf pages use a slotted layout: slot directory grows from the header, record bytes grow
-from the tail. A record that does not fit in one page spills to OVERFLOW pages via `next_page`.
+from the tail. A record that does not fit in one page spills to an OVERFLOW page chain.
 
 Record encoding (all fields explicit, in order):
 
@@ -117,6 +117,45 @@ Tagged scalar: 1 tag byte (`0` = null, `1` = bool(u8), `2` = i64, `3` = f64, `4`
 
 `forget` sets the tombstone bit (soft delete). Space and index entries are reclaimed only
 by `embedmind vacuum`, which rebuilds pages and the HNSW index (DESIGN decision #3).
+
+### 5.1 B-tree page layout
+
+**Leaf (`BTREE_LEAF`, 0x02).** After the common 16-byte header (`entry_count` = number of
+slots, `next_page` = 0, reserved):
+
+| region | layout |
+|---|---|
+| slot directory | at offset 16, `entry_count` × 20-byte slots, **sorted strictly ascending by key**: `key` (16, ULID bytes) · `cell_offset` (u16) · `cell_length` (u16) |
+| cells | anywhere in `[slot directory end, page_size − 8)`; writers pack them from the tail |
+
+Cell encoding (first byte is a tag):
+
+| tag | layout | meaning |
+|---|---|---|
+| 0x00 | record bytes follow (`cell_length − 1` bytes) | inline record (§5) |
+| 0x01 | `total_len` (u32) · `first_page` (u64) — cell_length = 13 | record lives in an OVERFLOW chain |
+
+A value is stored inline iff its slot + cell footprint is at most **usable/4**, where
+`usable = page_size − 24` (header + checksum trailer). This cap is what makes leaf
+splits provably safe: a leaf holds at most `usable + usable/4` bytes of entries after an
+upsert, so cutting at the byte midpoint always yields two halves that fit.
+
+**Inner (`BTREE_INNER`, 0x01).** After the common header (`entry_count` = number of
+separators, ≥ 1): `rightmost_child` (u64) at offset 16, then `entry_count` × 24-byte
+entries: `key` (16) · `child` (u64), sorted strictly ascending. `child` covers keys
+`<= key`; `rightmost_child` covers keys greater than every separator. Null (0) children
+are invalid.
+
+**Overflow (`OVERFLOW`, 0x07).** Common header with `entry_count` = payload bytes in
+this page (1 ≤ n ≤ usable) and `next_page` chaining; payload starts at offset 16. The
+referencing cell records the exact `total_len`; readers stop after consuming it, so
+chains are cycle-proof by construction. Hard cap: one record ≤ **32 MiB**
+(`MAX_RECORD_LEN`) — a hostile `total_len` is a typed error before any allocation.
+
+**Updates and deletion.** Upsert rewrites the leaf in place (same page number; the WAL
+makes it atomic). Replacing a value that had an overflow chain **orphans the old chain**
+— that space, like tombstones, is reclaimed only by `embedmind vacuum`. There is no
+B-tree delete operation in v1.
 
 ## 6. Vector pages
 

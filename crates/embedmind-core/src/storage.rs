@@ -10,10 +10,13 @@
 //! - [`wal`] — WAL sidecar: append, recovery scan, reset.
 //! - [`pager`] — transactions, page reads with checksum verification,
 //!   recovery on open, checkpointing, single-writer lock.
+//! - [`btree`] — the record B-tree (M1 item 1.2): ULID keys, slotted leaves,
+//!   overflow chains, in-order scan.
 //!
-//! The record B-tree (M1 item 1.2) and the page cache land next, on top of
-//! [`pager::Pager`].
+//! The page cache (an optimization, not a correctness layer) lands later,
+//! under [`pager::Pager`].
 
+pub mod btree;
 pub mod pager;
 pub mod sim;
 pub mod vfs;
