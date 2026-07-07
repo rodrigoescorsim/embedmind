@@ -229,8 +229,15 @@ pub fn search(
     loop {
         let candidates = search_layer(src, &mut ctx, &[(current, current_sim)], 0, query, ef)?;
         let mut hits = Vec::with_capacity(k);
+        let mut seen: BTreeSet<Ulid> = BTreeSet::new();
         for &(page_no, sim) in &candidates {
             let node = ctx.node(src, page_no)?;
+            // A chunked memory has several index nodes sharing one record id
+            // (DESIGN §6); candidates are best-first, so the first chunk seen
+            // carries the record's best score and later ones are dropped.
+            if !seen.insert(node.record_id) {
+                continue;
+            }
             if filter(node.record_id) {
                 hits.push(Hit {
                     record_id: node.record_id,
@@ -822,6 +829,55 @@ mod tests {
         .unwrap();
         assert_eq!(hits.len(), 8, "adaptive ef must find every live node");
         assert!(hits.iter().all(|h| live.contains(&h.record_id)));
+    }
+
+    /// DESIGN §6: a chunked memory has several index nodes sharing one
+    /// record id; search must return that id once (best chunk's score) and
+    /// still fill `k` with other records.
+    #[test]
+    fn duplicate_record_ids_are_deduped_in_results() {
+        let mut pager = pager();
+        let mut rng = SplitMix64(0xD0D0);
+        let chunked = Ulid::new();
+        let mut others = Vec::new();
+
+        let mut txn = pager.begin().unwrap();
+        // One record indexed under 5 nearby "chunk" vectors...
+        let mut base = random_unit_vector(&mut rng);
+        for i in 0..5 {
+            let mut v = base.clone();
+            v[i] += 0.05;
+            normalize(&mut v);
+            insert(&mut txn, DIMS, chunked, &v).unwrap();
+        }
+        // ...plus 20 distinct records.
+        for _ in 0..20 {
+            let id = Ulid::new();
+            let v = random_unit_vector(&mut rng);
+            insert(&mut txn, DIMS, id, &v).unwrap();
+            others.push(id);
+        }
+        txn.commit().unwrap();
+
+        normalize(&mut base);
+        let meta_page = pager.header().hnsw_meta_page;
+        let hits = search(
+            &pager,
+            meta_page,
+            DIMS,
+            &base,
+            10,
+            SearchParams { ef_search: 64 },
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 10, "dedupe must not under-fill the result");
+        let chunked_hits = hits.iter().filter(|h| h.record_id == chunked).count();
+        assert_eq!(chunked_hits, 1, "chunked record must appear exactly once");
+        assert_eq!(
+            hits[0].record_id, chunked,
+            "the chunked record's best chunk should rank first for its own base vector"
+        );
     }
 
     #[test]

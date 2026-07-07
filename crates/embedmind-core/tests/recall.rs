@@ -153,6 +153,43 @@ fn recall_survives_reopen() {
     );
 }
 
+/// DESIGN §6: a memory longer than one 512-token window is chunked at the
+/// index level — content buried deep in the text (far past the first window)
+/// must still be recallable, and the memory must come back whole, exactly
+/// once.
+#[test]
+fn recall_finds_content_past_the_first_window_via_chunking() {
+    let (_vfs, mut store) = store();
+
+    // ~700 tokens of filler, then the distinctive fact only the second
+    // chunk can see (the first window covers ~510 tokens).
+    let filler = "the meeting notes continued with routine status updates ".repeat(100);
+    let needle = "the production database password rotation happens every thursday at noon";
+    let long = format!("{filler} {needle}");
+    let chunked = store.remember(MemoryDraft::new(long.clone())).unwrap();
+    store
+        .remember(MemoryDraft::new("grocery list: apples, bread, coffee"))
+        .unwrap();
+
+    let hits = store
+        .recall(Query::new("when does the database password rotate").limit(5))
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h.id == chunked.id),
+        "content past the first token window must be recallable"
+    );
+    let occurrences = hits.iter().filter(|h| h.id == chunked.id).count();
+    assert_eq!(
+        occurrences, 1,
+        "a chunked memory must be returned once, not once per chunk"
+    );
+    let hit = hits.iter().find(|h| h.id == chunked.id).unwrap();
+    assert_eq!(
+        hit.content, long,
+        "recall returns the whole memory, never a chunk"
+    );
+}
+
 #[test]
 fn recall_without_embedder_is_a_typed_error() {
     // A KV-only store (no embedder) must reject recall clearly, not panic.

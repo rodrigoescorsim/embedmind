@@ -106,7 +106,7 @@ Record encoding (all fields explicit, in order):
 | `id` | 16 bytes (ULID, big-endian byte order as per ULID spec — the one deliberate exception, kept for sortability) |
 | `flags` | u8 — bit 0 = `tombstone` |
 | `content` | length-prefixed UTF-8 |
-| `vec_ref` | `page_no: u64` + `slot: u16` into a VECTOR page; all-zero = no embedding |
+| `vec_ref` | `page_no: u64` + `slot: u16` into a VECTOR page; all-zero = no embedding. When the content was chunked (§7), this is the **first** chunk's vector |
 | `project` | length-prefixed UTF-8; length 0 = none |
 | `provenance.agent` | length-prefixed UTF-8 (`"claude-code"`, `"cli"`, …) |
 | `provenance.session_id` | length-prefixed UTF-8; length 0 = none |
@@ -188,6 +188,11 @@ traversal hop costs one page read.
 - Graph mutations during insert are ordinary page writes: touched HNSW pages enter the WAL like any other page (§8). No separate index journal.
 - Because adjacency references pages directly, any operation that relocates node pages
   (`embedmind vacuum`) rebuilds the index — which vacuum does anyway (§5, ADR 0003).
+- **Chunking (DESIGN §6):** several nodes may share one `record_id` — a memory longer
+  than the embedder's window is indexed as one node per chunk. Chunking exists only in
+  the graph: the record stays whole, its `vec_ref` (§5) points at the **first** chunk's
+  vector, and search dedupes hits by `record_id`. Readers must not assume `record_id`
+  is unique across HNSW_NODE pages.
 
 ## 8. WAL sidecar (`.mind-wal`)
 

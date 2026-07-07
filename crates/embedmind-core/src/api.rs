@@ -175,6 +175,12 @@ impl Store {
     /// timestamp). If this store has an [`Embedder`], the content is embedded
     /// and indexed for [`Store::recall`] in the same transaction; otherwise
     /// the memory is stored without a vector, exactly as in a KV-only store.
+    ///
+    /// Content longer than the model's window is embedded in overlapping
+    /// chunks ([`Embedder::embed_chunks`], DESIGN §6): the record stays
+    /// whole, each chunk becomes one more index entry pointing at it, and
+    /// `recall` returns the memory once (deduped by id) if *any* chunk
+    /// matches. The record's `vec_ref` points at the first chunk's vector.
     pub fn remember(&mut self, draft: MemoryDraft) -> Result<Memory> {
         let mut record = MemoryRecord {
             id: Ulid::new(),
@@ -192,10 +198,13 @@ impl Store {
 
         let mut txn = self.pager.begin()?;
         if let Some(embedder) = &self.embedder {
-            let mut vector = embedder.embed(&record.content)?;
-            index::normalize(&mut vector);
-            let (page_no, slot) = index::insert(&mut txn, embedder.dims(), record.id, &vector)?;
-            record.vec_ref = Some(VecRef { page_no, slot });
+            for mut vector in embedder.embed_chunks(&record.content)? {
+                index::normalize(&mut vector);
+                let (page_no, slot) = index::insert(&mut txn, embedder.dims(), record.id, &vector)?;
+                if record.vec_ref.is_none() {
+                    record.vec_ref = Some(VecRef { page_no, slot });
+                }
+            }
         }
         let bytes = record.encode()?;
         btree::insert(&mut txn, record.id.to_bytes(), &bytes)?;
