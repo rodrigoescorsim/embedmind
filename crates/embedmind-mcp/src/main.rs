@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use embedmind_core::Store;
-use embedmind_mcp::McpServer;
+use embedmind_mcp::{McpServer, detect_project};
 
 fn main() -> ExitCode {
     let file = match parse_args() {
@@ -42,11 +42,26 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("embedmind-mcp: serving memories from {}", file.display());
+
+    // Project context (M1 item 1.5): MCP hosts spawn the server with the
+    // agent's workspace as cwd, so that is the signal to detect from.
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| detect_project(&cwd));
+    match &project {
+        Some(name) => eprintln!(
+            "embedmind-mcp: serving memories from {} (project: {name})",
+            file.display()
+        ),
+        None => eprintln!(
+            "embedmind-mcp: serving memories from {} (no project context)",
+            file.display()
+        ),
+    }
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let mut server = McpServer::new(store);
+    let mut server = McpServer::new(store, project);
     match server.serve(stdin.lock(), stdout.lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

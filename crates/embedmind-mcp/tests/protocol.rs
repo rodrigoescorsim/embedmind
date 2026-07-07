@@ -35,11 +35,16 @@ fn embedding_store() -> Store {
 }
 
 /// Feeds `requests` (one JSON value per line) through the server loop and
-/// returns the responses in order.
+/// returns the responses in order. No project context.
 fn roundtrip(store: Store, requests: &[Value]) -> Vec<Value> {
+    roundtrip_in_project(store, None, requests)
+}
+
+/// [`roundtrip`] with a detected project context (M1 item 1.5).
+fn roundtrip_in_project(store: Store, project: Option<&str>, requests: &[Value]) -> Vec<Value> {
     let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
     let mut output = Vec::new();
-    McpServer::new(store)
+    McpServer::new(store, project.map(str::to_string))
         .serve(input.as_bytes(), &mut output)
         .unwrap();
     String::from_utf8(output)
@@ -178,7 +183,7 @@ fn protocol_errors_are_typed_json_rpc_errors() {
                  {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"no/such/method\"}\n\
                  {\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"nope\"}}\n\
                  {\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"remember\",\"arguments\":{}}}\n";
-    McpServer::new(kv_store())
+    McpServer::new(kv_store(), None)
         .serve(input.as_bytes(), &mut output)
         .unwrap();
     let responses: Vec<Value> = String::from_utf8(output)
@@ -237,6 +242,123 @@ fn recall_returns_scored_hits_with_provenance() {
     );
 }
 
+/// M1 item 1.5 (DESIGN §7): with a detected project context, `remember`
+/// stamps the project automatically and `recall` scopes to it by default,
+/// with `scope: "all"` as the explicit global fallback and `project: null`
+/// forcing a global memory.
+#[test]
+fn project_context_scopes_remember_and_recall_automatically() {
+    let responses = roundtrip_in_project(
+        embedding_store(),
+        Some("alpha"),
+        &[
+            // Auto-scoped to alpha (no project argument).
+            call(
+                1,
+                "remember",
+                json!({ "content": "uses tokio for async runtime work" }),
+            ),
+            // Explicitly global (project: null).
+            call(
+                2,
+                "remember",
+                json!({ "content": "the async runtime notes apply everywhere", "project": null }),
+            ),
+            // Explicitly another project.
+            call(
+                3,
+                "remember",
+                json!({ "content": "async runtime decisions for the beta service", "project": "beta" }),
+            ),
+            // Default recall: only alpha's memory.
+            call(
+                4,
+                "recall",
+                json!({ "query": "async runtime", "limit": 10 }),
+            ),
+            // Explicit global fallback: all three.
+            call(
+                5,
+                "recall",
+                json!({ "query": "async runtime", "limit": 10, "scope": "all" }),
+            ),
+            // Targeting another project explicitly.
+            call(
+                6,
+                "recall",
+                json!({ "query": "async runtime", "limit": 10, "project": "beta" }),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["project"], "alpha",
+        "remember must stamp the detected project"
+    );
+    assert_eq!(
+        responses[1]["result"]["structuredContent"]["project"],
+        Value::Null,
+        "project: null must force a global memory"
+    );
+
+    let scoped = &responses[3]["result"]["structuredContent"];
+    assert_eq!(scoped["scope"], "alpha");
+    let hits = scoped["hits"].as_array().unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "default recall must see only the project's memories"
+    );
+    assert_eq!(hits[0]["project"], "alpha");
+
+    let global = &responses[4]["result"]["structuredContent"];
+    assert_eq!(global["scope"], "all");
+    assert_eq!(global["hits"].as_array().unwrap().len(), 3);
+
+    let beta = &responses[5]["result"]["structuredContent"];
+    assert_eq!(beta["scope"], "beta");
+    let hits = beta["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["project"], "beta");
+}
+
+#[test]
+fn without_project_context_recall_defaults_to_everything() {
+    let responses = roundtrip(
+        embedding_store(),
+        &[
+            call(
+                1,
+                "remember",
+                json!({ "content": "note scoped to alpha", "project": "alpha" }),
+            ),
+            call(2, "remember", json!({ "content": "a global note" })),
+            call(3, "recall", json!({ "query": "note", "limit": 10 })),
+        ],
+    );
+    assert_eq!(
+        responses[1]["result"]["structuredContent"]["project"],
+        Value::Null,
+        "no context and no argument = global memory"
+    );
+    let result = &responses[2]["result"]["structuredContent"];
+    assert_eq!(result["scope"], "all");
+    assert_eq!(result["hits"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn invalid_scope_is_a_protocol_error() {
+    let responses = roundtrip(
+        kv_store(),
+        &[call(
+            1,
+            "recall",
+            json!({ "query": "x", "scope": "everything" }),
+        )],
+    );
+    assert_eq!(responses[0]["error"]["code"], -32602);
+}
+
 #[test]
 fn forget_through_protocol_hides_memory_from_recall() {
     // remember → forget(id) → recall finds nothing of it.
@@ -250,7 +372,7 @@ fn forget_through_protocol_hides_memory_from_recall() {
         )
     );
     let mut out_1 = Vec::new();
-    let mut server = McpServer::new(store);
+    let mut server = McpServer::new(store, None);
     server.serve(input_1.as_bytes(), &mut out_1).unwrap();
     let first: Value =
         serde_json::from_str(String::from_utf8(out_1).unwrap().lines().next().unwrap()).unwrap();

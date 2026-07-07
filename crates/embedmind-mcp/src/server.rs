@@ -31,14 +31,20 @@ pub struct McpServer {
     /// writing agent on every memory, the basic provenance that is free tier
     /// (CLAUDE.md decision 3).
     agent: String,
+    /// Detected project context (M1 item 1.5, `crate::project`): stamped on
+    /// `remember` and used as the default `recall` scope. `None` = no
+    /// context; memories are global, recall searches everything.
+    project: Option<String>,
 }
 
 impl McpServer {
-    /// Wraps an open store. The caller decides where the file lives.
-    pub fn new(store: Store) -> Self {
+    /// Wraps an open store. The caller decides where the file lives and
+    /// detects the project context ([`crate::project::detect_project`]).
+    pub fn new(store: Store, project: Option<String>) -> Self {
         McpServer {
             store,
             agent: "mcp".to_string(),
+            project,
         }
     }
 
@@ -146,7 +152,9 @@ impl McpServer {
         })
     }
 
-    /// `remember(content, project?, metadata?)` → `{id}` (DESIGN §8).
+    /// `remember(content, project?, metadata?)` → `{id, project}` (DESIGN
+    /// §8). `project` omitted = the detected context (item 1.5); explicit
+    /// `null` = force a global memory; explicit string = that project.
     #[allow(clippy::type_complexity)]
     fn tool_remember(&mut self, args: &Value) -> Result<Result<Value, String>, (i64, String)> {
         let content = args.get("content").and_then(Value::as_str).ok_or((
@@ -154,12 +162,19 @@ impl McpServer {
             "remember: 'content' (string) is required".to_string(),
         ))?;
         let mut draft = MemoryDraft::new(content).agent(self.agent.clone());
-        if let Some(project) = args.get("project") {
-            let project = project.as_str().ok_or((
-                INVALID_PARAMS,
-                "remember: 'project' must be a string".to_string(),
-            ))?;
-            draft = draft.project(project);
+        let project = match args.get("project") {
+            None => self.project.clone(),
+            Some(Value::Null) => None,
+            Some(value) => {
+                let name = value.as_str().ok_or((
+                    INVALID_PARAMS,
+                    "remember: 'project' must be a string (or null for global)".to_string(),
+                ))?;
+                Some(name.to_string())
+            }
+        };
+        if let Some(project) = &project {
+            draft = draft.project(project.clone());
         }
         if let Some(metadata) = args.get("metadata") {
             let entries = metadata.as_object().ok_or((
@@ -175,14 +190,15 @@ impl McpServer {
             }
         }
         Ok(match self.store.remember(draft) {
-            Ok(memory) => Ok(json!({ "id": memory.id.to_string() })),
+            Ok(memory) => Ok(json!({ "id": memory.id.to_string(), "project": project })),
             Err(e) => Err(e.to_string()),
         })
     }
 
-    /// `recall(query, limit?=8, project?)` → hits best-first with scores
-    /// (DESIGN §8). Omitting `project` searches everything; automatic
-    /// project-context scoping is M1 item 1.5, layered on this same tool.
+    /// `recall(query, limit?=8, project?, scope?)` → hits best-first with
+    /// scores (DESIGN §8). Default scope is the detected project context
+    /// (item 1.5, DESIGN §7); `scope: "all"` is the explicit global
+    /// fallback; `project` targets one specific project.
     #[allow(clippy::type_complexity)]
     fn tool_recall(&mut self, args: &Value) -> Result<Result<Value, String>, (i64, String)> {
         let text = args.get("query").and_then(Value::as_str).ok_or((
@@ -197,13 +213,38 @@ impl McpServer {
             ))?;
             query = query.limit(usize::try_from(limit).unwrap_or(usize::MAX));
         }
-        if let Some(project) = args.get("project") {
-            let project = project.as_str().ok_or((
-                INVALID_PARAMS,
-                "recall: 'project' must be a string".to_string(),
-            ))?;
-            query = query.project(project);
-        }
+
+        let scope_all = match args.get("scope").and_then(Value::as_str) {
+            None | Some("project") => false,
+            Some("all") => true,
+            Some(_) => {
+                return Err((
+                    INVALID_PARAMS,
+                    "recall: 'scope' must be \"project\" or \"all\"".to_string(),
+                ));
+            }
+        };
+        let project = match args.get("project") {
+            None => self.project.clone(),
+            Some(value) => {
+                let name = value.as_str().ok_or((
+                    INVALID_PARAMS,
+                    "recall: 'project' must be a string".to_string(),
+                ))?;
+                Some(name.to_string())
+            }
+        };
+        // The scope actually applied, echoed back so the agent knows what
+        // it searched: "all", or the project name.
+        let applied_scope = if scope_all {
+            json!("all")
+        } else if let Some(project) = &project {
+            query = query.project(project.clone());
+            json!(project)
+        } else {
+            json!("all")
+        };
+
         Ok(match self.store.recall(query) {
             Ok(hits) => {
                 let hits: Vec<Value> = hits
@@ -222,7 +263,7 @@ impl McpServer {
                         })
                     })
                     .collect();
-                Ok(json!({ "hits": hits }))
+                Ok(json!({ "hits": hits, "scope": applied_scope }))
             }
             Err(e) => Err(e.to_string()),
         })
@@ -284,7 +325,9 @@ fn tools_list() -> Value {
             {
                 "name": "remember",
                 "description": "Store one memory persistently in the local memory file. \
-                                Returns the memory's id.",
+                                Returns the memory's id. Memories are scoped to the \
+                                current project automatically; pass project: null to \
+                                store a global memory.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -293,8 +336,9 @@ fn tools_list() -> Value {
                             "description": "The memory text to store."
                         },
                         "project": {
-                            "type": "string",
-                            "description": "Project scope. Omit for a global memory."
+                            "type": ["string", "null"],
+                            "description": "Project scope. Omit to use the detected \
+                                            project context; null forces a global memory."
                         },
                         "metadata": {
                             "type": "object",
@@ -308,7 +352,9 @@ fn tools_list() -> Value {
             {
                 "name": "recall",
                 "description": "Semantic search over remembered content. Returns the \
-                                closest memories, best match first, with similarity scores.",
+                                closest memories, best match first, with similarity \
+                                scores. Searches the current project by default; pass \
+                                scope: \"all\" to search every project.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -323,7 +369,15 @@ fn tools_list() -> Value {
                         },
                         "project": {
                             "type": "string",
-                            "description": "Restrict to one project. Omit to search everything."
+                            "description": "Search one specific project instead of \
+                                            the detected one."
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["project", "all"],
+                            "description": "\"project\" (default) = the current \
+                                            project's memories; \"all\" = everything.",
+                            "default": "project"
                         }
                     },
                     "required": ["query"]
