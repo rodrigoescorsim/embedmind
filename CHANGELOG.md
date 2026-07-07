@@ -15,6 +15,55 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- CLI with a working command surface (M1 item 1.6):
+  - `embedmind remember / recall / forget / stats` over the default
+    `~/.embedmind/memory.mind` (or `--file`); `remember`/`recall` respect
+    the detected project context (`--project` / `--global` / `--all`
+    override it); `stats` reports counts, file layout, index entries and
+    the recorded embedding model (new `Store::stats` / `StoreStats` API).
+  - `embedmind serve` runs the same MCP server as the `embedmind-mcp`
+    binary — one installed command covers standalone use and the agent
+    integration (`claude mcp add embedmind -- embedmind serve`).
+  - `embedmind vacuum` fails with an explicit "not implemented, planned
+    for v0.2" instead of pretending.
+  - End-to-end tests drive the real binary, including a full MCP session
+    through `serve` via stdio pipes.
+- MCP memory server (M1 items 1.4 + 1.5, `docs/adr/0009`):
+  - Direct stdio JSON-RPC implementation — no SDK, no tokio; covers
+    `initialize`, `ping`, `tools/list`, `tools/call`. Protocol errors are
+    typed JSON-RPC codes; engine failures during a tool call are tool
+    results with `isError: true`, never a server crash.
+  - Tools `remember` / `recall` / `forget` with stable schemas; zero
+    domain logic in the shell. `clientInfo.name` from the handshake is
+    recorded as the provenance agent.
+  - Automatic project-context scoping: the nearest marker walking up from
+    the cwd wins — `.embedmind.toml` with a top-level `project` key
+    (explicit override), else a `.git` entry (repo root's directory name).
+    `remember` stamps the detected project (`project: null` forces
+    global); `recall` scopes to it by default, `scope: "all"` is the
+    explicit fallback, and the applied scope is echoed back.
+- Vector recall (M1 item 1.3, `docs/adr/0002` + `0004` + `0008`):
+  - Paged HNSW with **direct page addressing**: adjacencies store node
+    page numbers — no id-to-page table, fixed-size meta page forever,
+    O(M) pages touched per insert, no node-count cap. Diversity-aware
+    neighbor selection (the paper's Algorithm 4 + keepPrunedConnections)
+    and adaptive `ef_search` (grows ×4 while filters leave the result
+    under-filled, up to the whole graph).
+  - Embedded ONNX embeddings: all-MiniLM-L6-v2 int8 (~23 MB) + tokenizer
+    compiled into the binary via `ort` (CPU-only) — no API key, no
+    download step, nothing leaves the machine. Model id + dims recorded
+    in the header; opening with a mismatched model is refused.
+  - Long-content chunking at the index level: text past one 510-token
+    window is embedded in overlapping windows (64-token overlap, cap 128
+    chunks); each chunk is one more HNSW entry pointing at the same
+    record, search dedupes by record id, recall returns the whole memory.
+  - `Store::recall(Query)` with `Scope::All`/`Scope::Project` and
+    per-query `ef_search`; hits are `Recalled` (memory + cosine score).
+    Tombstoned and out-of-scope memories are re-checked against the
+    record at search time, never trusted from the graph.
+- New dependencies: `ort` + `tokenizers` (embeddings, isolated behind
+  `trait Embedder`), `serde_json` (MCP/CLI shells only — the binary
+  format still does not use serde). All within the DESIGN §10 budget.
 - KV store + public Rust API (M1 item 1.2):
   - `record`: on-disk `MemoryRecord` encoding exactly per
     [docs/FORMAT.md](docs/FORMAT.md) §5 — ULID ids, tombstone flag, project

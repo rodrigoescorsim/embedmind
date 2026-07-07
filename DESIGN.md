@@ -141,11 +141,12 @@ MemoryRecord {
 ## 8. Camada MCP
 
 - Transporte **stdio JSON-RPC** (o denominador comum dos hosts MCP hoje). **[DECIDIDO — ADR 0009] Implementação direta do protocolo, sem SDK:** o subconjunto necessário (`initialize`, `ping`, `tools/list`, `tools/call`) é minúsculo e o `rmcp` traria tokio + stack async para um servidor síncrono de um cliente por processo. Única dependência nova: `serde_json`. Logs em stderr; stdout é canal exclusivo do protocolo.
-- Tools expostas (schemas estáveis — são API pública):
-  - `remember(content, metadata?, project?)` → `{id}`
-  - `recall(query, limit?=8, scope?, filters?)` → `[{id, content, score, provenance, created_at}]`
-  - `forget(id | query, older_than?)` → `{count}` — `forget` por query exige `confirm: true` (agentes erram; deleção em massa não pode ser acidente de um tool call).
+- Tools expostas (schemas estáveis — são API pública). Estado v0.1:
+  - `remember(content, metadata?, project?)` → `{id, project}` — `project` omitido = contexto detectado (item 1.5); `null` explícito = memória global.
+  - `recall(query, limit?=8, project?, scope?)` → `{hits: [{id, content, score, project, provenance, created_at_micros}], scope}` — escopo default = projeto detectado; `scope: "all"` é o fallback global explícito; o escopo aplicado é ecoado na resposta. `filters` (metadados) chega no M2.
+  - `forget(id)` → `{count}` — v0.1 só por id. `forget` por query/idade (com `confirm: true` obrigatório — agentes erram; deleção em massa não pode ser acidente de um tool call) chega quando a engine tiver deleção endereçada por query.
 - A casca MCP contém **zero** lógica de domínio: parse → chamada da API `embedmind-core` → serialize. Trocar MCP por outro protocolo = reescrever ~300 linhas.
+- O CLI `embedmind serve` roda o mesmo servidor (o crate `embedmind-cli` depende de `embedmind-mcp`); um único binário instalado cobre uso standalone e a integração com agentes.
 
 ## 9. Estratégia de testes (o moat operacionalizado)
 

@@ -25,13 +25,13 @@ EmbedMind's answer:
 
 - **Single file** — your agent's entire memory is one portable, crash-safe file (WAL-backed).
 - **In-process** — no server, no Docker, no ports. The engine lives inside the MCP server binary.
-- **Hybrid retrieval** — vector similarity (HNSW) + full-text + metadata filters; a lightweight graph layer (entities and relations) on the roadmap.
+- **Semantic retrieval today, hybrid on the roadmap** — vector similarity (paged HNSW) with automatic chunking of long memories now; full-text + metadata filters next (M2), then a lightweight graph layer (entities and relations, M3).
 - **Local by default** — nothing ever leaves your machine. Built for the local-first wave, usable in air-gapped environments.
 - **Rust** — predictable memory footprint, one static binary per platform.
 
 ## Quickstart
 
-> ⚠️ **Status: pre-v0.1 — under active development.** The commands below describe the target UX for v0.1.
+> ⚠️ **Status: pre-v0.1 — under active development.** The commands below work today from a source build (`cargo install --path crates/embedmind-cli`); crates.io + prebuilt binaries land with the v0.1 release.
 
 ```bash
 # Install (one command, no dependencies)
@@ -46,11 +46,11 @@ Your agent now has three tools:
 
 | Tool | What it does |
 |---|---|
-| `remember` | Store a memory (text + metadata; embedded and indexed automatically) |
-| `recall` | Hybrid search over everything remembered (vector + full-text + filters) |
-| `forget` | Delete memories by id, query, or age |
+| `remember` | Store a memory (text + metadata; embedded and indexed automatically, long text chunked transparently) |
+| `recall` | Semantic search over everything remembered, best match first with scores (full-text + filters join in M2) |
+| `forget` | Delete one memory by id (delete by query/age is planned) |
 
-Plus **automatic project-context memory**: EmbedMind tracks which project each memory came from, so `recall` is scoped by default to what's relevant.
+Plus **automatic project-context memory**: EmbedMind detects the project from the agent's working directory (git root, or a `.embedmind.toml` with `project = "name"`), stamps it on every memory, and scopes `recall` to it by default — with `scope: "all"` as the explicit way out.
 
 The CLI works standalone too:
 
