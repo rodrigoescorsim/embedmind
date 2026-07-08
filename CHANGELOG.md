@@ -15,6 +15,14 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- crates.io publication metadata (M1 item 1.6, story S8): `description`,
+  `repository`, `homepage`, `keywords`, `categories`, `readme` and
+  `license = "MIT"` on `embedmind-core`, `embedmind-mcp` and `embedmind`
+  (the CLI crate), a per-crate `README.md` for each, and inter-crate deps
+  pinned with both `path` and `version` in `[workspace.dependencies]`.
+  Mandatory publish order (core → mcp → cli), the `[MANUAL — founder]`
+  steps, and the crates.io 10 MiB size-limit caveat for the embedded ONNX
+  model are documented in [docs/RELEASING.md](docs/RELEASING.md).
 - Release pipeline for pre-built binaries (M1 item 1.6, story S8;
   `.github/workflows/release.yml`):
   - Triggered by a `v*` tag; runs the full `cargo test --workspace` suite on

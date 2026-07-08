@@ -47,16 +47,25 @@ suite como gate, anexa os artefatos ao GitHub Release e valida o teto de tamanho
   refletida na spec S8. Disparar a tag e o `cargo publish` real seguem
   [MANUAL — founder].
 
-### A2. Preparar publicação no crates.io (resto do item 1.6)
+### A2. Preparar publicação no crates.io (resto do item 1.6) [✅ ENTREGUE]
 
-Metadados de publicação (`description`, `repository`, `keywords`, `categories`,
-`readme`) nos 3 crates; `cargo publish --dry-run` limpo na ordem core → mcp → cli;
-documentar a ordem de publicação.
+Metadados de publicação (`description`, `repository`, `homepage`, `keywords`,
+`categories`, `readme`, `license = "MIT"`) nos 3 crates; deps internas pinadas
+com `path` **e** `version` em `[workspace.dependencies]`; README por crate;
+ordem de publicação e passos `[MANUAL — founder]` documentados em
+[RELEASING.md](RELEASING.md).
 
-- **DoD:** `cargo publish --dry-run -p embedmind-core -p embedmind-mcp -p
-  embedmind-cli` (em sequência) sem erro; nome `embedmind` confirmado disponível.
-- **Verificação:** saída do dry-run limpa. (O `cargo publish` real é
-  [MANUAL — founder], no dia do launch.)
+- **DoD:** `cargo publish --dry-run -p embedmind-core` limpo; `cargo package
+  --workspace` empacota + compila os 3 (o dry-run de mcp/cli só resolve após o
+  core estar no índice — ordem obrigatória, ver RELEASING.md); nomes
+  `embedmind` / `embedmind-core` / `embedmind-mcp` confirmados **disponíveis**.
+- **Verificação:** `cargo package --workspace` verde; dry-run do core limpo;
+  `cargo clippy`/`fmt` limpos. (O `cargo publish` real é [MANUAL — founder].)
+- **Achado (bloqueia o publish real do core, `[MANUAL — founder]`):** o
+  `embedmind-core` empacota em ~16 MiB comprimido (modelo ONNX embarcado, ADR
+  0004), acima do teto de 10 MiB do crates.io. O `--dry-run` passa (teto é
+  server-side), mas o `cargo publish` real exige **pedido de aumento de limite**
+  ao crates.io antes de publicar o core — detalhado em RELEASING.md.
 
 ### A3. Harness de benchmark + números honestos (item 1.7, parte dev)
 
