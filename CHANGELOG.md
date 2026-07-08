@@ -15,6 +15,37 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- Launch-ready README + 30s demo GIF script (M1 item 1.7 / A4):
+  - README marked **v0.1** (pre-v0.1 warning dropped); a dedicated **Install**
+    section (prebuilt binary from Releases, `cargo install embedmind`, source
+    build) split from the **Quickstart**; the real `agent-mem-10k` benchmark
+    table rendered from `benches/results` (recall@10 0.9953, query p99 17.1 ms,
+    `remember` p99 16.7 ms, 82 MiB file, ~112 MiB RSS) with the honesty caveats
+    (embed-included ingest, competitors not measured this run, 100k NFRs
+    pending); a "When to use sqlite-vec instead" section; and full-text/graph
+    claims scoped to the roadmap so nothing unshipped is promised as v0.1.
+  - `docs/launch/gif-script.md`: exact command sequence + timing for the 30s
+    demo (remember → semantic recall → stats), all commands drawn from the
+    shipped quickstart. Recording itself stays `[MANUAL — founder]`.
+- Full benchmark harness (M1 item 1.7 / A3 part 2, `docs/BENCHMARKS.md`):
+  - `embedmind-bench` now measures the complete metric set — recall@10 vs.
+    brute-force, warm query p50/p99, cold-open (`Store::open` + first query),
+    `remember` p50/p99 end-to-end (incl. embedding), ingest throughput, on-disk
+    file size, and peak RSS — over the committed `agent-mem-10k`/`-100k` datasets.
+  - Competitors (sqlite-vec, zvec) are compared in **pinned, recorded versions**
+    (`benches/src/competitors.rs`) behind `--features compare-{sqlite-vec,zvec}`.
+    When a native toolchain is absent the row reports "not measured on this run
+    (target vX.Y)" — the honesty contract forbids fabricated numbers
+    (BENCHMARKS.md §4 rule 1).
+  - `run_all` binary + `benches/run_all.sh` render a README-ready markdown table
+    (with an auto-computed "where EmbedMind loses" section) plus a
+    `results/<version>.json`, and exit non-zero on any missed applicable NFR, so
+    the same entry point is the CI performance guard (BENCHMARKS.md §5).
+  - **Measured v0.1-dev numbers** (founder Windows dev box, CPU-only,
+    single-thread): `agent-mem-10k` → recall@10 0.9953, query p99 17.1 ms,
+    `remember` p99 16.7 ms (NFR < 200 ms ✅), file 82 MiB, peak RSS ~112 MiB.
+    The @100k NFRs (recall p99 < 50 ms, RAM < 300 MB) are validated by the
+    `agent-mem-100k` run — see docs/BENCHMARKS.md for the recorded result.
 - crates.io publication metadata (M1 item 1.6, story S8): `description`,
   `repository`, `homepage`, `keywords`, `categories`, `readme` and
   `license = "MIT"` on `embedmind-core`, `embedmind-mcp` and `embedmind`

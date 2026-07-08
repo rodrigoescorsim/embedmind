@@ -86,21 +86,48 @@ para o README.
   `recall@10` (HNSW vs baseline, por conjunto). Binários `gen_dataset`/`baseline`;
   smoke end-to-end em `benches/tests/harness.rs` no `cargo test --workspace`.
   Referência medida: `baseline agent-mem-10k` → recall@10 0.9945 (min 0.90).
-- **Parte 2 — pendente:** p50/p99 (quente + cold-open), throughput de ingest,
-  tamanho de arquivo, RSS; comparação sqlite-vec/zvec pinadas; renderizador da
-  tabela markdown; guard de regressão no CI (BENCHMARKS.md §5).
+- **Parte 2 — feita:** módulos `metrics` (p50/p99 nearest-rank + throughput),
+  `sysmem` (RSS de pico via `sysinfo` pinado, sem `unsafe`), `harness::run_suite`
+  (recall@10, p50/p99 quente, cold-open = `Store::open` + 1ª query com o store
+  fechado antes por causa do single-writer, `remember` p50/p99 fim a fim,
+  throughput de ingest, tamanho de arquivo, RSS de pico), `competitors` (registro
+  sqlite-vec/zvec com versões **pinadas e registradas** + adaptadores gated por
+  feature `compare-*`; quando a toolchain nativa falta, reporta honestamente
+  "not measured on this run (target vX.Y)", nunca número inventado) e `report`
+  (validação dos NFRs da spec, tabela markdown pronta para o README com seção
+  "where EmbedMind loses", e JSON de resultados). Binário `run_all` + script
+  `benches/run_all.sh` rodam fim a fim, gravam `results/<version>.json` +
+  `latest.md`, e saem com código ≠ 0 se algum NFR aplicável falhar (serve de
+  guard de regressão no CI, BENCHMARKS.md §5).
+- **Números medidos (Windows dev box, 20 CPUs lógicas, CPU-only, single-thread):**
+  `agent-mem-10k` → recall@10 0.9953 (min 0.90), query p50/p99 quente 10.6/17.1 ms,
+  cold-open 0.3 ms + 1ª query 12 ms, `remember` p50/p99 6.7/16.7 ms, ingest ~82
+  mem/s, arquivo 82 MiB, RSS de pico ~112 MiB. NFR `remember` p99 < 200 ms: ✅.
+  Os NFRs enunciados @ 100k (recall p99 < 50 ms, RAM < 300 MB) exigem o
+  `agent-mem-100k` — ver `docs/BENCHMARKS.md`/CHANGELOG para o resultado.
 
-### A4. README final de launch (item 1.7, parte dev do conteúdo)
+### A4. README final de launch (item 1.7, parte dev do conteúdo) [✅ ENTREGUE]
 
-Atualizar o README com a tabela de benchmark real (da A3), status v0.1 (remover o
-aviso pre-v0.1), instruções de instalação por binário, e seção de comparação honesta
-("quando usar sqlite-vec em vez de EmbedMind").
+README atualizado para o estado v0.1 lançável: linha de status v0.1 no topo (aviso
+pre-v0.1 removido), seção **Install** separada do **Quickstart** (binário pré-compilado
+dos artefatos do `release.yml` — `embedmind-{linux-x86_64.tar.gz,macos-aarch64.tar.gz,
+windows-x86_64.zip}` — mais `cargo install embedmind` e build por fonte); tabela de
+benchmark **real** renderizada de `benches/results` (recall@10 0.9953, query p99 17.1 ms,
+`remember` p99 16.7 ms, arquivo 82 MiB, RSS ~112 MiB) com caveats honestos (ingest
+inclui embedding e não compara com vetor-só; sqlite-vec/zvec *not measured* nesta run,
+sem número inventado; NFRs @100k pendentes do dataset 100k); seção **When to use
+sqlite-vec instead**; claims de full-text/graph escopadas ao roadmap (nada não-entregue
+prometido como v0.1). Roteiro do GIF de 30s committado em
+[docs/launch/gif-script.md](launch/gif-script.md) (sequência exata de comandos +
+timing; gravação é [MANUAL — founder]).
 
 - **DoD:** README sem promessas não-entregues; benchmark com números reais e derrotas
   incluídas; quickstart validado literalmente (copy-paste funciona).
-- **Verificação:** seguir o quickstart do zero numa máquina/pasta limpa.
+- **Verificação:** quickstart rodado fim a fim contra o binário release em arquivo
+  `.mind` limpo — `remember` → `recall` (recall semântico: "why tokio?" acha a memória)
+  → `stats` (modelo `all-MiniLM-L6-v2-int8`, contagens corretas). ✅
 - Nota: o GIF de demo de 30s e o teste com um 2º agente além do Claude Code são
-  [MANUAL — founder]; a task prepara o roteiro do GIF (sequência de comandos a gravar).
+  [MANUAL — founder]; esta task entregou o roteiro do GIF (sequência de comandos a gravar).
 
 ### A5. [MANUAL — founder] Fechar o M1
 
