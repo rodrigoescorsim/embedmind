@@ -373,6 +373,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedmind-bench"
+version = "0.1.0-dev"
+dependencies = [
+ "embedmind-core",
+ "ulid",
+]
+
+[[package]]
 name = "embedmind-core"
 version = "0.1.0-dev"
 dependencies = [

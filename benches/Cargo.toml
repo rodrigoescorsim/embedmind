@@ -1,0 +1,29 @@
+[package]
+name = "embedmind-bench"
+description = "Benchmark harness for embedmind-core: committed dataset generators, brute-force baseline, recall@10 measurement (docs/BENCHMARKS.md). Not published."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+embedmind-core = { workspace = true }
+ulid = { workspace = true }
+
+[lints]
+workspace = true
+
+# One binary per harness entry point (docs/BENCHMARKS.md §2/§3). `gen_dataset`
+# materializes a committed dataset spec into vectors + a `.mind` store;
+# `baseline` runs the brute-force recall@10 reference over the same vectors.
+[[bin]]
+name = "gen_dataset"
+path = "src/bin/gen_dataset.rs"
+
+[[bin]]
+name = "baseline"
+path = "src/bin/baseline.rs"

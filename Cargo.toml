@@ -4,6 +4,7 @@ members = [
     "crates/embedmind-core",
     "crates/embedmind-mcp",
     "crates/embedmind-cli",
+    "benches",
 ]
 # The fuzz crate is its own workspace: it needs nightly + libFuzzer (Linux CI
 # job), and must not drag those requirements into the stable build.

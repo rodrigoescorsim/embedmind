@@ -3,3 +3,6 @@
 *.mind-wal
 fuzz/target
 fuzz/artifacts
+# Materialized benchmark datasets are large build products regenerated from the
+# committed specs (benches/src/dataset.rs), never committed themselves.
+benches/data/
