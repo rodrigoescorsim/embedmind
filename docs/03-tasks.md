@@ -79,6 +79,16 @@ para o README.
   metodologia do doc respeitada (mesmos embeddings para todos, versões registradas);
   NFRs da spec (recall < 50 ms p99 @ 100k) medidos.
 - **Verificação:** rodar o harness completo e revisar a tabela gerada.
+- **Parte 1 — feita:** crate `embedmind-bench` no workspace com gerador de
+  corpus determinístico (`corpus::generate`, seed registrada), specs committadas
+  `agent-mem-10k/-100k`, materialização via ONNX embarcado (`.mind` + sidecar
+  `.vec` com guard de seed/dims/modelo), baseline brute-force exato e medição de
+  `recall@10` (HNSW vs baseline, por conjunto). Binários `gen_dataset`/`baseline`;
+  smoke end-to-end em `benches/tests/harness.rs` no `cargo test --workspace`.
+  Referência medida: `baseline agent-mem-10k` → recall@10 0.9945 (min 0.90).
+- **Parte 2 — pendente:** p50/p99 (quente + cold-open), throughput de ingest,
+  tamanho de arquivo, RSS; comparação sqlite-vec/zvec pinadas; renderizador da
+  tabela markdown; guard de regressão no CI (BENCHMARKS.md §5).
 
 ### A4. README final de launch (item 1.7, parte dev do conteúdo)
 
