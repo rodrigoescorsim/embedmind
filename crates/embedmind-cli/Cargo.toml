@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["ai", "agents", "memory", "mcp", "cli"]
+categories = ["command-line-utilities", "database", "text-processing"]
 
 [[bin]]
 name = "embedmind"
@@ -15,7 +20,8 @@ path = "src/main.rs"
 embedmind-core = { workspace = true }
 # `embedmind serve` runs the same MCP server as the standalone binary — one
 # installed command covers both the CLI and the agent integration (item 1.6).
-embedmind-mcp = { path = "../embedmind-mcp" }
+# Pinned via workspace.dependencies so the published crate carries a version.
+embedmind-mcp = { workspace = true }
 clap = { workspace = true }
 
 [dev-dependencies]

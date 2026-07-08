@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["embeddings", "vector", "memory", "database", "ai"]
+categories = ["database-implementations", "science", "data-structures"]
 
 [dependencies]
 thiserror = { workspace = true }

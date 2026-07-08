@@ -15,9 +15,16 @@ edition = "2024"
 license = "MIT"
 authors = ["Rodrigo Escorsim <rodrigo.escorsim@gmail.com>"]
 rust-version = "1.90"
+# Shared crates.io metadata (docs/RELEASING.md). Per-crate `description`,
+# `keywords`, `categories` and `readme` stay in each crate's Cargo.toml.
+repository = "https://github.com/rodrigoescorsim/embedmind"
+homepage = "https://github.com/rodrigoescorsim/embedmind"
 
 [workspace.dependencies]
-embedmind-core = { path = "crates/embedmind-core" }
+# Inter-crate deps carry both `path` (local builds) and `version` (crates.io
+# strips `path` on publish and needs the version to resolve — docs/RELEASING.md).
+embedmind-core = { path = "crates/embedmind-core", version = "0.1.0-dev" }
+embedmind-mcp = { path = "crates/embedmind-mcp", version = "0.1.0-dev" }
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

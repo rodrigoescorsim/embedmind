@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["mcp", "ai", "agents", "memory", "llm"]
+categories = ["command-line-utilities", "database", "text-processing"]
 
 [[bin]]
 name = "embedmind-mcp"
