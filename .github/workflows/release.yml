@@ -92,11 +92,14 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked -p embedmind --target ${{ matrix.target }}
 
-      # Smoke check: the freshly built binary runs and reports its version.
-      # (DoD: `embedmind --version` works on the artifact.)
-      - name: Verify `embedmind --version`
+      # Install smoke test: exercise the freshly built binary exactly as a
+      # user gets it — `--version` plus a full remember -> recall -> stats
+      # cycle over a throwaway .mind (story S8, scripts/smoke_install.sh). Runs
+      # on every target in the matrix, so the artifact's quickstart is proven
+      # on Linux, Windows and macOS before it is packaged and attached.
+      - name: Install smoke test (remember → recall → stats)
         shell: bash
-        run: "target/${{ matrix.target }}/release/${{ matrix.bin }} --version"
+        run: EMBEDMIND_BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}" ./scripts/smoke_install.sh
 
       # Package the single self-contained binary (ONNX model + tokenizer are
       # embedded via include_bytes!, ADR 0004; ONNX Runtime is linked

@@ -116,6 +116,87 @@ founder — todas contrariam decisões vigentes):
 > `release.yml`) é um NFR **diferente** — governa o binário comprimido que o
 > usuário baixa das Releases, não o pacote do crates.io.
 
+## Smoke test de instalação (binário pré-compilado)
+
+Antes de anunciar uma Release, valide o binário **como o usuário o recebe**: numa
+pasta limpa, sem depender do checkout, exercitando o fluxo do quickstart
+(`--version` → `remember` → `recall` → `stats`) sobre um `.mind` descartável. O
+script [`scripts/smoke_install.sh`](../scripts/smoke_install.sh) faz isso e sai
+com código ≠ 0 na primeira asserção que falhar (serve de porta de CI e de
+checklist de launch).
+
+```bash
+# 1. Contra o binário baixado das Releases (o caso que importa no launch):
+tar xzf embedmind-<versão>-<alvo>.tar.gz     # ou unzip no Windows
+EMBEDMIND_BIN=./embedmind ./scripts/smoke_install.sh
+#   Windows (bash/Git Bash):  EMBEDMIND_BIN=./embedmind.exe ./scripts/smoke_install.sh
+
+# 2. Contra o que estiver no PATH (ex. após `cargo install embedmind`):
+./scripts/smoke_install.sh
+
+# 3. Sem binário instalado (checkout de código): faz fallback para `cargo run`.
+./scripts/smoke_install.sh
+```
+
+O que o smoke test comprova, além de "roda":
+
+- `--version` imprime `embedmind <semver>` (nome + versão bem-formados);
+- `remember --global` devolve um ULID de 26 chars marcado `(global)` — grava e
+  reconhece a memória;
+- `recall` com uma consulta **semanticamente próxima mas de texto diferente**
+  reencontra aquele id e ecoa o conteúdo — prova embedding + busca vetorial
+  reais, não casamento de substring;
+- `stats` reporta exatamente 1 memória viva **e** um modelo de embedding gravado
+  no arquivo (`all-MiniLM-L6-v2-int8`, não `none (KV-only)`) — se o modelo ONNX
+  não tivesse sido linkado no binário, esta asserção pegaria.
+
+Tudo acontece num diretório temporário apagado na saída (`--file` próprio), então
+o `~/.embedmind/memory.mind` real do founder nunca é tocado.
+
+> `[MANUAL — founder]` complementar (fora deste script): abrir o `.mind` gerado
+> num **segundo agente** (ex. Cursor) e confirmar `recall` do outro lado — a
+> prova de integração ponta a ponta que precisa de um cliente MCP externo.
+
+## Portabilidade do `.mind` entre plataformas (verificação cross-platform)
+
+Garantia de formato **G3** ([docs/FORMAT.md](FORMAT.md) §1): o arquivo é
+byte-idêntico entre plataformas porque todo inteiro multi-byte é gravado em
+**little-endian fixo** — nunca na ordem nativa do host. Um `.mind` escrito no
+Windows do founder abre idêntico em Linux/macOS, e vice-versa.
+
+Coberto automaticamente por
+[`crates/embedmind-core/tests/portability.rs`](../crates/embedmind-core/tests/portability.rs)
+(roda em `cargo test --workspace`, portanto em toda a matriz de CI):
+
+- `header_is_fixed_little_endian_per_format_spec` — grava um `.mind` real e
+  afirma que os campos do header (page 0) estão nos offsets de FORMAT §4 **em
+  little-endian explícito** (ex. `format_version = 1` são os bytes
+  `01 00 00 00`, não `00 00 00 01`). Num host big-endian, um bug de
+  ordem-nativa faria estes bytes divergirem — é o que a asserção proíbe.
+- `written_store_reopens_with_identical_content` — o round-trip que a
+  portabilidade protege: escrever → reabrir → conteúdo idêntico.
+
+Verificação manual entre duas máquinas de arquiteturas diferentes (quando quiser
+a prova ponta a ponta, além do teste unitário):
+
+```bash
+# Máquina A (ex. Windows x86-64):
+embedmind --file portable.mind remember "cross-platform check" --global
+sha256sum portable.mind          # anote o hash (certutil -hashfile no cmd puro)
+
+# Copie portable.mind para a Máquina B (ex. Linux arm64) e lá:
+sha256sum portable.mind          # DEVE bater com o hash da Máquina A
+embedmind --file portable.mind recall "cross-platform" --all   # reencontra a memória
+embedmind --file portable.mind stats                            # mesmas contagens
+```
+
+Hashes iguais confirmam G3 na prática; o `recall`/`stats` confirmam que o
+arquivo idêntico também é semanticamente legível do outro lado. (Cada comando
+que escreve — como o `remember` acima — faz checkpoint e **remove** o WAL
+sidecar `portable.mind-wal` ao fechar o store, então após o `remember` resta só
+o arquivo principal: copie apenas `portable.mind`. Um `portable.mind-wal`
+residual só apareceria após um crash e seria reincorporado na próxima abertura.)
+
 ## Passos de publicação (dia do launch — `[MANUAL — founder]`)
 
 Pré-requisitos: aumento de limite do crates.io concedido para `embedmind-core`;
