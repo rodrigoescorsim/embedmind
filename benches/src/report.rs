@@ -1,0 +1,648 @@
+//! Results rendering + NFR validation (`docs/BENCHMARKS.md` §3/§4, spec §NFR).
+//!
+//! Turns [`crate::harness::SuiteResult`]s (EmbedMind) and
+//! [`crate::competitors`] outcomes into:
+//!
+//! - a **README-ready markdown table**, with the competitor columns and their
+//!   pinned versions, rendering "not measured on this run" honestly rather than
+//!   inventing numbers, and an explicit **"where EmbedMind loses"** section
+//!   (BENCHMARKS.md §4 rule 1: publish losses);
+//! - an **NFR verdict** for the spec's hard numbers (recall p99 < 50 ms @ 100k,
+//!   `remember` p99 < 200 ms, RAM < 300 MB @ 100k), reported even when missed
+//!   (§4 rule 1);
+//! - a **run environment header** (machine, OS, date, versions) so every table
+//!   states its provenance (BENCHMARKS.md §3).
+//!
+//! No product logic; pure formatting + threshold checks over measured numbers.
+
+use std::fmt::Write as _;
+
+use crate::competitors::{Competitor, CompetitorOutcome};
+use crate::harness::SuiteResult;
+
+/// The spec's numeric NFRs (docs/01-spec.md §NFR / DESIGN targets). Kept here so
+/// the pass/fail thresholds are version-controlled next to the checker.
+pub mod nfr {
+    /// `recall` p99 latency ceiling at 100k memories, CPU-only (ms).
+    pub const RECALL_P99_MS_AT_100K: f64 = 50.0;
+    /// `remember` p99 latency ceiling (ms) — dominated by embedding.
+    pub const REMEMBER_P99_MS: f64 = 200.0;
+    /// Peak RAM ceiling at 100k memories (MiB).
+    pub const RAM_MIB_AT_100K: f64 = 300.0;
+    /// Dataset size at which the latency/RAM NFRs are stated.
+    pub const NFR_DATASET_COUNT: usize = 100_000;
+}
+
+/// One NFR check: what it targets, the measured value, and whether it passed.
+#[derive(Debug, Clone)]
+pub struct NfrCheck {
+    pub name: &'static str,
+    pub target: String,
+    pub measured: String,
+    pub passed: bool,
+    /// True when the NFR could not be evaluated on this run (e.g. the 100k
+    /// dataset was not part of the run) — reported as "n/a", not a pass.
+    pub not_applicable: bool,
+}
+
+/// Recorded facts about the run environment (BENCHMARKS.md §3: "every results
+/// table states machine, OS, versions, date"). Captured from the host at run
+/// time; the version is the workspace crate version.
+#[derive(Debug, Clone)]
+pub struct RunEnv {
+    pub os: String,
+    pub arch: String,
+    pub cpus: usize,
+    pub embedmind_version: String,
+    pub date_utc: String,
+}
+
+impl RunEnv {
+    /// Captures the current environment. `date_utc` is the run date; kept as a
+    /// caller-supplied string (the harness passes an ISO date) so this module
+    /// stays free of a time dependency.
+    pub fn capture(date_utc: impl Into<String>) -> Self {
+        RunEnv {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            cpus: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(0),
+            embedmind_version: env!("CARGO_PKG_VERSION").to_string(),
+            date_utc: date_utc.into(),
+        }
+    }
+}
+
+/// Validates the spec NFRs against the measured results. Latency/RAM NFRs are
+/// stated at 100k, so they are checked against that dataset's result if present
+/// and reported `n/a` otherwise (never silently passed). `remember` p99 is
+/// size-independent, so the largest available run is used.
+pub fn check_nfrs(results: &[SuiteResult]) -> Vec<NfrCheck> {
+    let at_100k = results.iter().find(|r| r.count == nfr::NFR_DATASET_COUNT);
+    // Largest run available, for the size-independent remember NFR.
+    let largest = results.iter().max_by_key(|r| r.count);
+
+    let mut checks = Vec::new();
+
+    // recall p99 < 50 ms @ 100k
+    checks.push(match at_100k {
+        Some(r) => NfrCheck {
+            name: "recall p99 @ 100k (CPU-only)",
+            target: format!("< {:.0} ms", nfr::RECALL_P99_MS_AT_100K),
+            measured: format!("{:.2} ms", r.query_p99_ms),
+            passed: r.query_p99_ms < nfr::RECALL_P99_MS_AT_100K,
+            not_applicable: false,
+        },
+        None => NfrCheck {
+            name: "recall p99 @ 100k (CPU-only)",
+            target: format!("< {:.0} ms", nfr::RECALL_P99_MS_AT_100K),
+            measured: "n/a (100k not in this run)".to_string(),
+            passed: false,
+            not_applicable: true,
+        },
+    });
+
+    // remember p99 < 200 ms (any size; report the largest run)
+    checks.push(match largest {
+        Some(r) => NfrCheck {
+            name: "remember p99 (end-to-end, incl. embedding)",
+            target: format!("< {:.0} ms", nfr::REMEMBER_P99_MS),
+            measured: format!("{:.2} ms (@ {})", r.remember_p99_ms, human_count(r.count)),
+            passed: r.remember_p99_ms < nfr::REMEMBER_P99_MS,
+            not_applicable: false,
+        },
+        None => NfrCheck {
+            name: "remember p99 (end-to-end, incl. embedding)",
+            target: format!("< {:.0} ms", nfr::REMEMBER_P99_MS),
+            measured: "n/a (no run)".to_string(),
+            passed: false,
+            not_applicable: true,
+        },
+    });
+
+    // RAM < 300 MB @ 100k (peak of ingest/query phases)
+    checks.push(match at_100k {
+        Some(r) => {
+            let peak = r.peak_rss_ingest_mib.max(r.peak_rss_query_mib);
+            NfrCheck {
+                name: "peak RAM @ 100k",
+                target: format!("< {:.0} MiB", nfr::RAM_MIB_AT_100K),
+                measured: format!("{peak:.1} MiB"),
+                passed: peak < nfr::RAM_MIB_AT_100K,
+                not_applicable: false,
+            }
+        }
+        None => NfrCheck {
+            name: "peak RAM @ 100k",
+            target: format!("< {:.0} MiB", nfr::RAM_MIB_AT_100K),
+            measured: "n/a (100k not in this run)".to_string(),
+            passed: false,
+            not_applicable: true,
+        },
+    });
+
+    checks
+}
+
+/// Renders the whole README-ready markdown report: environment header, the
+/// metric table (EmbedMind + competitor columns), the honest losses section,
+/// and the NFR verdict. `competitors` is the outcome list from
+/// [`crate::competitors::run_all`], assumed identical across datasets (same
+/// pins), so its versions are taken from the first dataset's run.
+pub fn render_markdown(
+    env: &RunEnv,
+    results: &[SuiteResult],
+    competitors: &[(&'static Competitor, CompetitorOutcome)],
+) -> String {
+    let mut out = String::new();
+
+    // --- provenance header ---
+    let _ = writeln!(out, "## Benchmark results\n");
+    let _ = writeln!(
+        out,
+        "_Machine: {} / {}, {} logical CPUs · EmbedMind {} · {} · CPU-only, single-thread._\n",
+        env.os, env.arch, env.cpus, env.embedmind_version, env.date_utc
+    );
+
+    // --- metric table (one column per dataset) ---
+    render_metric_table(&mut out, results);
+
+    // --- competitor comparison ---
+    render_competitor_table(&mut out, results, competitors);
+
+    // --- honesty: where EmbedMind loses ---
+    render_losses(&mut out, results, competitors);
+
+    // --- NFR verdict ---
+    render_nfr_table(&mut out, results);
+
+    out
+}
+
+fn render_metric_table(out: &mut String, results: &[SuiteResult]) {
+    let _ = writeln!(out, "### EmbedMind\n");
+    // Header: Metric | dataset1 | dataset2 | ...
+    let mut header = String::from("| Metric |");
+    let mut sep = String::from("|---|");
+    for r in results {
+        let _ = write!(header, " {} |", r.dataset);
+        sep.push_str("---:|");
+    }
+    let _ = writeln!(out, "{header}");
+    let _ = writeln!(out, "{sep}");
+
+    row(out, "memories", results, |r| human_count(r.count));
+    row(out, "recall@10 (vs brute-force)", results, |r| {
+        format!("{:.4}", r.recall.recall_at_k)
+    });
+    row(out, "recall@10 min (worst query)", results, |r| {
+        format!("{:.4}", r.recall.min_recall)
+    });
+    row(out, "query p50 (warm)", results, |r| {
+        format!("{:.2} ms", r.query_p50_ms)
+    });
+    row(out, "query p99 (warm)", results, |r| {
+        format!("{:.2} ms", r.query_p99_ms)
+    });
+    row(out, "query first (cold-open)", results, |r| {
+        format!("{:.2} ms", r.cold_first_query_ms)
+    });
+    row(out, "cold open (Store::open)", results, |r| {
+        format!("{:.2} ms", r.cold_open_ms)
+    });
+    row(out, "remember p50 (e2e, w/ embed)", results, |r| {
+        format!("{:.2} ms", r.remember_p50_ms)
+    });
+    row(out, "remember p99 (e2e, w/ embed)", results, |r| {
+        format!("{:.2} ms", r.remember_p99_ms)
+    });
+    row(out, "ingest throughput", results, |r| {
+        format!("{:.0} mem/s", r.ingest_per_sec)
+    });
+    row(out, "file size on disk", results, |r| {
+        human_bytes(r.file_bytes)
+    });
+    row(out, "peak RSS (ingest)", results, |r| {
+        format!("{:.1} MiB", r.peak_rss_ingest_mib)
+    });
+    row(out, "peak RSS (query)", results, |r| {
+        format!("{:.1} MiB", r.peak_rss_query_mib)
+    });
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "_`remember` latency is end-to-end and includes embedding — the baselines below don't embed, so their ingest is vectors-only and not comparable to this row (BENCHMARKS.md §1)._\n"
+    );
+}
+
+fn render_competitor_table(
+    out: &mut String,
+    results: &[SuiteResult],
+    competitors: &[(&'static Competitor, CompetitorOutcome)],
+) {
+    let _ = writeln!(
+        out,
+        "### vs. baselines (same vectors, same queries, same k)\n"
+    );
+    let biggest = results.iter().max_by_key(|r| r.count);
+    let ds = biggest.map(|r| r.dataset).unwrap_or("—");
+    let _ = writeln!(
+        out,
+        "_Comparison on `{ds}`. Competitor versions are pinned in `benches/src/competitors.rs` and recorded here (BENCHMARKS.md §1). Rows that could not run on this machine say so explicitly — never fabricated._\n"
+    );
+    let _ = writeln!(
+        out,
+        "| System | Version | recall@10 | query p50 | query p99 | ingest (vec-only) |"
+    );
+    let _ = writeln!(out, "|---|---|---:|---:|---:|---:|");
+
+    // EmbedMind's own row on the biggest dataset, for side-by-side reading.
+    if let Some(r) = biggest {
+        let _ = writeln!(
+            out,
+            "| **EmbedMind** | {} | {:.4} | {:.2} ms | {:.2} ms | — (embeds; see note) |",
+            env!("CARGO_PKG_VERSION"),
+            r.recall.recall_at_k,
+            r.query_p50_ms,
+            r.query_p99_ms,
+        );
+    }
+
+    for (c, outcome) in competitors {
+        match outcome {
+            CompetitorOutcome::Measured(m) => {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} | {} |",
+                    c.name,
+                    c.version,
+                    opt_f4(m.recall_at_10),
+                    opt_ms(m.query_p50_ms),
+                    opt_ms(m.query_p99_ms),
+                    opt_per_sec(m.ingest_vecs_per_sec),
+                );
+            }
+            CompetitorOutcome::NotMeasured { reason } => {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} (target) | _not measured_ | _not measured_ | _not measured_ | _not measured_ |",
+                    c.name, c.version
+                );
+                let _ = writeln!(out, "|   ↳ | | | | | _{reason}_ |");
+            }
+        }
+    }
+    let _ = writeln!(out);
+    for (c, _) in competitors {
+        let _ = writeln!(out, "- **{}** ({}): {}", c.name, c.version, c.note);
+    }
+    let _ = writeln!(out);
+}
+
+fn render_losses(
+    out: &mut String,
+    results: &[SuiteResult],
+    competitors: &[(&'static Competitor, CompetitorOutcome)],
+) {
+    let _ = writeln!(out, "### Where EmbedMind loses (honesty contract)\n");
+    let biggest = results.iter().max_by_key(|r| r.count);
+    let mut any = false;
+
+    if let Some(r) = biggest {
+        for (c, outcome) in competitors {
+            if let CompetitorOutcome::Measured(m) = outcome {
+                if let Some(cr) = m.recall_at_10
+                    && cr > r.recall.recall_at_k + 1e-6
+                {
+                    let _ = writeln!(
+                        out,
+                        "- **recall@10**: {} {:.4} beats EmbedMind {:.4} on `{}`.",
+                        c.name, cr, r.recall.recall_at_k, r.dataset
+                    );
+                    any = true;
+                }
+                if let Some(cp) = m.query_p99_ms
+                    && cp < r.query_p99_ms - 1e-6
+                {
+                    let _ = writeln!(
+                        out,
+                        "- **query p99**: {} {:.2} ms beats EmbedMind {:.2} ms on `{}`.",
+                        c.name, cp, r.query_p99_ms, r.dataset
+                    );
+                    any = true;
+                }
+            }
+        }
+    }
+
+    if !any {
+        let _ = writeln!(
+            out,
+            "- No competitor was measured on this run (see the note above), so no head-to-head loss can be reported yet. When a baseline is measured and wins a metric, it is listed here automatically — the harness computes this section, it is never hand-edited (BENCHMARKS.md §4 rule 3)."
+        );
+    }
+    let _ = writeln!(out);
+}
+
+fn render_nfr_table(out: &mut String, results: &[SuiteResult]) {
+    let _ = writeln!(out, "### NFR verdict (spec §NFR)\n");
+    let _ = writeln!(out, "| NFR | Target | Measured | Verdict |");
+    let _ = writeln!(out, "|---|---|---:|:---:|");
+    for c in check_nfrs(results) {
+        let verdict = if c.not_applicable {
+            "n/a"
+        } else if c.passed {
+            "✅ pass"
+        } else {
+            "❌ **miss**"
+        };
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} |",
+            c.name, c.target, c.measured, verdict
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "_Missed NFRs are reported, not hidden (BENCHMARKS.md §4 rule 1); they are tracked in CHANGELOG.md / docs/BENCHMARKS.md until met._\n"
+    );
+}
+
+/// Emits a JSON results object (BENCHMARKS.md §4 rule 3: results are a
+/// CI-generated file, `benches/results/<version>.json`). Hand-rolled to avoid
+/// pulling serde into the harness (the engine forbids it in the core, and the
+/// harness keeps its dep surface tiny).
+pub fn render_json(
+    env: &RunEnv,
+    results: &[SuiteResult],
+    competitors: &[(&'static Competitor, CompetitorOutcome)],
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{{");
+    let _ = writeln!(out, "  \"env\": {{");
+    let _ = writeln!(out, "    \"os\": {},", jstr(&env.os));
+    let _ = writeln!(out, "    \"arch\": {},", jstr(&env.arch));
+    let _ = writeln!(out, "    \"cpus\": {},", env.cpus);
+    let _ = writeln!(
+        out,
+        "    \"embedmind_version\": {},",
+        jstr(&env.embedmind_version)
+    );
+    let _ = writeln!(out, "    \"date_utc\": {}", jstr(&env.date_utc));
+    let _ = writeln!(out, "  }},");
+
+    let _ = writeln!(out, "  \"datasets\": [");
+    for (i, r) in results.iter().enumerate() {
+        let comma = if i + 1 < results.len() { "," } else { "" };
+        let _ = writeln!(out, "    {{");
+        let _ = writeln!(out, "      \"dataset\": {},", jstr(r.dataset));
+        let _ = writeln!(out, "      \"count\": {},", r.count);
+        let _ = writeln!(out, "      \"dims\": {},", r.dims);
+        let _ = writeln!(out, "      \"model_id\": {},", jstr(&r.model_id));
+        let _ = writeln!(out, "      \"recall_at_10\": {:.6},", r.recall.recall_at_k);
+        let _ = writeln!(
+            out,
+            "      \"recall_at_10_min\": {:.6},",
+            r.recall.min_recall
+        );
+        let _ = writeln!(out, "      \"query_p50_ms\": {:.4},", r.query_p50_ms);
+        let _ = writeln!(out, "      \"query_p99_ms\": {:.4},", r.query_p99_ms);
+        let _ = writeln!(out, "      \"cold_open_ms\": {:.4},", r.cold_open_ms);
+        let _ = writeln!(
+            out,
+            "      \"cold_first_query_ms\": {:.4},",
+            r.cold_first_query_ms
+        );
+        let _ = writeln!(out, "      \"remember_p50_ms\": {:.4},", r.remember_p50_ms);
+        let _ = writeln!(out, "      \"remember_p99_ms\": {:.4},", r.remember_p99_ms);
+        let _ = writeln!(out, "      \"ingest_per_sec\": {:.2},", r.ingest_per_sec);
+        let _ = writeln!(out, "      \"file_bytes\": {},", r.file_bytes);
+        let _ = writeln!(
+            out,
+            "      \"peak_rss_ingest_mib\": {:.2},",
+            r.peak_rss_ingest_mib
+        );
+        let _ = writeln!(
+            out,
+            "      \"peak_rss_query_mib\": {:.2}",
+            r.peak_rss_query_mib
+        );
+        let _ = writeln!(out, "    }}{comma}");
+    }
+    let _ = writeln!(out, "  ],");
+
+    let _ = writeln!(out, "  \"competitors\": [");
+    for (i, (c, outcome)) in competitors.iter().enumerate() {
+        let comma = if i + 1 < competitors.len() { "," } else { "" };
+        let (measured, reason) = match outcome {
+            CompetitorOutcome::Measured(_) => ("true", String::new()),
+            CompetitorOutcome::NotMeasured { reason } => ("false", reason.clone()),
+        };
+        let _ = writeln!(out, "    {{");
+        let _ = writeln!(out, "      \"name\": {},", jstr(c.name));
+        let _ = writeln!(out, "      \"version\": {},", jstr(c.version));
+        let _ = writeln!(out, "      \"measured\": {measured},");
+        let _ = writeln!(out, "      \"reason\": {}", jstr(&reason));
+        let _ = writeln!(out, "    }}{comma}");
+    }
+    let _ = writeln!(out, "  ],");
+
+    let _ = writeln!(out, "  \"nfrs\": [");
+    let checks = check_nfrs(results);
+    for (i, c) in checks.iter().enumerate() {
+        let comma = if i + 1 < checks.len() { "," } else { "" };
+        let _ = writeln!(out, "    {{");
+        let _ = writeln!(out, "      \"name\": {},", jstr(c.name));
+        let _ = writeln!(out, "      \"target\": {},", jstr(&c.target));
+        let _ = writeln!(out, "      \"measured\": {},", jstr(&c.measured));
+        let _ = writeln!(out, "      \"passed\": {},", c.passed);
+        let _ = writeln!(out, "      \"not_applicable\": {}", c.not_applicable);
+        let _ = writeln!(out, "    }}{comma}");
+    }
+    let _ = writeln!(out, "  ]");
+    let _ = writeln!(out, "}}");
+    out
+}
+
+// --- small formatting helpers ---
+
+fn row(out: &mut String, label: &str, results: &[SuiteResult], f: impl Fn(&SuiteResult) -> String) {
+    let mut line = format!("| {label} |");
+    for r in results {
+        let _ = write!(line, " {} |", f(r));
+    }
+    let _ = writeln!(out, "{line}");
+}
+
+fn opt_f4(v: Option<f64>) -> String {
+    v.map(|x| format!("{x:.4}")).unwrap_or_else(|| "—".into())
+}
+fn opt_ms(v: Option<f64>) -> String {
+    v.map(|x| format!("{x:.2} ms"))
+        .unwrap_or_else(|| "—".into())
+}
+fn opt_per_sec(v: Option<f64>) -> String {
+    v.map(|x| format!("{x:.0}/s")).unwrap_or_else(|| "—".into())
+}
+
+/// Human-readable count: `10000` → `10k`, `100000` → `100k`.
+fn human_count(n: usize) -> String {
+    if n >= 1000 && n.is_multiple_of(1000) {
+        format!("{}k", n / 1000)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Human-readable byte size in MiB/GiB (on-disk file sizes).
+fn human_bytes(b: u64) -> String {
+    let mib = b as f64 / (1024.0 * 1024.0);
+    if mib >= 1024.0 {
+        format!("{:.2} GiB", mib / 1024.0)
+    } else {
+        format!("{mib:.1} MiB")
+    }
+}
+
+/// Minimal JSON string escaping (quotes + backslash + control chars) — enough
+/// for the values this harness emits (names, versions, os strings).
+fn jstr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::competitors::COMPETITORS;
+    use crate::recall::RecallReport;
+
+    fn fake_result(name: &'static str, count: usize, p99: f64, rss: f64) -> SuiteResult {
+        SuiteResult {
+            dataset: name,
+            count,
+            dims: 384,
+            model_id: "all-MiniLM-L6-v2-int8".into(),
+            recall: RecallReport {
+                k: 10,
+                queries: 200,
+                recall_at_k: 0.994,
+                min_recall: 0.9,
+            },
+            query_p50_ms: 1.2,
+            query_p99_ms: p99,
+            query_mean_ms: 1.5,
+            warm_queries: 200,
+            cold_open_ms: 12.0,
+            cold_first_query_ms: 30.0,
+            remember_p50_ms: 40.0,
+            remember_p99_ms: 120.0,
+            remember_samples: 500,
+            ingest_per_sec: 25.0,
+            file_bytes: 86_000_000,
+            peak_rss_ingest_mib: rss,
+            peak_rss_query_mib: rss - 10.0,
+            query_vectors: vec![],
+        }
+    }
+
+    #[test]
+    fn nfrs_pass_when_under_target() {
+        let r = fake_result("agent-mem-100k", 100_000, 12.0, 250.0);
+        let checks = check_nfrs(&[r]);
+        assert!(checks.iter().all(|c| c.passed && !c.not_applicable));
+    }
+
+    #[test]
+    fn nfrs_report_miss_not_hide() {
+        // p99 over 50 ms and RSS over 300 MiB at 100k → misses, not hidden.
+        let r = fake_result("agent-mem-100k", 100_000, 80.0, 400.0);
+        let checks = check_nfrs(&[r]);
+        let recall_p99 = checks
+            .iter()
+            .find(|c| c.name.starts_with("recall p99"))
+            .unwrap();
+        assert!(!recall_p99.passed && !recall_p99.not_applicable);
+        let ram = checks
+            .iter()
+            .find(|c| c.name.starts_with("peak RAM"))
+            .unwrap();
+        assert!(!ram.passed);
+    }
+
+    #[test]
+    fn nfrs_are_na_when_100k_absent() {
+        // Only a 10k run: the 100k-stated NFRs are n/a, never a silent pass.
+        let r = fake_result("agent-mem-10k", 10_000, 5.0, 100.0);
+        let checks = check_nfrs(&[r]);
+        let recall_p99 = checks
+            .iter()
+            .find(|c| c.name.starts_with("recall p99"))
+            .unwrap();
+        assert!(recall_p99.not_applicable && !recall_p99.passed);
+        // remember p99 is size-independent → still evaluated on the 10k run.
+        let rem = checks
+            .iter()
+            .find(|c| c.name.starts_with("remember p99"))
+            .unwrap();
+        assert!(!rem.not_applicable);
+    }
+
+    #[test]
+    fn markdown_contains_all_sections_and_pins() {
+        let env = RunEnv::capture("2026-07-08");
+        let r = fake_result("agent-mem-10k", 10_000, 5.0, 100.0);
+        let competitors: Vec<_> = COMPETITORS
+            .iter()
+            .map(|c| {
+                (
+                    c,
+                    CompetitorOutcome::NotMeasured {
+                        reason: "feature disabled".into(),
+                    },
+                )
+            })
+            .collect();
+        let md = render_markdown(&env, &[r], &competitors);
+        assert!(md.contains("## Benchmark results"));
+        assert!(md.contains("Where EmbedMind loses"));
+        assert!(md.contains("NFR verdict"));
+        // Pinned competitor versions must appear even when not measured.
+        assert!(md.contains("sqlite-vec"));
+        assert!(md.contains("0.1.6"));
+        assert!(md.contains("_not measured_"));
+    }
+
+    #[test]
+    fn json_is_wellformed_ish() {
+        let env = RunEnv::capture("2026-07-08");
+        let r = fake_result("agent-mem-10k", 10_000, 5.0, 100.0);
+        let competitors: Vec<_> = COMPETITORS
+            .iter()
+            .map(|c| (c, CompetitorOutcome::NotMeasured { reason: "x".into() }))
+            .collect();
+        let js = render_json(&env, &[r], &competitors);
+        assert_eq!(js.matches('{').count(), js.matches('}').count());
+        assert_eq!(js.matches('[').count(), js.matches(']').count());
+        assert!(js.contains("\"embedmind_version\""));
+    }
+}

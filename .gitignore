@@ -6,3 +6,7 @@ fuzz/artifacts
 # Materialized benchmark datasets are large build products regenerated from the
 # committed specs (benches/src/dataset.rs), never committed themselves.
 benches/data/
+# Harness output. `latest.md` is a scratch render; per-version result JSONs are
+# published only when a release is cut (docs/BENCHMARKS.md §4 rule 3) by
+# force-adding the specific file — the dev-run noise stays out of the tree.
+benches/results/

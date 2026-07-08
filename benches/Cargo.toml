@@ -13,6 +13,19 @@ publish = false
 [dependencies]
 embedmind-core = { workspace = true }
 ulid = { workspace = true }
+# Pure-Rust process introspection for peak-RSS sampling (docs/BENCHMARKS.md §3).
+# Pinned; needs no `unsafe` in our code, so the workspace's `unsafe_code =
+# forbid` stands even though we read OS memory counters.
+sysinfo = "=0.31.4"
+
+[features]
+default = []
+# Competitor comparison adapters (docs/BENCHMARKS.md §1). Off by default so the
+# harness builds everywhere (the CI regression guard runs EmbedMind-only
+# metrics); a release box with the native toolchains enables them to fill the
+# comparison columns. See `src/competitors.rs`.
+compare-sqlite-vec = []
+compare-zvec = []
 
 [lints]
 workspace = true
@@ -27,3 +40,11 @@ path = "src/bin/gen_dataset.rs"
 [[bin]]
 name = "baseline"
 path = "src/bin/baseline.rs"
+
+# The full suite: runs every metric over the requested datasets, compares
+# against the pinned competitors, validates the spec NFRs, and writes the
+# README-ready markdown table + a `results/<version>.json` (docs/BENCHMARKS.md
+# §3/§4). Driven end-to-end by `benches/run_all.sh`.
+[[bin]]
+name = "run_all"
+path = "src/bin/run_all.rs"

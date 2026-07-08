@@ -14,17 +14,29 @@
 //! - [`recall`] — recall@k of the HNSW index vs. that baseline (set overlap,
 //!   since HNSW is approximate).
 //!
-//! Part 2 will add the remaining metrics (p50/p99 latency, ingest throughput,
-//! file size, RSS, cold-open) and the sqlite-vec/zvec comparisons, plus the
-//! results-table renderer and CI regression guard.
+//! Part 2 (this crate's completed scope) adds the rest:
+//!
+//! - [`metrics`] — latency percentiles (p50/p99, nearest-rank) and throughput.
+//! - [`sysmem`] — peak-RSS sampling across a measured phase.
+//! - [`harness`] — the full metric suite over one dataset (warm + cold-open
+//!   latency, ingest throughput, file size, RSS, recall).
+//! - [`competitors`] — the pinned sqlite-vec/zvec registry and comparison
+//!   adapters (feature-gated; honest "not measured" when a toolchain is absent).
+//! - [`report`] — NFR validation and the README-ready markdown + JSON renderers.
 //!
 //! Binaries: `gen_dataset <name>` materializes a dataset; `baseline <name>`
-//! runs the brute-force recall@10 reference over it.
+//! runs the brute-force recall@10 reference over it; `run_all` runs the full
+//! suite end-to-end and emits the results table (see `benches/run_all.sh`).
 
 pub mod baseline;
+pub mod competitors;
 pub mod corpus;
 pub mod dataset;
+pub mod harness;
+pub mod metrics;
 pub mod recall;
+pub mod report;
+pub mod sysmem;
 
 use std::path::{Path, PathBuf};
 
