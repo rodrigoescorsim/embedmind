@@ -1,0 +1,142 @@
+name: Release
+
+# Fires on a version tag (`v*`), and can be dispatched manually against a tag
+# for a dry run (`v0.1.0-rc1`). Publication to crates.io and the definitive
+# v0.1.0 Release are MANUAL — founder acts (docs/04-agents.md guardrail 7);
+# this workflow only builds artifacts and attaches them to the tag's Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build a Release for (e.g. v0.1.0-rc1)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Download/install-size ceiling for the distributed artifact, incl. the
+  # embedded ONNX model + tokenizer (docs/01-spec.md S8 NFR, ADR 0010).
+  # The raw binary links ONNX Runtime statically (~45 MiB); it is shipped
+  # compressed (~20 MiB), and this ceiling governs that download. Failing it
+  # fails the job.
+  MAX_ARTIFACT_BYTES: 41943040 # 40 * 1024 * 1024
+
+jobs:
+  # Gate: the whole suite (unit + crash harness + E2E + fuzz smoke) must be
+  # green on every first-class platform before any artifact is published.
+  # Mirrors the CI matrix so we never ship what wouldn't pass it.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache ONNX Runtime download (ort pulls this outside target/)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
+          key: ort-dylib-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Tests
+        run: cargo test --workspace
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: embedmind
+            asset: embedmind-linux-x86_64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: embedmind.exe
+            asset: embedmind-windows-x86_64.zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: embedmind
+            asset: embedmind-macos-aarch64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache ONNX Runtime download (ort pulls this outside target/)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
+          key: ort-dylib-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      # Release profile (LTO, codegen-units=1, strip) comes from the root
+      # Cargo.toml — no flags needed here beyond selecting the profile.
+      - name: Build release binary
+        run: cargo build --release --locked -p embedmind --target ${{ matrix.target }}
+
+      # Smoke check: the freshly built binary runs and reports its version.
+      # (DoD: `embedmind --version` works on the artifact.)
+      - name: Verify `embedmind --version`
+        shell: bash
+        run: "target/${{ matrix.target }}/release/${{ matrix.bin }} --version"
+
+      # Package the single self-contained binary (ONNX model + tokenizer are
+      # embedded via include_bytes!, ADR 0004; ONNX Runtime is linked
+      # statically, ADR 0010 — so one file is all a user needs).
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          src="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          case "${{ matrix.asset }}" in
+            *.zip) 7z a -tzip "dist/${{ matrix.asset }}" "$src" >/dev/null ;;
+            *.tar.gz) tar -czf "dist/${{ matrix.asset }}" -C "$(dirname "$src")" "$(basename "$src")" ;;
+          esac
+
+      # The NFR ceiling protects download/install speed (docs/01-spec.md S8);
+      # it governs the compressed artifact the user actually downloads.
+      - name: Verify artifact size (< 40 MB, model embedded)
+        shell: bash
+        run: |
+          size=$(wc -c < "dist/${{ matrix.asset }}")
+          human=$(( size / 1024 / 1024 ))
+          echo "Artifact ${{ matrix.asset }}: ${size} bytes (~${human} MiB), ceiling ${MAX_ARTIFACT_BYTES} bytes"
+          if [ "$size" -gt "$MAX_ARTIFACT_BYTES" ]; then
+            echo "::error::Artifact ${size} bytes exceeds the ${MAX_ARTIFACT_BYTES}-byte ceiling (docs/01-spec.md S8 NFR)."
+            exit 1
+          fi
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+      # Attach to the tag's GitHub Release. Only on a real tag push — a manual
+      # dispatch stays a dry run (artifacts above, no Release mutation), so an
+      # agent/CI run never publishes on its own (guardrail 7).
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.asset }}
+          fail_on_unmatched_files: true
