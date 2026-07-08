@@ -147,7 +147,9 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
   (little-endian fixo).
 - **Pendente:** publicação no crates.io + binários de release no GitHub + teste manual
   com Claude Code **e mais 1 agente** (hoje só o build por fonte funciona).
-- **NFR:** binário < 40 MB incluindo modelo; RAM < 300 MB para 100k memórias.
+- **NFR:** artefato de release comprimido < 40 MB incluindo modelo (~20 MiB hoje; o
+  binário nu linka ONNX Runtime estático e passa de 40 MB — ver [ADR 0010](adr/0010-teto-de-tamanho-governa-artefato-comprimido.md));
+  RAM < 300 MB para 100k memórias.
 - **Verificação:** CI de release produz artefatos para as 3 plataformas; smoke test de
   instalação documentado.
 
@@ -232,7 +234,7 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
 | Integridade | arquivo nunca irrecuperável; recovery automático | crash harness + fuzzing |
 | Latência `recall` | < 50 ms p99 @ 100k memórias, CPU-only | benchmark harness |
 | Latência `remember` | < 200 ms p99 (dominada pelo embedding) | benchmark harness |
-| Binário | < 40 MB incluindo modelo de embedding | CI de release |
+| Artefato de release | < 40 MB comprimido, incluindo modelo (ADR 0010) | CI de release |
 | RAM | < 300 MB @ 100k memórias | benchmark harness (RSS) |
 | Plataformas | Windows, Linux, macOS — mesmo arquivo, little-endian | CI matriz 3 SOs |
 | Rede | ZERO chamadas no núcleo (auditável) | revisão + ausência de deps de rede |

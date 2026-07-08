@@ -6,7 +6,7 @@ conforme convenção do [CLAUDE.md](../../CLAUDE.md).
 
 O [DESIGN.md](../DESIGN.md) §11 mantém a tabela-resumo; a versão completa de cada decisão
 vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvidas
-(próximos números: 0010+).
+(próximos números: 0011+).
 
 | # | Decisão | Status |
 |---|---|---|
@@ -19,5 +19,6 @@ vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvi
 | [0007](0007-criptografia-reservada-no-formato.md) | Criptografia reservada no formato, não implementada | Aceito |
 | [0008](0008-hnsw-enderecamento-direto-de-paginas.md) | HNSW com endereçamento direto de páginas (sem tabela de localização) | Aceito |
 | [0009](0009-mcp-stdio-direto-sem-sdk.md) | Servidor MCP: stdio JSON-RPC direto, sem SDK (sem tokio) | Aceito |
+| [0010](0010-teto-de-tamanho-governa-artefato-comprimido.md) | Teto de tamanho (< 40 MB) governa o artefato comprimido de release | Aceito |
 
 Template: `Status · Contexto · Decisão · Alternativas rejeitadas · Consequências`.

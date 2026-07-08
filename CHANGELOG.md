@@ -15,6 +15,17 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- Release pipeline for pre-built binaries (M1 item 1.6, story S8;
+  `.github/workflows/release.yml`):
+  - Triggered by a `v*` tag; runs the full `cargo test --workspace` suite on
+    Linux/Windows/macOS as a gate, then builds the release binary
+    (LTO + `codegen-units=1` + strip, from the root `Cargo.toml`) on each
+    platform, smoke-tests `embedmind --version`, and attaches one compressed
+    artifact per OS to the tag's GitHub Release.
+  - `workflow_dispatch` against a tag is a dry run — it produces the same
+    workflow artifacts but never mutates a Release (publication is a founder
+    action, `docs/04-agents.md` guardrail 7).
+  - The job fails if any artifact exceeds the 40 MB ceiling.
 - CLI with a working command surface (M1 item 1.6):
   - `embedmind remember / recall / forget / stats` over the default
     `~/.embedmind/memory.mind` (or `--file`); `remember`/`recall` respect
@@ -120,3 +131,11 @@ Pre-v0.1 — under active development, repo private until M1 completes
   ([docs/TESTING.md](docs/TESTING.md)), benchmark methodology
   ([docs/BENCHMARKS.md](docs/BENCHMARKS.md)), contribution guide, security policy,
   ADRs ([docs/adr/](docs/adr/)).
+
+### Changed
+- Size NFR (honesty note, `docs/adr/0010`): the "< 40 MB incl. model" ceiling
+  now governs the **compressed release artifact** users download (~20 MiB
+  today), not the raw binary. The raw release binary is ~45 MiB because `ort`
+  links ONNX Runtime statically (~23 MiB) on top of the embedded ~23 MiB model
+  + tokenizer + code — ADR 0004 had assumed the model would dominate. No change
+  to the "single self-contained file, no external dependency" promise.

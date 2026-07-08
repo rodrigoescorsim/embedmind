@@ -38,7 +38,7 @@ Repo **privado** até o fim do marco. Prioridade absoluta: crash-safety antes de
 | 1.3 | Busca vetorial **HNSW** in-file + embeddings ONNX embarcados (CPU) | 1.1, 1.2 | ✅ (incl. chunking de memórias longas) |
 | 1.4 | Servidor MCP: `remember` / `recall` / `forget` | 1.2, 1.3 | ✅ (ADR 0009: stdio direto, sem SDK) |
 | 1.5 | Memória automática de contexto de projeto | 1.4 | ✅ (raiz git / `.embedmind.toml`) |
-| 1.6 | Instalação em 1 comando (`cargo install` + binários); testado com Claude Code **+ 1 outro agente** | 1.4 | 🔶 CLI completo (`serve` = servidor MCP); faltam binários de release + teste manual com 2 agentes |
+| 1.6 | Instalação em 1 comando (`cargo install` + binários); testado com Claude Code **+ 1 outro agente** | 1.4 | 🔶 CLI completo (`serve` = servidor MCP) + pipeline de release por tag `v*` (3 plataformas, teto de tamanho); faltam `cargo publish` (A2) + teste manual com 2 agentes |
 | 1.7 | README final: GIF de demo em 30s + **benchmark honesto** vs. sqlite-vec e zvec | 1.3, 1.6 | ⬜ |
 | 1.8 | Testes de crash-recovery + fuzzing do formato no CI | 1.1 | ✅ |
 

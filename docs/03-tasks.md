@@ -31,16 +31,21 @@ Comando que prova o estado: `cargo test --workspace` verde nas 3 plataformas do 
 
 ## Fase A — fechar o M1 (v0.1 lançável) — 1–2 semanas
 
-### A1. Pipeline de release: binários pré-compilados (resto do item 1.6)
+### A1. Pipeline de release: binários pré-compilados (resto do item 1.6) [✅ ENTREGUE]
 
-Job de release no GitHub Actions que, numa tag `v*`, builda binários release
-(Windows/Linux/macOS, LTO+strip conforme `Cargo.toml`), roda a suite, anexa os
-artefatos ao GitHub Release e valida o teto de tamanho.
+Job de release no GitHub Actions (`.github/workflows/release.yml`) que, numa tag `v*`,
+builda binários release (Windows/Linux/macOS, LTO+strip conforme `Cargo.toml`), roda a
+suite como gate, anexa os artefatos ao GitHub Release e valida o teto de tamanho.
 
-- **DoD:** tag de teste produz 3 artefatos baixáveis; binário < 40 MB com modelo
+- **DoD:** tag de teste produz 3 artefatos baixáveis; artefato < 40 MB com modelo
   embutido; `embedmind --version` funciona no artefato baixado.
 - **Verificação:** disparar o workflow numa tag `v0.1.0-rc1` e conferir artefatos +
   `gh release view`.
+- **Nota de tamanho:** o binário nu dá ~45 MiB (ONNX Runtime estático via `ort`); o
+  teto de 40 MB passou a governar o **artefato comprimido** (~20 MiB), decisão
+  registrada em [ADR 0010](adr/0010-teto-de-tamanho-governa-artefato-comprimido.md) e
+  refletida na spec S8. Disparar a tag e o `cargo publish` real seguem
+  [MANUAL — founder].
 
 ### A2. Preparar publicação no crates.io (resto do item 1.6)
 
