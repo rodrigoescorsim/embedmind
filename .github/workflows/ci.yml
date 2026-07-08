@@ -27,6 +27,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Cache ONNX Runtime download (ort pulls this outside target/)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
+          key: ort-dylib-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -50,6 +58,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
+      - name: Cache ONNX Runtime download (ort pulls this outside target/)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-dylib-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Restore accumulated corpus
