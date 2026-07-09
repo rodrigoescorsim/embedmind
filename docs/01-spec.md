@@ -170,7 +170,7 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
 - **Verificação:** testes de fusão com casos de ouro (termo raro, sinônimo semântico,
   ambos) + property tests.
 
-### S10. Filtros de metadados no recall [⬜ pendente]
+### S10. Filtros de metadados no recall [✅ implementada]
 
 - **Dado** memórias com metadados tipados, **quando** chamo `recall(query,
   filters: {chave: valor|faixa})`, **então** só memórias que satisfazem TODOS os

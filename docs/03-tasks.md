@@ -156,7 +156,7 @@ vetorial por RRF k=60 (ADR 0005) no `recall`.
   novo; ADR 0010 escrito.
 - **Verificação:** `cargo test --workspace` + casos de ouro da S9.
 
-### B3. Filtros de metadados no `recall` (item 2.4)
+### B3. Filtros de metadados no `recall` (item 2.4) [✅ ENTREGUE]
 
 `recall(query, filters: {...})` na API, MCP (extensão do schema da tool) e CLI;
 semântica AND; mesma garantia anti-sub-retorno do ef_search adaptativo.

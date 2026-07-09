@@ -15,6 +15,19 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- Metadata filters on `recall` (S10 / task B3, roadmap 2.4): `recall` accepts a
+  `key → filter` map, ANDed — exact typed match (`Filter::Eq`) or numeric range
+  (`Filter::Range { min, max }`). Filters ride the same `keep` predicate as the
+  tombstone/scope re-check, so the S2 adaptive-`ef_search` anti-under-return
+  guarantee covers filtered results (a filtered-out candidate widens the search,
+  never silently under-returns). Edges: a filter on an absent key is a plain
+  non-match (0 hits, never an error); a type-incompatible filter (`Eq` across
+  types, or `Range` over a non-numeric value) is a typed `InvalidArgument`. The
+  MCP `recall` tool schema gains an **optional** `filters` object (bare scalar =
+  equality, `{min?, max?}` = range) — additive and backward compatible for
+  clients that never send it; the CLI adds a repeatable `recall --filter`
+  (`key=value`, `key=lo..hi`, `key>=n`, `key<=n`). Shells stay logic-free
+  (parse → API → serialize). Spec: `docs/01-spec.md` S10.
 - Full-text index in the engine (S9 engine half, roadmap 2.3, **ADR 0011**):
   own paged inverted index with BM25 scoring — **not** an embedded tantivy,
   which would break the single-file promise and the WAL's single commit truth.
