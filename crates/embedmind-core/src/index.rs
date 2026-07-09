@@ -43,6 +43,8 @@
 //!   is an in-memory memo over [`PageSource`], not a page cache — it can
 //!   never go stale across operations because it never outlives one.
 
+pub mod fts;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::rc::Rc;

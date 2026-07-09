@@ -206,6 +206,11 @@ impl Store {
                 }
             }
         }
+        // Full-text index (B2, `docs/adr/0011`): same transaction as the
+        // record and vector writes, so the memory is either fully indexed or
+        // not stored at all — no torn state to recover into. Runs whether or
+        // not an embedder is present: full-text is independent of vectors.
+        index::fts::index_document(&mut txn, record.id, &record.content)?;
         let bytes = record.encode()?;
         btree::insert(&mut txn, record.id.to_bytes(), &bytes)?;
         txn.commit()?;
@@ -264,6 +269,67 @@ impl Store {
             if let Some(bytes) = btree::get(&self.pager, root, &hit.record_id.to_bytes())? {
                 out.push(Recalled {
                     memory: Memory::from_record(MemoryRecord::decode(&bytes)?),
+                    score: hit.score,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Full-text (BM25) search over `remember`ed content — the keyword half
+    /// of hybrid recall (`docs/adr/0011`, roadmap 2.3). Best score first, each
+    /// hit carrying its BM25 score. Needs no embedder (full-text is
+    /// independent of vectors); on a store or file with no full-text index
+    /// (a pre-M2 `.mind`) it returns an empty result rather than an error, so
+    /// the degradation is silent and safe. Tombstoned memories are excluded
+    /// and `query`'s scope filters by project, exactly like [`Store::recall`].
+    pub fn search_text(&self, query: Query) -> Result<Vec<Recalled>> {
+        let root = self.pager.header().root_btree_page;
+        let fts_root = self.pager.header().fts_root_page;
+        let pager = &self.pager;
+        let scope = query.scope.clone();
+        // Cache each candidate's record so `keep` and `doc_len` — two separate
+        // closures `fts::search` may both call for one id — share a single
+        // B-tree read. `RefCell` because both closures borrow it mutably.
+        let cache: std::cell::RefCell<BTreeMap<Ulid, Option<MemoryRecord>>> =
+            std::cell::RefCell::new(BTreeMap::new());
+        let load = |id: Ulid| -> Result<Option<MemoryRecord>> {
+            if let Some(rec) = cache.borrow().get(&id) {
+                return Ok(rec.clone());
+            }
+            let rec = match btree::get(pager, root, &id.to_bytes())? {
+                Some(bytes) => Some(MemoryRecord::decode(&bytes)?),
+                None => None,
+            };
+            cache.borrow_mut().insert(id, rec.clone());
+            Ok(rec)
+        };
+
+        let hits = index::fts::search(
+            &self.pager,
+            fts_root,
+            &query.text,
+            query.limit,
+            // keep: live + in-scope (same re-check the vector path does).
+            |id| match load(id) {
+                Ok(Some(rec)) => {
+                    !rec.tombstone
+                        && match &scope {
+                            Scope::All => true,
+                            Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
+                        }
+                }
+                _ => false,
+            },
+            // doc_len: BM25 length normalization from the current content.
+            |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),
+        )?;
+
+        let mut out = Vec::with_capacity(hits.len());
+        for hit in hits {
+            if let Some(rec) = load(hit.record_id)? {
+                out.push(Recalled {
+                    memory: Memory::from_record(rec),
                     score: hit.score,
                 });
             }
@@ -340,6 +406,7 @@ impl Store {
             live_memories,
             forgotten_memories,
             index_entries: index::node_count(&self.pager, header.hnsw_meta_page)?,
+            fts_documents: index::fts::indexed_documents(&self.pager, header.fts_root_page)?,
             page_size: header.page_size,
             page_count: header.page_count,
             file_bytes: u64::from(header.page_size) * header.page_count,
@@ -533,6 +600,9 @@ pub struct StoreStats {
     /// HNSW graph entries — one per indexed chunk, so a long memory
     /// (DESIGN §6) counts once per chunk. 0 = no vector index yet.
     pub index_entries: u64,
+    /// Documents in the full-text index (`docs/adr/0011`); one per live
+    /// `remember`. 0 = no full-text index yet (e.g. a pre-M2 file).
+    pub fts_documents: u64,
     /// Page size recorded in the header.
     pub page_size: u32,
     /// Total pages in the main file.
@@ -705,6 +775,7 @@ mod tests {
         assert_eq!(stats.live_memories, 0);
         assert_eq!(stats.forgotten_memories, 0);
         assert_eq!(stats.index_entries, 0);
+        assert_eq!(stats.fts_documents, 0);
         assert_eq!(stats.embedding_model_id, None, "KV-only store: no model");
 
         let keep = store.remember(MemoryDraft::new("keep")).unwrap();
@@ -714,12 +785,47 @@ mod tests {
         let stats = store.stats().unwrap();
         assert_eq!(stats.live_memories, 1);
         assert_eq!(stats.forgotten_memories, 1);
+        // Full-text index counts every indexed document (tombstones included;
+        // they are filtered at query time, then reclaimed by vacuum).
+        assert_eq!(stats.fts_documents, 2);
         assert_eq!(
             stats.file_bytes,
             u64::from(stats.page_size) * stats.page_count
         );
         assert!(stats.page_count >= 2, "header + at least one data page");
         assert!(store.get(keep.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn search_text_ranks_filters_tombstones_and_respects_scope() {
+        let (_, mut store) = store();
+        let a = store
+            .remember(MemoryDraft::new("the rust borrow checker prevents data races").project("x"))
+            .unwrap();
+        let b = store
+            .remember(MemoryDraft::new("python has a global interpreter lock").project("x"))
+            .unwrap();
+        let c = store
+            .remember(MemoryDraft::new("rust rust rust ownership and borrowing").project("y"))
+            .unwrap();
+
+        // Keyword search finds both rust docs, ranks the denser one first.
+        let hits = store.search_text(Query::new("rust borrow")).unwrap();
+        let ids: Vec<Ulid> = hits.iter().map(|h| h.id).collect();
+        assert!(ids.contains(&a.id) && ids.contains(&c.id));
+        assert!(!ids.contains(&b.id), "python doc has no query term");
+        assert!(hits.iter().all(|h| h.score > 0.0));
+
+        // Scope narrows to a single project.
+        let scoped = store.search_text(Query::new("rust").project("y")).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, c.id);
+
+        // Forgetting a doc removes it from results (tombstone re-check).
+        store.forget(c.id).unwrap();
+        let after = store.search_text(Query::new("rust")).unwrap();
+        assert!(after.iter().all(|h| h.id != c.id));
+        assert!(after.iter().any(|h| h.id == a.id));
     }
 
     #[test]
