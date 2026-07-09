@@ -135,7 +135,7 @@ MemoryRecord {
 ## 7. Recall híbrido e escopo de projeto
 
 - **v0.1:** só vetor + filtro de projeto + tombstone.
-- **M2 (full-text + metadados):** fusão por **Reciprocal Rank Fusion** (RRF, k=60) entre lista vetorial e lista BM25 — sem pesos mágicos a calibrar, comportamento explicável. Full-text: **[ABERTO]** índice invertido próprio nas páginas (default; consistente com "tudo num arquivo") vs. embutir tantivy (mais rápido de entregar, mas quebra o modelo de página única e o WAL).
+- **M2 (full-text + metadados):** fusão por **Reciprocal Rank Fusion** (RRF, k=60) entre lista vetorial e lista BM25 — sem pesos mágicos a calibrar, comportamento explicável. Full-text: **[DECIDIDO — ADR 0011]** índice invertido próprio nas páginas do `.mind` com scoring BM25, integrado ao WAL (tantivy rejeitado: traz storage/commit próprios, quebrando "um arquivo" e a verdade única de commit do WAL). Formato em `docs/FORMAT.md` §11.
 - **Escopo de projeto:** o servidor MCP infere o projeto do `cwd` do agente (raiz git ou config `.embedmind.toml`); `recall` filtra por projeto por default com fallback global explícito (`scope: "all"`). É a feature "memória automática de contexto de projeto" do M1 — barata na engine, enorme em UX.
 
 ## 8. Camada MCP
@@ -184,11 +184,12 @@ Sem tokio em lugar nenhum do workspace (I/O síncrono; o servidor MCP stdio é i
 | 7 | Criptografia reservada no formato, não implementada | implementar já | formato não quebra depois; feature é premium |
 | 8 | HNSW com endereçamento direto de páginas (sem tabela de localização) | tabela node_id→página na meta (encadeada) | meta O(1) para sempre; insert O(M); sem teto de nós |
 | 9 | MCP stdio JSON-RPC direto, sem SDK | `rmcp` (SDK oficial) | evita tokio/async; superfície usada é minúscula; casca continua substituível |
+| 11 | Full-text: índice invertido próprio nas páginas (BM25) | tantivy embutido | "um arquivo" + WAL único; tantivy traz storage/commit próprios (duas verdades → meio-estado após crash) |
 
 ## 12. Questões em aberto (resolver no M1, com default)
 
 - [x] SDK MCP `rmcp` vs. protocolo direto → **resolvido: direto (ADR 0009)** — o SDK traz tokio+peso, confirmando o default
-- [ ] Full-text próprio vs. tantivy (decisão só no M2) → *default: próprio*
+- [x] Full-text próprio vs. tantivy → **resolvido: próprio (ADR 0011)** — índice invertido nas páginas + BM25, tantivy quebraria "um arquivo" e o WAL único
 - [ ] Política fsync `batched` opt-in → *default: só `full` na v0.1*
 - [ ] Quantização i8 de vetores → *decidir com benchmark no M3*
 - [ ] Modelo multilíngue alternativo → *decidir no dogfooding, semanas 2–4*

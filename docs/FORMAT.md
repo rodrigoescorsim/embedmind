@@ -62,13 +62,15 @@ Format-level guarantees:
 | 0x05 | HNSW_META | HNSW index parameters + entry point |
 | 0x06 | FREELIST | array of free `page_no`s |
 | 0x07 | OVERFLOW | continuation of an oversized record |
+| 0x08 | FTS_DICT | full-text dictionary node (meta/inner/leaf; term → postings, see §11) |
+| 0x09 | FTS_POSTINGS | continuation of an oversized postings list (see §11) |
 
 ## 4. Header (page 0)
 
 | offset | size | field | notes |
 |---|---|---|---|
 | 0 | 8 | magic | ASCII `MINDFMT1` |
-| 8 | 4 | `format_version` (u32) | 1 for v0.1 |
+| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11) |
 | 12 | 4 | `page_size` (u32) | default 4096 |
 | 16 | 8 | `page_count` (u64) | total pages incl. header |
 | 24 | 8 | `root_btree_page` (u64) | record B-tree root |
@@ -81,7 +83,8 @@ Format-level guarantees:
 | 128 | 4 | `flags` (u32) | bit 0 = `encrypted` (**reserved**, must be 0 in v1) |
 | 132 | 16 | `kdf_salt` | reserved for encryption (premium), zero in v1 |
 | 148 | 8 | `kdf_params` | reserved, zero in v1 |
-| 156 | … | reserved (zero) | up to trailer |
+| 156 | 8 | `fts_root_page` (u64) | full-text index meta page; 0 = none (§11). Added in `format_version` 2 (ADR 0011); this offset was reserved-and-zero in v1, so a v1 file reads back with 0 = no full-text index |
+| 164 | … | reserved (zero) | up to trailer |
 | 4088 | 8 | header checksum | `xxh3_64` over bytes `[0, 4088)` |
 
 **Version policy (G4):** a reader seeing `format_version` greater than it understands MUST
@@ -228,3 +231,68 @@ committed-WAL state.
 1. Can it be expressed with reserved bytes/flags? → do that, no version bump.
 2. New page type? → old readers must be able to skip it; minor-compatible.
 3. Anything that changes the meaning of existing bytes → `format_version` bump + `embedmind migrate` path + fuzz corpus regenerated. There is no option 4.
+
+The full-text index (§11) is a worked example of rule 1 + rule 2: it adds two
+new page types (old readers skip them) and carries its root pointer in a
+previously-reserved header field, so `format_version` moves 1 → 2 as an
+**additive** bump — a v1 file stays readable, it just has no full-text index.
+
+## 11. Full-text index (inverted index + BM25)
+
+Added in `format_version` 2 (decision: [ADR 0011](adr/0011-full-text-indice-invertido-proprio.md)).
+Own inverted index in the `.mind` pages — **not** an embedded tantivy — so it
+inherits the single-file promise and the WAL's single commit truth. Every
+mutation is an ordinary page write inside a transaction: touched FTS pages
+enter the WAL like any other page (§8), recovery replays them, there is **no
+separate index journal**. A `vacuum` that relocates pages rebuilds this index,
+same as it rebuilds the HNSW graph (§7).
+
+The header's `fts_root_page` (§4) points at one fixed-size **meta page**;
+`0` = no full-text index (the value a `format_version` 1 file always decodes,
+so such a file degrades to vector-only recall).
+
+- **FTS meta** (one page, fixed size). After the common header (`entry_count`
+  reserved/zero): a **node-kind byte = 0** (distinguishes it from dictionary
+  nodes, which share the `FTS_DICT` page type), then `doc_count` (u64) ·
+  `total_tokens` (u64) · `dict_root` (u64, page of the dictionary B-tree root;
+  0 = empty). BM25 uses `N = doc_count` and `avgdl = total_tokens / doc_count`.
+- **FTS_DICT** pages are a slotted B-tree keyed by **term bytes** (variable
+  length, lowercased alphanumeric Unicode tokens, sorted strictly ascending
+  lexicographically). Meta/inner/leaf share this page type, told apart by the
+  node-kind byte at the first body offset (0 = meta, 1 = inner, 2 = leaf):
+  - **inner** (kind 1): after the common header, node-kind byte, then
+    `rightmost_child` (u64) and `entry_count` entries of `term_len` (u16) ·
+    `term` · `child` (u64). `child` covers terms `<= term`; `rightmost_child`
+    covers the rest. Null children invalid.
+  - **leaf** (kind 2): after the common header and node-kind byte, `entry_count`
+    entries of `term_len` (u16) · `term` · **value**. A value is a 1-byte tag +
+    payload: tag `0` = inline postings (`u32` body length + body); tag `1` =
+    overflow (`total_len` u32 · `first_page` u64 into an `FTS_POSTINGS` chain).
+    An entry's footprint is capped at `usable/4` (postings above the matching
+    inline limit spill to overflow), which makes leaf splits provably safe by
+    the same midpoint argument as §5.1.
+- **Postings body** for a term: `doc_freq` (u32) then `doc_freq` entries of
+  `record_id` (ULID, 16 bytes) · `term_freq` (u32), **sorted ascending by
+  `record_id`** (deterministic across platforms — G3; `term_freq` is never 0).
+- **FTS_POSTINGS** pages chain an oversized postings body: common header with
+  `entry_count` = payload bytes on this page (`next_page` = 0 ends the chain),
+  payload at offset 16. The dictionary cell records the exact `total_len`;
+  readers stop after consuming it, so chains are cycle-proof, exactly like
+  `OVERFLOW` (§5.1).
+
+**Scoring.** BM25 with `k1 = 1.2`, `b = 0.75`. A document's length `|D|` is
+**not stored** — it is recomputed by tokenizing the candidate's content at
+query time (recall reads each candidate anyway to re-check tombstone/scope), so
+nothing about `|D|` can drift on disk.
+
+**Deletion.** No delete, matching the rest of the engine: `forget` is a
+tombstone (§5, ADR 0003); postings for tombstoned/out-of-scope records are
+filtered at query time and physically reclaimed only by `embedmind vacuum`,
+which rebuilds the index. Postings are therefore append-/update-only. Because a
+memory is never re-`remember`ed (content is immutable after write), a
+`(term, record_id)` pair is written once.
+
+All FTS parsers are fully bounds-checked and panic-free — they are a fuzz
+target (`fuzz_fts_page`, [TESTING.md](TESTING.md) §3), and the record crash
+harness now exercises FTS pages because `remember` writes them in the same
+transaction as the record.

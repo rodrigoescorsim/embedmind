@@ -15,6 +15,19 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- Full-text index in the engine (S9 engine half, roadmap 2.3, **ADR 0011**):
+  own paged inverted index with BM25 scoring — **not** an embedded tantivy,
+  which would break the single-file promise and the WAL's single commit truth.
+  Two new page types (`FTS_DICT` 0x08, `FTS_POSTINGS` 0x09) and a `fts_root_page`
+  header field carried in previously-reserved bytes, so `format_version` moves
+  1 → 2 as an **additive** bump: a v1 `.mind` stays readable and simply has no
+  full-text index (`recall` degrades to vector-only). `remember` indexes content
+  in the same transaction as the record and vector writes (crash-safe by the
+  same WAL); `Store::search_text` exposes BM25 keyword search (tombstone/scope
+  filtered like vector recall) — the list that will fuse with the vector list
+  via RRF (ADR 0005) in the recall half of S9. New fuzz target `fuzz_fts_page`;
+  the record crash harness now exercises the FTS pages through recovery.
+  Spec: `docs/FORMAT.md` §11.
 - Launch-ready README + 30s demo GIF script (M1 item 1.7 / A4):
   - README marked **v0.1** (pre-v0.1 warning dropped); a dedicated **Install**
     section (prebuilt binary from Releases, `cargo install embedmind`, source

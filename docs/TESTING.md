@@ -69,6 +69,7 @@ Targets (each a `fuzz_target!` over arbitrary bytes):
 |---|---|
 | `fuzz_header` | header parse: magic, versions, bogus page counts/offsets, flag bit 0 set |
 | `fuzz_page` | each page type's parser, including slot directories and overflow chains |
+| `fuzz_fts_page` | full-text dictionary (meta/inner/leaf) and postings parsers, incl. variable-length terms and huge counts (§11, ADR 0011) |
 | `fuzz_wal_replay` | full recovery: arbitrary WAL bytes against a valid base file |
 | `fuzz_record` | `MemoryRecord` deserialization, incl. tagged scalars and huge length prefixes |
 | `fuzz_open_full` | end-to-end: arbitrary bytes as a whole `.mind` file → `Store::open` must return `Ok` or a typed error, never panic/UB/OOM |
