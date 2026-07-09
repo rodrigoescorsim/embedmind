@@ -64,13 +64,15 @@ Format-level guarantees:
 | 0x07 | OVERFLOW | continuation of an oversized record |
 | 0x08 | FTS_DICT | full-text dictionary node (meta/inner/leaf; term → postings, see §11) |
 | 0x09 | FTS_POSTINGS | continuation of an oversized postings list (see §11) |
+| 0x0A | GRAPH_DICT | graph dictionary node (meta/inner/leaf; entity/memory key → value, see §12) |
+| 0x0B | GRAPH_OVERFLOW | continuation of an oversized graph value (see §12) |
 
 ## 4. Header (page 0)
 
 | offset | size | field | notes |
 |---|---|---|---|
 | 0 | 8 | magic | ASCII `MINDFMT1` |
-| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11) |
+| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12) |
 | 12 | 4 | `page_size` (u32) | default 4096 |
 | 16 | 8 | `page_count` (u64) | total pages incl. header |
 | 24 | 8 | `root_btree_page` (u64) | record B-tree root |
@@ -84,7 +86,8 @@ Format-level guarantees:
 | 132 | 16 | `kdf_salt` | reserved for encryption (premium), zero in v1 |
 | 148 | 8 | `kdf_params` | reserved, zero in v1 |
 | 156 | 8 | `fts_root_page` (u64) | full-text index meta page; 0 = none (§11). Added in `format_version` 2 (ADR 0011); this offset was reserved-and-zero in v1, so a v1 file reads back with 0 = no full-text index |
-| 164 | … | reserved (zero) | up to trailer |
+| 164 | 8 | `graph_root_page` (u64) | graph meta page; 0 = none (§12). Added in `format_version` 3 (ADR 0012); this offset was reserved-and-zero in v1/v2, so an older file reads back with 0 = no graph |
+| 172 | … | reserved (zero) | up to trailer |
 | 4088 | 8 | header checksum | `xxh3_64` over bytes `[0, 4088)` |
 
 **Version policy (G4):** a reader seeing `format_version` greater than it understands MUST
@@ -236,6 +239,8 @@ The full-text index (§11) is a worked example of rule 1 + rule 2: it adds two
 new page types (old readers skip them) and carries its root pointer in a
 previously-reserved header field, so `format_version` moves 1 → 2 as an
 **additive** bump — a v1 file stays readable, it just has no full-text index.
+The graph layer (§12) repeats the pattern: two more page types plus
+`graph_root_page` in reserved bytes, `format_version` 2 → 3, equally additive.
 
 ## 11. Full-text index (inverted index + BM25)
 
@@ -295,4 +300,71 @@ memory is never re-`remember`ed (content is immutable after write), a
 All FTS parsers are fully bounds-checked and panic-free — they are a fuzz
 target (`fuzz_fts_page`, [TESTING.md](TESTING.md) §3), and the record crash
 harness now exercises FTS pages because `remember` writes them in the same
+transaction as the record.
+
+## 12. Graph layer (entities + relations)
+
+Added in `format_version` 3 (decision: [ADR 0012](adr/0012-camada-de-grafo-paginada.md)).
+Explicit entities and typed relations between memories, persisted in the
+`.mind` pages and mutated only inside a transaction: touched graph pages enter
+the WAL like any other page (§8), recovery replays them, no separate index
+journal. `embedmind vacuum` rebuilds this index like it rebuilds HNSW and FTS.
+
+The header's `graph_root_page` (§4) points at one fixed-size **meta page**;
+`0` = no graph (the value any `format_version` ≤ 2 file decodes, so older
+files degrade to "no related memories", never an error).
+
+- **Graph meta** (one page, fixed size). After the common header
+  (`entry_count` reserved/zero): a **node-kind byte = 0**, then
+  `entity_count` (u64, distinct entities) · `relation_count` (u64, stored
+  relations) · `dict_root` (u64, page of the dictionary B-tree root; 0 =
+  empty).
+- The **dictionary** is byte-for-byte the same slotted B-tree layout as the
+  full-text dictionary (§11) — meta/inner/leaf share the `GRAPH_DICT` page
+  type, told apart by the node-kind byte (0 = meta, 1 = inner, 2 = leaf);
+  inner and leaf node encodings, the `usable/4` entry-footprint cap, and the
+  provably-safe midpoint split are identical. Only the page types, the key
+  space, and the value bodies differ.
+- **Keys** are 1 tag byte + payload, sorted as plain bytes:
+
+  | tag | payload | value body |
+  |---|---|---|
+  | 0x01 | entity name, UTF-8, 1–128 bytes | entity members |
+  | 0x02 | memory id (ULID, 16 bytes) | adjacency |
+
+- A leaf **value** is framed exactly like §11: tag `0` = inline (`u32` body
+  length + body); tag `1` = overflow (`total_len` u32 · `first_page` u64 into
+  a `GRAPH_OVERFLOW` chain). `GRAPH_OVERFLOW` pages chain like
+  `FTS_POSTINGS`: `entry_count` = payload bytes on this page, payload at
+  offset 16, cycle-proof because the cell records the exact `total_len`.
+- **Entity members body:** `member_count` (u32) then `member_count` ×
+  `record_id` (ULID, 16 bytes), **sorted strictly ascending** (no duplicates
+  — deterministic across platforms, G3).
+- **Adjacency body** (per memory):
+  - `entity_count` (u16), then per entry `name_len` (u16) + name bytes,
+    sorted strictly ascending — the entities this memory is tagged with;
+  - `edge_count` (u32), then per edge: `direction` (u8, 0 = outgoing,
+    1 = incoming) · `kind_len` (u16) · kind UTF-8 (1–64 bytes) ·
+    `other_id` (ULID, 16 bytes) — sorted strictly ascending by
+    `(direction, kind, other_id)`, no duplicates.
+
+**Writing.** `remember` stores entities/relations in the same transaction as
+the record: each entity upserts the entity key's member list *and* the
+memory's adjacency; each relation is written **at both ends** (an outgoing
+edge in the source's adjacency, an incoming edge in the target's), so
+navigation in either direction is one value read. A relation whose target
+does not exist (or is tombstoned) is a typed error at `remember` time —
+dangling edges are never *born*, they can only *become* dangling via a later
+`forget`.
+
+**Deletion.** No delete, matching the rest of the engine: `forget` is a
+tombstone (§5, ADR 0003). A relation to a forgotten memory disappears with the
+tombstone — `related` and recall expansion re-check each target's liveness at
+query time and never return a tombstoned memory; the bytes are physically
+reclaimed by `embedmind vacuum`, which rebuilds the graph keeping only
+entities of live memories and edges whose **both** ends are live.
+
+All graph parsers are fully bounds-checked and panic-free — they are a fuzz
+target (`fuzz_graph_page`, [TESTING.md](TESTING.md) §3), and the record crash
+harness exercises graph pages because `remember` writes them in the same
 transaction as the record.
