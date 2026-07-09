@@ -15,6 +15,25 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- `embedmind vacuum` reclaims forgotten space for real (S11 / task B4, roadmap
+  2.x, **ADR 0003**), replacing the earlier explicit "not implemented" error.
+  Rebuild **by copy, never in place**: a fresh `.mind` is built in a sibling temp
+  file with every *live* memory re-inserted (record preserved byte-for-byte —
+  id, provenance, metadata — while the HNSW and full-text indexes are rebuilt
+  from scratch so they hold only the living), then swapped over the original with
+  a single **atomic rename**. Crash-safe at every point: until the rename the
+  original is untouched, so a crash leaves either the intact original or the
+  finished compacted file — never a torn mix; orphan temp/scratch files are swept
+  on the next `open`/`vacuum`. Result is always ≤ the original in size. `Store`
+  gains a `Vfs::rename` seam and the swap parks its live pager on a throwaway
+  scratch store so the file field is never invalid mid-swap. `embedmind vacuum`
+  now prints the before/after size and the count reclaimed. New crash harness
+  `tests/crash_vacuum.rs` sweeps a kill point at every mutating I/O of the vacuum
+  and asserts recovery lands in exactly one of the two legal states (and that
+  both are exercised). **Note (pre-existing, unrelated bug found while testing):**
+  a crash *during a checkpoint* (independent of vacuum, reproducible via a plain
+  `close()` mid-checkpoint) can drop a committed `forget`; tracked separately —
+  see the session notes. `docs/adr/0003`.
 - Metadata filters on `recall` (S10 / task B3, roadmap 2.4): `recall` accepts a
   `key → filter` map, ANDed — exact typed match (`Filter::Eq`) or numeric range
   (`Filter::Range { min, max }`). Filters ride the same `keep` predicate as the
