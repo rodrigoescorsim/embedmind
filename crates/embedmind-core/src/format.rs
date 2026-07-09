@@ -24,7 +24,11 @@ pub const WAL_MAGIC: [u8; 8] = *b"MINDWAL1";
 ///   file is rewritten. The layout of every pre-existing field is unchanged,
 ///   so this is an additive bump, not a breaking one (`docs/FORMAT.md` §10
 ///   rule 1: new meaning carried in previously-reserved bytes).
-pub const FORMAT_VERSION: u32 = 2;
+/// - `3` (M3, `docs/adr/0012`): adds the graph layer (`GraphDict`/
+///   `GraphOverflow` pages + the `graph_root_page` header field). Same
+///   additive pattern: an older file decodes with `graph_root_page` 0 = no
+///   graph, and `related`/recall expansion degrade to empty.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// Default page size in bytes. The authoritative value for an existing file is
 /// the one recorded in its header.
@@ -79,6 +83,15 @@ pub enum PageType {
     /// out of its dictionary leaf cell, chained like [`PageType::Overflow`]
     /// but carrying FTS payload (`docs/FORMAT.md` §11).
     FtsPostings = 0x09,
+    /// Graph dictionary node (entity/memory key → value), same slotted
+    /// B-tree layout as [`PageType::FtsDict`] with meta/inner/leaf told
+    /// apart by the node-kind byte in the page body (`docs/FORMAT.md` §12,
+    /// `docs/adr/0012`).
+    GraphDict = 0x0A,
+    /// Graph value continuation: an oversized entity-members or adjacency
+    /// body spilled out of its dictionary leaf cell, chained like
+    /// [`PageType::FtsPostings`] (`docs/FORMAT.md` §12).
+    GraphOverflow = 0x0B,
 }
 
 impl PageType {
@@ -95,6 +108,8 @@ impl PageType {
             0x07 => Some(PageType::Overflow),
             0x08 => Some(PageType::FtsDict),
             0x09 => Some(PageType::FtsPostings),
+            0x0A => Some(PageType::GraphDict),
+            0x0B => Some(PageType::GraphOverflow),
             _ => None,
         }
     }
@@ -196,6 +211,9 @@ const OFF_FLAGS: usize = 128;
 // written as zero by format_version 1 — so a v1 file reads back with no
 // full-text index (root 0), exactly the intended degradation.
 const OFF_FTS_ROOT: usize = 156;
+// `graph_root_page` (docs/adr/0012) lives at offset 164, reserved-and-zero
+// through format_version 2 — an older file reads back with no graph (root 0).
+const OFF_GRAPH_ROOT: usize = 164;
 
 /// Minimum prefix of page 0 needed by [`Header::peek_page_size`].
 pub const HEADER_PEEK_LEN: usize = 16;
@@ -222,6 +240,10 @@ pub struct Header {
     /// by format_version 1 (the bytes were reserved), which is how a v1 file
     /// is detected as lacking the index and degrades to vector-only recall.
     pub fts_root_page: u64,
+    /// Graph meta page; 0 = no graph yet (`docs/adr/0012`, `docs/FORMAT.md`
+    /// §12). Always 0 in a file written by format_version ≤ 2 (the bytes were
+    /// reserved), so older files degrade to "no related memories".
+    pub graph_root_page: u64,
     /// Last committed transaction id.
     pub txn_counter: u64,
     /// Embedding dimensions (0 = embeddings not configured yet).
@@ -249,6 +271,7 @@ impl Header {
             freelist_page: 0,
             hnsw_meta_page: 0,
             fts_root_page: 0,
+            graph_root_page: 0,
             txn_counter: 0,
             embedding_dims: 0,
             embedding_quant: 0,
@@ -302,6 +325,7 @@ impl Header {
         write_u32(page, OFF_FLAGS, self.flags);
         // kdf_salt (132..148) and kdf_params (148..156) stay zero in v1.
         write_u64(page, OFF_FTS_ROOT, self.fts_root_page);
+        write_u64(page, OFF_GRAPH_ROOT, self.graph_root_page);
         stamp_page_checksum(page);
         Ok(())
     }
@@ -361,6 +385,9 @@ impl Header {
             // Reserved-and-zero under format_version 1, so a v1 file decodes
             // with no full-text index — the deliberate degradation path.
             fts_root_page: read_u64(page, OFF_FTS_ROOT).ok_or(Error::BadHeader)?,
+            // Reserved-and-zero through format_version 2: older files decode
+            // with no graph, same degradation pattern (docs/adr/0012).
+            graph_root_page: read_u64(page, OFF_GRAPH_ROOT).ok_or(Error::BadHeader)?,
             txn_counter: read_u64(page, OFF_TXN_COUNTER).ok_or(Error::BadHeader)?,
             embedding_dims: read_u16(page, OFF_DIMS).ok_or(Error::BadHeader)?,
             embedding_quant: read_u16(page, OFF_QUANT).ok_or(Error::BadHeader)?,
@@ -906,6 +933,7 @@ mod tests {
             freelist_page: 7,
             hnsw_meta_page: 9,
             fts_root_page: 11,
+            graph_root_page: 13,
             txn_counter: 1234,
             embedding_dims: 384,
             embedding_quant: 0,
@@ -959,6 +987,7 @@ mod tests {
         let mut h = sample_header();
         h.format_version = 1;
         h.fts_root_page = 0;
+        h.graph_root_page = 0;
         let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
         h.encode(&mut page).unwrap();
         // Bytes at OFF_FTS_ROOT must be zero — nothing a v1 writer would touch.
@@ -966,6 +995,25 @@ mod tests {
         let back = Header::decode(&page).unwrap();
         assert_eq!(back.format_version, 1);
         assert_eq!(back.fts_root_page, 0);
+        assert_eq!(back.graph_root_page, 0);
+    }
+
+    #[test]
+    fn version_2_file_decodes_with_no_graph() {
+        // A format_version 2 file had offset 164 reserved-and-zero. Simulate
+        // one and confirm it decodes cleanly with `graph_root_page == 0` — the
+        // degradation path that lets a v3 build read pre-graph files
+        // (docs/adr/0012).
+        let mut h = sample_header();
+        h.format_version = 2;
+        h.graph_root_page = 0;
+        let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
+        h.encode(&mut page).unwrap();
+        assert_eq!(read_u64(&page, OFF_GRAPH_ROOT), Some(0));
+        let back = Header::decode(&page).unwrap();
+        assert_eq!(back.format_version, 2);
+        assert_eq!(back.fts_root_page, 11, "v2 keeps its full-text index");
+        assert_eq!(back.graph_root_page, 0);
     }
 
     #[test]
