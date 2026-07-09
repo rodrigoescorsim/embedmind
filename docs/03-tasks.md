@@ -193,7 +193,7 @@ técnico com diagramas se solicitado — publicação é do founder.
 
 ## Fase C — M3: profundidade — semanas 9–12
 
-### C1. Camada de grafo simples (item 3.1)
+### C1. Camada de grafo simples (item 3.1) [✅ ENTREGUE]
 
 Entidades + relações entre memórias, persistidas em páginas próprias (integradas a
 WAL/crash tests): gravar relações explícitas no `remember`, navegar

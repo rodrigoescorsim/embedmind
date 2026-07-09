@@ -15,6 +15,27 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Graph layer: explicit entities + typed relations between memories** (S13 /
+  task C1, roadmap 3.1, **ADR 0012**) — the vector + text + **graph** depth no
+  embedded memory engine has complete. `remember` accepts entity tags
+  (`MemoryDraft::entity`, 1–128 bytes) and typed relations to existing live
+  memories (`MemoryDraft::relation`; a missing or forgotten target is a typed
+  error — dangling edges are never born), written in the *same transaction* as
+  the record: graph pages (new `GRAPH_DICT`/`GRAPH_OVERFLOW` types, spec in
+  FORMAT.md §12, `format_version` 2 → 3, additive) ride the WAL like every
+  other page. Navigation: `Store::related(id)` (both directions, kind carried),
+  `Store::entity_members(entity)`, `Store::entities_of(id)`; optional 1-hop
+  expansion on recall (`Query::expand_related`) appends connected context after
+  the ranked hits (score 0.0, outside the limit). Relations to a forgotten
+  memory disappear with the tombstone (re-checked at query time) and are
+  physically dropped by `vacuum`, which rebuilds the graph keeping only live
+  entities and edges with both ends live. The dictionary reuses the same
+  slotted B-tree as the full-text index (shared `index::dict` module — one
+  fuzzed implementation, not two). Extraction is explicitly *not* in scope:
+  entities/relations are caller-provided. New fuzz target `fuzz_graph_page`
+  (+ seed corpus); the record crash harness now writes and verifies graph
+  pages at every injected kill point. Older (v2) files degrade to "no related
+  memories", never an error.
 - `embedmind vacuum` reclaims forgotten space for real (S11 / task B4, roadmap
   2.x, **ADR 0003**), replacing the earlier explicit "not implemented" error.
   Rebuild **by copy, never in place**: a fresh `.mind` is built in a sibling temp

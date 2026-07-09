@@ -199,7 +199,7 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
 
 ## P2 — M3+ (profundidade e funil)
 
-### S13. Camada de grafo — entidades e relações [⬜ pendente, M3]
+### S13. Camada de grafo — entidades e relações [✅ implementada]
 
 - **Dado** memórias que mencionam entidades, **quando** gravo com
   `entities`/`relations` explícitas (extração automática NÃO é escopo desta story),
