@@ -192,6 +192,7 @@ impl Pager {
             page_count,
             root_btree: None,
             hnsw_meta: None,
+            fts_root: None,
             embedding: None,
         })
     }
@@ -261,6 +262,7 @@ impl Pager {
         new_page_count: u64,
         new_root_btree: Option<u64>,
         new_hnsw_meta: Option<u64>,
+        new_fts_root: Option<u64>,
         new_embedding: Option<(String, u16)>,
     ) -> Result<u64> {
         self.ensure_usable()?;
@@ -268,6 +270,7 @@ impl Pager {
             && new_page_count == self.header.page_count
             && new_root_btree.is_none()
             && new_hnsw_meta.is_none()
+            && new_fts_root.is_none()
             && new_embedding.is_none()
         {
             return Ok(self.header.txn_counter); // empty transaction: no-op
@@ -280,6 +283,9 @@ impl Pager {
         }
         if let Some(hnsw_meta) = new_hnsw_meta {
             new_header.hnsw_meta_page = hnsw_meta;
+        }
+        if let Some(fts_root) = new_fts_root {
+            new_header.fts_root_page = fts_root;
         }
         if let Some((model_id, dims)) = new_embedding {
             new_header.embedding_model_id = model_id;
@@ -333,6 +339,9 @@ pub struct Txn<'p> {
     /// Pending HNSW meta page move; applied to the header atomically with the
     /// commit frame, same as `root_btree`.
     hnsw_meta: Option<u64>,
+    /// Pending full-text dictionary root move (`docs/adr/0011`); applied to
+    /// the header atomically with the commit frame, same as `root_btree`.
+    fts_root: Option<u64>,
     /// Pending embedding model id + dims stamp (set once on a fresh store,
     /// `docs/adr/0004`); applied to the header atomically with the commit
     /// frame, discarded on rollback.
@@ -429,6 +438,18 @@ impl Txn<'_> {
         self.hnsw_meta = Some(page_no);
     }
 
+    /// Full-text dictionary root as seen by this transaction (its own pending
+    /// move included); 0 = no full-text index yet (`docs/adr/0011`).
+    pub fn fts_root_page(&self) -> u64 {
+        self.fts_root.unwrap_or(self.pager.header.fts_root_page)
+    }
+
+    /// Moves the full-text dictionary root pointer. Becomes durable with the
+    /// commit frame; discarded on rollback like any other buffered write.
+    pub fn set_fts_root_page(&mut self, page_no: u64) {
+        self.fts_root = Some(page_no);
+    }
+
     /// Stamps the header's embedding `model_id` + `dims` — done once against a
     /// fresh store so that mixing embeddings from different models in one file
     /// is impossible (`docs/adr/0004`, `docs/FORMAT.md` §6). Becomes durable
@@ -452,9 +473,12 @@ impl Txn<'_> {
             page_count,
             root_btree,
             hnsw_meta,
+            fts_root,
             embedding,
         } = self;
-        pager.commit_txn(dirty, page_count, root_btree, hnsw_meta, embedding)
+        pager.commit_txn(
+            dirty, page_count, root_btree, hnsw_meta, fts_root, embedding,
+        )
     }
 }
 
@@ -740,5 +764,29 @@ mod tests {
         drop(pager); // reopen via WAL recovery
         let pager = Pager::open(vfs, path(), opts()).unwrap();
         assert_eq!(pager.header().hnsw_meta_page, p);
+    }
+
+    #[test]
+    fn fts_root_move_commits_rolls_back_and_survives_reopen() {
+        let (vfs, _) = sim();
+        let mut pager = Pager::create(Arc::clone(&vfs), path(), opts()).unwrap();
+        let mut txn = pager.begin().unwrap();
+        let p = txn.allocate_page().unwrap();
+        txn.write_page(p, &filled(3)).unwrap();
+        assert_eq!(txn.fts_root_page(), 0);
+        txn.set_fts_root_page(p);
+        assert_eq!(txn.fts_root_page(), p);
+        txn.commit().unwrap();
+        assert_eq!(pager.header().fts_root_page, p);
+
+        // Rollback discards a pending fts_root move.
+        let mut txn = pager.begin().unwrap();
+        txn.set_fts_root_page(0);
+        drop(txn);
+        assert_eq!(pager.header().fts_root_page, p);
+
+        drop(pager); // reopen via WAL recovery
+        let pager = Pager::open(vfs, path(), opts()).unwrap();
+        assert_eq!(pager.header().fts_root_page, p);
     }
 }

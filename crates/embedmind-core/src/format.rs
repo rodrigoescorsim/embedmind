@@ -14,7 +14,17 @@ pub const MAGIC: [u8; 8] = *b"MINDFMT1";
 pub const WAL_MAGIC: [u8; 8] = *b"MINDWAL1";
 
 /// Current on-disk format version written by this build.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// - `1` (v0.1): header + records + vectors + HNSW.
+/// - `2` (M2, `docs/adr/0011`): adds the paged inverted full-text index
+///   (`FtsDict`/`FtsPostings` pages + the `fts_root_page` header field). A
+///   version-1 file has no full-text index; opened by a version-2 build it
+///   reads and writes fine — `fts_root_page` is 0 (bytes reserved as zero in
+///   v1, `docs/FORMAT.md` §4), so `recall` degrades to vector-only until the
+///   file is rewritten. The layout of every pre-existing field is unchanged,
+///   so this is an additive bump, not a breaking one (`docs/FORMAT.md` §10
+///   rule 1: new meaning carried in previously-reserved bytes).
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Default page size in bytes. The authoritative value for an existing file is
 /// the one recorded in its header.
@@ -60,6 +70,15 @@ pub enum PageType {
     Freelist = 0x06,
     /// Continuation of an oversized record.
     Overflow = 0x07,
+    /// Full-text dictionary node (term → postings), slotted B-tree
+    /// (`docs/FORMAT.md` §11, `docs/adr/0011`). Inner and leaf are
+    /// distinguished by the `is_leaf` byte inside the page body, not by the
+    /// page type, so both share this one type.
+    FtsDict = 0x08,
+    /// Full-text postings continuation: an oversized postings list spilled
+    /// out of its dictionary leaf cell, chained like [`PageType::Overflow`]
+    /// but carrying FTS payload (`docs/FORMAT.md` §11).
+    FtsPostings = 0x09,
 }
 
 impl PageType {
@@ -74,6 +93,8 @@ impl PageType {
             0x05 => Some(PageType::HnswMeta),
             0x06 => Some(PageType::Freelist),
             0x07 => Some(PageType::Overflow),
+            0x08 => Some(PageType::FtsDict),
+            0x09 => Some(PageType::FtsPostings),
             _ => None,
         }
     }
@@ -170,6 +191,11 @@ const OFF_DIMS: usize = 56;
 const OFF_QUANT: usize = 58;
 const OFF_MODEL_ID: usize = 60;
 const OFF_FLAGS: usize = 128;
+// kdf_salt (132..148) and kdf_params (148..156) are reserved for encryption.
+// `fts_root_page` (docs/adr/0011) lives at offset 156, which was reserved and
+// written as zero by format_version 1 — so a v1 file reads back with no
+// full-text index (root 0), exactly the intended degradation.
+const OFF_FTS_ROOT: usize = 156;
 
 /// Minimum prefix of page 0 needed by [`Header::peek_page_size`].
 pub const HEADER_PEEK_LEN: usize = 16;
@@ -191,6 +217,11 @@ pub struct Header {
     pub freelist_page: u64,
     /// HNSW meta page; 0 = no vector index yet.
     pub hnsw_meta_page: u64,
+    /// Root page of the full-text dictionary B-tree; 0 = no full-text index
+    /// yet (`docs/adr/0011`, `docs/FORMAT.md` §11). Always 0 in a file written
+    /// by format_version 1 (the bytes were reserved), which is how a v1 file
+    /// is detected as lacking the index and degrades to vector-only recall.
+    pub fts_root_page: u64,
     /// Last committed transaction id.
     pub txn_counter: u64,
     /// Embedding dimensions (0 = embeddings not configured yet).
@@ -217,6 +248,7 @@ impl Header {
             root_btree_page: 0,
             freelist_page: 0,
             hnsw_meta_page: 0,
+            fts_root_page: 0,
             txn_counter: 0,
             embedding_dims: 0,
             embedding_quant: 0,
@@ -269,6 +301,7 @@ impl Header {
         write_bytes(page, OFF_MODEL_ID + 4, id);
         write_u32(page, OFF_FLAGS, self.flags);
         // kdf_salt (132..148) and kdf_params (148..156) stay zero in v1.
+        write_u64(page, OFF_FTS_ROOT, self.fts_root_page);
         stamp_page_checksum(page);
         Ok(())
     }
@@ -325,6 +358,9 @@ impl Header {
             root_btree_page: read_u64(page, OFF_ROOT_BTREE).ok_or(Error::BadHeader)?,
             freelist_page: read_u64(page, OFF_FREELIST).ok_or(Error::BadHeader)?,
             hnsw_meta_page: read_u64(page, OFF_HNSW_META).ok_or(Error::BadHeader)?,
+            // Reserved-and-zero under format_version 1, so a v1 file decodes
+            // with no full-text index — the deliberate degradation path.
+            fts_root_page: read_u64(page, OFF_FTS_ROOT).ok_or(Error::BadHeader)?,
             txn_counter: read_u64(page, OFF_TXN_COUNTER).ok_or(Error::BadHeader)?,
             embedding_dims: read_u16(page, OFF_DIMS).ok_or(Error::BadHeader)?,
             embedding_quant: read_u16(page, OFF_QUANT).ok_or(Error::BadHeader)?,
@@ -869,6 +905,7 @@ mod tests {
             root_btree_page: 3,
             freelist_page: 7,
             hnsw_meta_page: 9,
+            fts_root_page: 11,
             txn_counter: 1234,
             embedding_dims: 384,
             embedding_quant: 0,
@@ -911,6 +948,24 @@ mod tests {
             Header::peek_page_size(&page),
             Err(Error::BadHeader)
         ));
+    }
+
+    #[test]
+    fn version_1_file_decodes_with_no_fts_index() {
+        // A format_version 1 file had offset 156 reserved-and-zero. Simulate
+        // one and confirm it decodes cleanly with `fts_root_page == 0` — the
+        // degradation path that lets a v2 build read pre-full-text files
+        // (docs/adr/0011).
+        let mut h = sample_header();
+        h.format_version = 1;
+        h.fts_root_page = 0;
+        let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
+        h.encode(&mut page).unwrap();
+        // Bytes at OFF_FTS_ROOT must be zero — nothing a v1 writer would touch.
+        assert_eq!(read_u64(&page, OFF_FTS_ROOT), Some(0));
+        let back = Header::decode(&page).unwrap();
+        assert_eq!(back.format_version, 1);
+        assert_eq!(back.fts_root_page, 0);
     }
 
     #[test]
