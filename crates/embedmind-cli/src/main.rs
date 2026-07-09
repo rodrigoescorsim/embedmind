@@ -110,11 +110,7 @@ fn run(cli: Cli) -> Result<(), String> {
         } => recall(&file, query, limit, project, all, filters),
         Command::Forget { id } => forget(&file, &id),
         Command::Stats => stats(&file),
-        Command::Vacuum => Err(
-            "vacuum is not implemented yet (planned for v0.2; forgotten memories are \
-             filtered from every read in the meantime, they just still occupy file space)"
-                .to_string(),
-        ),
+        Command::Vacuum => vacuum(&file),
     }
 }
 
@@ -257,6 +253,30 @@ fn stats(file: &Path) -> Result<(), String> {
         ),
         None => println!("embedding model:    none (KV-only so far)"),
     }
+    Ok(())
+}
+
+fn vacuum(file: &Path) -> Result<(), String> {
+    let mut store = open(file)?;
+    let before = store.stats().map_err(|e| format!("stats failed: {e}"))?;
+    if before.forgotten_memories == 0 {
+        eprintln!("nothing forgotten; vacuum still repacks and rebuilds the indexes");
+    }
+    store.vacuum().map_err(|e| format!("vacuum failed: {e}"))?;
+    let after = store.stats().map_err(|e| format!("stats failed: {e}"))?;
+    store.close().map_err(|e| format!("close failed: {e}"))?;
+
+    let reclaimed = before.file_bytes.saturating_sub(after.file_bytes);
+    println!(
+        "vacuumed: {} live memories, {} forgotten reclaimed",
+        after.live_memories, before.forgotten_memories
+    );
+    println!(
+        "size:     {} -> {} ({} freed)",
+        human_bytes(before.file_bytes),
+        human_bytes(after.file_bytes),
+        human_bytes(reclaimed),
+    );
     Ok(())
 }
 

@@ -142,16 +142,90 @@ fn project_detection_scopes_cli_remember_and_recall() {
     assert!(stdout.contains("(global)"), "{stdout}");
 }
 
+/// `embedmind vacuum` reclaims the space held by forgotten memories: remember
+/// a few, forget most, vacuum, and `stats` must show the file shrink and the
+/// tombstones gone while the survivors still recall (S11 / B4).
 #[test]
-fn vacuum_is_a_clear_not_implemented_error() {
+fn vacuum_reclaims_forgotten_space() {
     let scratch = Scratch::new("vacuum");
     let store = scratch.store();
-    let (ok, _, stderr) = run(
-        scratch.path(),
-        &["--file", store.to_str().unwrap(), "vacuum"],
+    let file = store.to_str().unwrap();
+
+    // Several sizeable memories so forgetting most of them frees real pages.
+    let mut ids = Vec::new();
+    for i in 0..6 {
+        let text = format!("decision {i}: {}", "context ".repeat(40));
+        let (ok, stdout, stderr) = run(scratch.path(), &["--file", file, "remember", &text]);
+        assert!(ok, "remember {i} failed: {stderr}");
+        ids.push(stdout.split_whitespace().next().unwrap().to_string());
+    }
+
+    // Forget all but the last.
+    for id in &ids[..5] {
+        let (ok, _, stderr) = run(scratch.path(), &["--file", file, "forget", id]);
+        assert!(ok, "forget failed: {stderr}");
+    }
+
+    let (ok, before, _) = run(scratch.path(), &["--file", file, "stats"]);
+    assert!(ok);
+    assert!(before.contains("live memories:      1"), "{before}");
+    assert!(before.contains("forgotten:          5"), "{before}");
+    let before_pages = pages_of(&before);
+
+    // Vacuum: reports the reclaim and leaves a single, smaller file.
+    let (ok, stdout, stderr) = run(scratch.path(), &["--file", file, "vacuum"]);
+    assert!(ok, "vacuum failed: {stderr}");
+    assert!(stdout.contains("vacuumed:"), "{stdout}");
+    assert!(stdout.contains("5 forgotten reclaimed"), "{stdout}");
+
+    // stats after: no tombstones, the survivor intact, fewer (or equal) pages.
+    let (ok, after, _) = run(scratch.path(), &["--file", file, "stats"]);
+    assert!(ok);
+    assert!(after.contains("live memories:      1"), "{after}");
+    assert!(after.contains("forgotten:          0"), "{after}");
+    let after_pages = pages_of(&after);
+    assert!(
+        after_pages <= before_pages,
+        "vacuum must not grow the file: {before_pages} -> {after_pages}"
     );
-    assert!(!ok);
-    assert!(stderr.contains("not implemented"), "{stderr}");
+    assert!(
+        after_pages < before_pages,
+        "forgetting 5 of 6 then vacuuming should reclaim pages: {before_pages} -> {after_pages}"
+    );
+
+    // The survivor still recalls after the swap.
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "recall", "decision 5"]);
+    assert!(ok);
+    assert!(
+        stdout.contains(&ids[5]),
+        "survivor must still recall: {stdout}"
+    );
+
+    // No orphan temp/scratch left beside the store.
+    assert!(!store.with_extension("mind-vacuum-tmp").exists());
+    let dir = fs::read_dir(scratch.path()).unwrap();
+    for entry in dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.contains("vacuum-tmp") && !name.contains("vacuum-scratch"),
+            "orphan left behind: {name}"
+        );
+    }
+}
+
+/// Extracts the page count from a `stats` "size:" line, e.g.
+/// `size:  12.0 KiB (24 pages × 512 bytes)` → 24.
+fn pages_of(stats: &str) -> u64 {
+    let line = stats
+        .lines()
+        .find(|l| l.trim_start().starts_with("size:"))
+        .expect("stats has a size line");
+    let (_, rest) = line.split_once('(').expect("size line has a paren");
+    rest.split_whitespace()
+        .next()
+        .expect("page count token")
+        .parse()
+        .expect("page count is a number")
 }
 
 /// `embedmind recall --filter` narrows results by metadata (S10). Metadata is
