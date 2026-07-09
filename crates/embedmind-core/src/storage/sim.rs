@@ -238,6 +238,29 @@ impl Vfs for SimVfs {
     fn exists(&self, path: &Path) -> bool {
         lock(&self.state.files).contains_key(path)
     }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        // Rename is atomic and durable: it either fully happened or it did not.
+        // We model that as a single indivisible step by performing the map swap
+        // *before* consulting the armed crash. So the injection point at this op
+        // fires **after** the swap has durably taken effect — i.e. the "process
+        // died right after the rename committed" window (→ post-vacuum outcome),
+        // while a crash at the *previous* op leaves the original untouched (→
+        // pre-vacuum). Between them, both sides of the atomic swap are covered.
+        // Torn tearing is meaningless for a metadata rename, so it acts as a
+        // clean crash-after-effect.
+        {
+            let mut files = lock(&self.state.files);
+            let data = files
+                .remove(from)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))?;
+            // Atomic replace: the destination becomes the source's data in one
+            // step; any prior destination content is dropped.
+            files.insert(to.to_path_buf(), data);
+        }
+        self.enter_mut_op(false)?;
+        Ok(())
+    }
 }
 
 struct SimFile {

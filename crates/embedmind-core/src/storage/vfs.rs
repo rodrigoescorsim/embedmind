@@ -64,6 +64,13 @@ pub trait Vfs: Send + Sync {
 
     /// Whether `path` exists.
     fn exists(&self, path: &Path) -> bool;
+
+    /// Atomically renames `from` to `to`, replacing `to` if it exists. This is
+    /// the primitive `vacuum` swaps the rebuilt file in with (`docs/adr/0003`):
+    /// a crash either leaves the old file fully in place or the new one fully
+    /// in place, never a torn mix. `std::fs::rename` gives this on both Unix
+    /// (`rename(2)`) and Windows (`MoveFileEx` with replace semantics).
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
 }
 
 /// Production VFS: thin passthrough to `std::fs`.
@@ -94,6 +101,13 @@ impl Vfs for RealVfs {
 
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        // `fs::rename` replaces an existing destination atomically on both
+        // supported platforms (POSIX `rename`, Windows `MoveFileExW` with
+        // `MOVEFILE_REPLACE_EXISTING`).
+        fs::rename(from, to)
     }
 }
 
