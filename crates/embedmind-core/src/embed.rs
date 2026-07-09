@@ -85,9 +85,16 @@ pub trait Embedder: Send + Sync {
 /// stays a single command with no post-install download step. ~23 MB
 /// (int8-quantized ONNX weights) + tokenizer, well inside the < 40 MB binary
 /// budget (DESIGN.md §1).
+///
+/// The tokenizer is embedded straight from the crate tree. The ONNX weights
+/// come from a path resolved by `build.rs` (`EMBEDMIND_MODEL_ONNX`): the
+/// in-tree asset in a dev/CI checkout, or a checksum-verified download when
+/// building from the published crate — the 22 MB file is `exclude`d from the
+/// package to stay under the crates.io 10 MiB ceiling (docs/RELEASING.md).
+/// Either way the bytes are identical and `include_bytes!` embeds them at
+/// compile time, so runtime behavior is unchanged.
 mod assets {
-    pub const MODEL_ONNX: &[u8] =
-        include_bytes!("../assets/all-MiniLM-L6-v2/onnx/model_quantized.onnx");
+    pub const MODEL_ONNX: &[u8] = include_bytes!(env!("EMBEDMIND_MODEL_ONNX"));
     pub const TOKENIZER_JSON: &[u8] = include_bytes!("../assets/all-MiniLM-L6-v2/tokenizer.json");
 }
 

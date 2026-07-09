@@ -11,6 +11,16 @@ homepage.workspace = true
 readme = "README.md"
 keywords = ["embeddings", "vector", "memory", "database", "ai"]
 categories = ["database-implementations", "science", "data-structures"]
+build = "build.rs"
+
+# The 22 MB int8 ONNX weights are NOT shipped in the published source package:
+# they would push it past the crates.io 10 MiB ceiling (docs/RELEASING.md).
+# `build.rs` re-fetches (and checksum-verifies) them from the pinned Hugging
+# Face export when building from the published crate; a dev/CI checkout still
+# has the file in-tree and skips the download. The final binary embeds the
+# model exactly as before (ADR 0004) — behavior is unchanged. Everything else
+# under assets/ (tokenizer, vocab — well under 1 MB) stays embedded in-crate.
+exclude = ["assets/all-MiniLM-L6-v2/onnx/model_quantized.onnx"]
 
 [dependencies]
 thiserror = { workspace = true }
