@@ -144,17 +144,22 @@ Show HN, r/ClaudeAI, r/LocalLLaMA, r/rust, X. Post: *"I built persistent memory 
 coding agents in Rust — single file, no server"*. Itens 2.2 (responder issues < 24h) e
 2.7 (releases quinzenais guiados por issues) são processo contínuo do founder.
 
-### B2. Full-text search na engine (item 2.3)
+### B2. Full-text search na engine (item 2.3) [✅ ENTREGUE]
 
-Índice invertido próprio nas páginas (default do DESIGN §12 — decidir vs. tantivy AQUI,
-registrando ADR 0010), integrado ao WAL/transações, com BM25; fusão com o ranking
-vetorial por RRF k=60 (ADR 0005) no `recall`.
+Índice invertido próprio nas páginas (default do DESIGN §12, decidido vs. tantivy em
+[ADR 0011](adr/0011-full-text-indice-invertido-proprio.md)), integrado ao WAL/transações,
+com BM25; fusão com o ranking vetorial por RRF k=60 (ADR 0005) no `recall`.
 
 - **DoD:** stories S9 da spec verdes (termo exato raro encontra a memória; fusão nunca
   exige interseção; arquivo antigo degrada para vetor-só com aviso); crash tests
   cobrindo as páginas novas; fuzz target para o parser do índice se houver formato
-  novo; ADR 0010 escrito.
-- **Verificação:** `cargo test --workspace` + casos de ouro da S9.
+  novo; ADR escrito.
+- **Verificação:** `cargo test --workspace` + casos de ouro da S9. ✅
+- **Onde:** engine half — `index::fts` (dicionário paginado + BM25 k1=1.2/b=0.75,
+  `Store::search_text`), page types `FTS_DICT`/`FTS_POSTINGS`, `format_version` 1→2
+  aditivo (FORMAT.md §11), fuzz target `fuzz_fts_page`. Recall half — `recall::fuse`
+  (RRF k=60) fundindo HNSW + BM25 em `Store::recall`/`recall_detailed`;
+  `Store::recall_vector` isola o HNSW puro para o benchmark harness.
 
 ### B3. Filtros de metadados no `recall` (item 2.4) [✅ ENTREGUE]
 

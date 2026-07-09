@@ -99,6 +99,19 @@ Pre-v0.1 — under active development, repo private until M1 completes
   clients that never send it; the CLI adds a repeatable `recall --filter`
   (`key=value`, `key=lo..hi`, `key>=n`, `key<=n`). Shells stay logic-free
   (parse → API → serialize). Spec: `docs/01-spec.md` S10.
+- Hybrid recall: fuse the vector and full-text lists via Reciprocal Rank Fusion
+  (S9 recall half, roadmap 2.3, ADR 0005, k=60) in `recall::fuse`, wired into
+  `Store::recall`/`recall_detailed`. Fusion is a union, never an intersection: a
+  rare exact term (text-only hit) or a semantic synonym (vector-only hit) both
+  still make the result. A pre-M2 file with no full-text index (`format_version`
+  1) degrades to vector-only with a reported flag, never an error; project
+  scope, tombstone re-check, and the S2 adaptive-`ef_search` anti-under-return
+  guarantee are preserved end-to-end. Fixed `fuse` double-counting a repeated id
+  within a single list (tracks per-id list contribution so an intra-list repeat
+  keeps only its best rank, while a genuine cross-list overlap still sums). New
+  `Store::recall_vector` isolates the pure HNSW path so the benchmark harness
+  keeps grading the index's approximation quality on its own
+  (`docs/BENCHMARKS.md` §3) now that `recall` itself is hybrid.
 - Full-text index in the engine (S9 engine half, roadmap 2.3, **ADR 0011**):
   own paged inverted index with BM25 scoring — **not** an embedded tantivy,
   which would break the single-file promise and the WAL's single commit truth.
