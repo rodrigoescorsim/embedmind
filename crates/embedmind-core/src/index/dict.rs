@@ -659,6 +659,16 @@ pub(crate) fn read_u32(buf: &[u8], off: usize, page_no: u64) -> Result<u32> {
         .ok_or_else(|| malformed(page_no, "dict short read"))
 }
 
+pub(crate) fn get_u16(buf: &[u8], off: &mut usize, page_no: u64) -> Result<u16> {
+    let v = buf
+        .get(*off..*off + 2)
+        .and_then(|b| b.try_into().ok())
+        .map(u16::from_le_bytes)
+        .ok_or_else(|| malformed(page_no, "dict short read"))?;
+    *off += 2;
+    Ok(v)
+}
+
 pub(crate) fn get_u32(buf: &[u8], off: &mut usize, page_no: u64) -> Result<u32> {
     let v = read_u32(buf, *off, page_no)?;
     *off += 4;

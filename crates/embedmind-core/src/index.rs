@@ -45,6 +45,7 @@
 
 pub(crate) mod dict;
 pub mod fts;
+pub mod graph;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
