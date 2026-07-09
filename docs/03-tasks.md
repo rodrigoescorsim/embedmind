@@ -175,14 +175,24 @@ original.
   depois mostra redução.
 - **Verificação:** teste round-trip ingest → forget 50% → vacuum → invariantes.
 
-### B5. Bindings Python (item 2.5)
+### B5. Bindings Python (item 2.5) [✅ ENTREGUE]
 
-Crate `bindings/python` com PyO3 + maturin: `Store`, `remember`, `recall`, `forget`,
-`stats` com a mesma semântica; wheels para as 3 plataformas no CI de release.
+Crate `bindings/python` (PyO3 + maturin, workspace próprio como `fuzz` — PyO3 gera
+`unsafe`, que o lint `unsafe_code = "forbid"` do workspace principal rejeitaria).
+Expõe `Store` com `remember`/`recall`/`forget`/`stats`/`vacuum` na mesma semântica das
+tools MCP/CLI — casca fina sobre `embedmind_core::api`, sem lógica de domínio
+(CLAUDE.md decisão 2). Metadados tipados ↔ escalares Python nativos; filtros de
+`recall` aceitam escalar (Eq) ou tupla `(min, max)` (Range, S10); filtro por agente +
+breakdown por agente em `stats` (S14) passam sem mudança. Wheel `abi3` (uma por
+plataforma, CPython 3.9+) com modelo ONNX embutido; stubs `.pyi` + `py.typed`.
 
 - **DoD:** `pip install` do wheel local funciona; suite pytest espelhando os E2E do
-  CLI; mesmos arquivos `.mind` legíveis por Rust e Python.
+  CLI; mesmos arquivos `.mind` legíveis por Rust e Python. ✅ 20 testes verdes,
+  incl. round-trip cruzado (escreve em Rust, lê em Python e vice-versa).
 - **Verificação:** `maturin build && pip install ... && pytest`.
+- **Onde:** `bindings/python/{src/lib.rs,tests/}`; CI: job `wheels` (3 plataformas) em
+  `release.yml` + job `python-bindings` (lint + pytest) em `ci.yml`. Publicação no PyPI
+  fica MANUAL (founder), como o crates.io.
 
 ### B6. [MANUAL — founder] 2º post técnico (item 2.6)
 

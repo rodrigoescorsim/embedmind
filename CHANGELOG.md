@@ -15,6 +15,23 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Python bindings** (S12 / task B5, roadmap 2.5) — the multiplier that
+  unlocks LangChain and custom agents. New `bindings/python` crate (PyO3 +
+  maturin, its own workspace like `fuzz`) exposes `Store` with
+  `remember`/`recall`/`forget`/`stats`/`vacuum` at the **same semantics** as the
+  MCP tools and CLI: a thin shell over `embedmind_core::api`, no domain logic
+  (CLAUDE.md decision 2). Typed metadata maps to native Python scalars
+  (`str`/`int`/`float`/`bool`/`None`); recall filters accept an exact-match
+  scalar or a `(min, max)` numeric range (S10), the agent filter and per-agent
+  stats breakdown (S14) come through unchanged. Because the bindings call the
+  *same* engine, `.mind` files are **byte-for-byte interchangeable** with the
+  Rust `Store` — a pytest round-trip suite writes in Rust and reads in Python
+  (and vice-versa, incl. forget across the boundary) to prove it. Ships as an
+  `abi3` wheel (one per platform, CPython 3.9+) with the embedded ONNX model, so
+  vector recall works on `pip install` with no download or API key; type stubs +
+  `py.typed` included. Release CI builds/tests the three-platform wheels (PyPI
+  upload stays MANUAL, like crates.io); CI lints + pytests the bindings on every
+  PR.
 - **Basic provenance exposed: agent filter on recall + per-agent stats
   breakdown** (S14 / task C2, roadmap 3.2) — the agent/session data every
   memory already carried (core decision 3) is now queryable, with no file-format
