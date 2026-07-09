@@ -76,7 +76,7 @@ jobs:
       - name: Fuzz all targets
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then per_target=3600; else per_target=120; fi
-          for target in fuzz_header fuzz_page fuzz_record fuzz_wal_replay fuzz_open_full; do
+          for target in fuzz_header fuzz_page fuzz_record fuzz_fts_page fuzz_graph_page fuzz_wal_replay fuzz_open_full; do
             cargo fuzz run "$target" -- -max_total_time="$per_target" -rss_limit_mb=4096
           done
       - name: Upload crash artifacts

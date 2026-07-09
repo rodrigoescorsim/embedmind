@@ -48,6 +48,14 @@ pub fn fuzz_fts_page(data: &[u8]) {
     crate::index::fts::fuzz_decode_page(data);
 }
 
+/// `fuzz_graph_page`: graph dictionary nodes (meta/inner/leaf), overflow
+/// chains, and the entity-members/adjacency value bodies — the format that
+/// landed with S13 (`docs/adr/0012`, `docs/FORMAT.md` §12). Must return,
+/// never panic/OOM, on arbitrary input.
+pub fn fuzz_graph_page(data: &[u8]) {
+    crate::index::graph::fuzz_decode_page(data);
+}
+
 /// `fuzz_wal_replay`: full recovery with arbitrary bytes as the WAL sidecar
 /// of a valid base store. Recovery must yield an openable store or a typed
 /// error; every page read after it must be `Ok` or a typed error.
@@ -138,6 +146,7 @@ mod tests {
             fuzz_record(&data);
             fuzz_page(&data);
             fuzz_fts_page(&data);
+            fuzz_graph_page(&data);
             // The whole-store bodies are heavier; sample them.
             if round % 10 == 0 {
                 fuzz_wal_replay(&data);
