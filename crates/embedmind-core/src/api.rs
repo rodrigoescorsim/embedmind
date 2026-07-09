@@ -12,7 +12,7 @@
 //! before — vector recall is a non-breaking addition, not a requirement.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use ulid::Ulid;
@@ -81,6 +81,15 @@ fn default_embedder() -> Result<Arc<dyn Embedder>> {
 pub struct Store {
     pager: Pager,
     embedder: Option<Arc<dyn Embedder>>,
+    /// The VFS and path this store lives on — kept so `vacuum` can build a
+    /// sibling temp file and swap it in atomically (`docs/adr/0003`). Every
+    /// other operation goes through `pager`, which owns its own handle.
+    vfs: Arc<dyn Vfs>,
+    path: PathBuf,
+    /// The WAL checkpoint threshold this store was opened with, so `vacuum`'s
+    /// rebuilt file and post-swap reopen keep the same tuning rather than
+    /// silently reverting to a default.
+    checkpoint_threshold: u64,
 }
 
 impl Store {
@@ -124,8 +133,14 @@ impl Store {
     /// crash harness, fuzzers, and tests that don't need embeddings use.
     pub fn create_with(vfs: Arc<dyn Vfs>, path: &Path, opts: StoreOptions) -> Result<Store> {
         let embedder = opts.embedder.clone();
-        let pager = Pager::create(vfs, path, opts.pager())?;
-        let mut store = Store { pager, embedder };
+        let pager = Pager::create(Arc::clone(&vfs), path, opts.pager())?;
+        let mut store = Store {
+            pager,
+            embedder,
+            vfs,
+            path: path.to_path_buf(),
+            checkpoint_threshold: opts.checkpoint_threshold,
+        };
         store.init_embedding_header()?;
         Ok(store)
     }
@@ -133,8 +148,26 @@ impl Store {
     /// [`Store::open`] with an explicit [`Vfs`] and options.
     pub fn open_with(vfs: Arc<dyn Vfs>, path: &Path, opts: StoreOptions) -> Result<Store> {
         let embedder = opts.embedder.clone();
-        let pager = Pager::open(vfs, path, opts.pager())?;
-        let mut store = Store { pager, embedder };
+        // A crash mid-`vacuum` may leave sibling temp/scratch files behind; the
+        // original is always intact (the swap is the last, atomic step), so we
+        // just sweep those orphans away on open — never adopt them.
+        for orphan in [vacuum_tmp_path(path), vacuum_scratch_path(path)] {
+            if vfs.exists(&orphan) {
+                vfs.delete(&orphan).ok();
+            }
+            let orphan_wal = wal_sidecar_path(&orphan);
+            if vfs.exists(&orphan_wal) {
+                vfs.delete(&orphan_wal).ok();
+            }
+        }
+        let pager = Pager::open(Arc::clone(&vfs), path, opts.pager())?;
+        let mut store = Store {
+            pager,
+            embedder,
+            vfs,
+            path: path.to_path_buf(),
+            checkpoint_threshold: opts.checkpoint_threshold,
+        };
         store.init_embedding_header()?;
         Ok(store)
     }
@@ -285,13 +318,15 @@ impl Store {
                 return false; // a mismatch already occurred; stop admitting
             }
             match load(id) {
-                Ok(Some(rec)) if in_scope(&query, &rec) => match query.record_passes_filters(&rec) {
-                    Ok(pass) => pass,
-                    Err(e) => {
-                        *filter_error.borrow_mut() = Some(e);
-                        false
+                Ok(Some(rec)) if in_scope(&query, &rec) => {
+                    match query.record_passes_filters(&rec) {
+                        Ok(pass) => pass,
+                        Err(e) => {
+                            *filter_error.borrow_mut() = Some(e);
+                            false
+                        }
                     }
-                },
+                }
                 _ => false,
             }
         };
@@ -401,13 +436,15 @@ impl Store {
                 return false;
             }
             match load(id) {
-                Ok(Some(rec)) if in_scope(&query, &rec) => match query.record_passes_filters(&rec) {
-                    Ok(pass) => pass,
-                    Err(e) => {
-                        *filter_error.borrow_mut() = Some(e);
-                        false
+                Ok(Some(rec)) if in_scope(&query, &rec) => {
+                    match query.record_passes_filters(&rec) {
+                        Ok(pass) => pass,
+                        Err(e) => {
+                            *filter_error.borrow_mut() = Some(e);
+                            false
+                        }
                     }
-                },
+                }
                 _ => false,
             }
         };
@@ -550,6 +587,152 @@ impl Store {
         Ok(true)
     }
 
+    /// Reclaims the space held by forgotten memories and rebuilds the indexes
+    /// (`docs/adr/0003`, story S11). `forget` only tombstones — the record, its
+    /// vector slots and its full-text postings all stay on disk, filtered out
+    /// of every read but still occupying pages. `vacuum` is how that space
+    /// comes back.
+    ///
+    /// **Rebuild by copy, never in place.** A fresh `.mind` is built in a
+    /// sibling temp file, each *live* memory re-inserted (record preserved
+    /// byte-for-byte — same id, provenance, metadata; vectors and full-text
+    /// re-derived by the same embedder/tokenizer, so the new indexes hold only
+    /// the living), then the temp file is swapped over the original with a
+    /// single atomic rename. Consequences:
+    ///
+    /// - **Crash-safe at every point.** Until the final rename, the original is
+    ///   untouched; a crash mid-vacuum leaves it fully intact and orphans the
+    ///   temp file, which the next `open`/`vacuum` sweeps away. The rename
+    ///   itself is atomic ([`Vfs::rename`]), so there is no torn-file window.
+    /// - **Result is ≤ the original.** No tombstones, no orphaned overflow
+    ///   chains, freshly packed indexes — the file can only shrink or stay the
+    ///   same (a store with nothing forgotten still round-trips smaller-or-equal).
+    ///
+    /// Requires an embedder when the store has vectors to rebuild — a vacuum
+    /// without one could not reconstruct the HNSW graph. On success the store's
+    /// own pager is reopened onto the vacuumed file, so the `Store` stays usable.
+    pub fn vacuum(&mut self) -> Result<()> {
+        let tmp = vacuum_tmp_path(&self.path);
+        let tmp_wal = wal_sidecar_path(&tmp);
+        let scratch = vacuum_scratch_path(&self.path);
+        let orig_wal = wal_sidecar_path(&self.path);
+        // Clear any stale temp/scratch files from an earlier crashed vacuum;
+        // they are dead by definition (the original is authoritative). A stale
+        // temp would otherwise block the `CreateNew` in `build_compacted`.
+        for orphan in [&tmp, &tmp_wal, &scratch, &wal_sidecar_path(&scratch)] {
+            if self.vfs.exists(orphan) {
+                self.vfs.delete(orphan)?;
+            }
+        }
+
+        // Flush the original's WAL into its main file *first*, so by swap time
+        // the original is a single self-consistent file with an empty WAL.
+        // This is the same crash-safe checkpoint every clean close performs; it
+        // matters here because the swap then never has to rewrite the original
+        // (a torn header rewrite with a reset WAL would be unrecoverable). All
+        // this touches is the original — a crash here is an ordinary "crash
+        // during checkpoint", fully covered by WAL recovery.
+        self.pager.checkpoint()?;
+
+        // Build the compacted copy, cleaning up the temp files on any failure so
+        // a mid-rebuild error never leaves an orphan behind.
+        if let Err(e) = self.build_compacted(&tmp) {
+            self.vfs.delete(&tmp).ok();
+            if self.vfs.exists(&tmp_wal) {
+                self.vfs.delete(&tmp_wal).ok();
+            }
+            return Err(e);
+        }
+
+        // `build_compacted` closed the temp store cleanly, so nothing holds
+        // `tmp`. The atomic swap needs *no* open handle on either the original
+        // or `tmp` (Windows will not rename over/onto an open file), yet
+        // `self.pager` must always own a valid `Pager` — so park it on a
+        // throwaway scratch store while both are released.
+        let opts = StoreOptions {
+            page_size: self.pager.header().page_size,
+            checkpoint_threshold: self.checkpoint_threshold,
+            embedder: self.embedder.clone(),
+        };
+        let parked = Pager::create(Arc::clone(&self.vfs), &scratch, opts.pager())?;
+        let original = std::mem::replace(&mut self.pager, parked);
+        // Release the original *without* checkpointing — its WAL is already
+        // empty (we checkpointed above), so dropping only frees the writer
+        // lock and writes nothing. Deleting the empty WAL leaves the original
+        // path holding a single, fully consistent file.
+        drop(original);
+        if self.vfs.exists(&orig_wal) {
+            self.vfs.delete(&orig_wal).ok();
+        }
+
+        // The atomic swap. Until this rename, the original file is fully in
+        // place (the vacuumed data lives only in the separate `tmp`); the
+        // rename itself is atomic ([`Vfs::rename`]), so a crash yields either
+        // the intact original or the finished vacuumed file, never a torn mix.
+        self.vfs.rename(&tmp, &self.path).map_err(Error::Io)?;
+        if self.vfs.exists(&tmp_wal) {
+            self.vfs.delete(&tmp_wal).ok();
+        }
+
+        // Reopen on the final path (recovery is a no-op — `tmp` was cleanly
+        // closed, so it has no WAL), then tear down the scratch store.
+        let reopened = Pager::open(Arc::clone(&self.vfs), &self.path, opts.pager())?;
+        let parked = std::mem::replace(&mut self.pager, reopened);
+        parked.close().ok();
+        self.vfs.delete(&scratch).ok();
+        Ok(())
+    }
+
+    /// Writes every live memory of this store into a brand-new `.mind` at
+    /// `dest`, preserving each record exactly and re-deriving its vector and
+    /// full-text entries. The destination is cleanly closed (single file, no
+    /// WAL) on success. Shared by [`Store::vacuum`].
+    fn build_compacted(&self, dest: &Path) -> Result<()> {
+        let opts = StoreOptions {
+            page_size: self.pager.header().page_size,
+            checkpoint_threshold: self.checkpoint_threshold,
+            embedder: self.embedder.clone(),
+        };
+        let mut dst = Store::create_with(Arc::clone(&self.vfs), dest, opts)?;
+        for memory in self.iter() {
+            let memory = memory?;
+            // Reconstruct the on-disk record; `iter` already filtered tombstones.
+            let record = MemoryRecord {
+                id: memory.id,
+                tombstone: false,
+                content: memory.content,
+                vec_ref: None,
+                project: memory.project,
+                provenance: memory.provenance,
+                metadata: memory.metadata,
+            };
+            dst.insert_record(record)?;
+        }
+        dst.close()
+    }
+
+    /// Inserts a fully-formed [`MemoryRecord`] verbatim (id, provenance and
+    /// metadata preserved), re-deriving its vector and full-text index entries
+    /// — the write half of [`Store::vacuum`]'s rebuild. Unlike [`Store::remember`]
+    /// it neither mints a new id nor a timestamp; the record is stored as given.
+    fn insert_record(&mut self, mut record: MemoryRecord) -> Result<Memory> {
+        let mut txn = self.pager.begin()?;
+        if let Some(embedder) = &self.embedder {
+            for mut vector in embedder.embed_chunks(&record.content)? {
+                index::normalize(&mut vector);
+                let (page_no, slot) = index::insert(&mut txn, embedder.dims(), record.id, &vector)?;
+                if record.vec_ref.is_none() {
+                    record.vec_ref = Some(VecRef { page_no, slot });
+                }
+            }
+        }
+        index::fts::index_document(&mut txn, record.id, &record.content)?;
+        let bytes = record.encode()?;
+        btree::insert(&mut txn, record.id.to_bytes(), &bytes)?;
+        txn.commit()?;
+        Ok(Memory::from_record(record))
+    }
+
     /// Iterates live memories in id order — which is time order (ULIDs), so
     /// this is the timeline. Yields typed errors on a corrupt file instead
     /// of panicking.
@@ -620,6 +803,34 @@ fn in_scope(query: &Query, rec: &MemoryRecord) -> bool {
             Scope::All => true,
             Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
         }
+}
+
+/// Where [`Store::vacuum`] builds the compacted copy: a sibling of the store
+/// file. Kept adjacent (same directory) so the final rename is same-filesystem
+/// and therefore atomic.
+fn vacuum_tmp_path(path: &Path) -> PathBuf {
+    sibling(path, "-vacuum-tmp")
+}
+
+/// Throwaway store [`Store::vacuum`] parks its live pager on during the swap,
+/// so `self.pager` is never invalid while original and temp are both closed.
+fn vacuum_scratch_path(path: &Path) -> PathBuf {
+    sibling(path, "-vacuum-scratch")
+}
+
+/// WAL sidecar path for `path` — mirrors the pager's own `memory.mind` →
+/// `memory.mind-wal` convention (`docs/FORMAT.md` §1), used to sweep a temp
+/// store's sidecar after a clean close.
+fn wal_sidecar_path(path: &Path) -> PathBuf {
+    sibling(path, "-wal")
+}
+
+/// `path` with `suffix` appended to its file name (byte-appended, like the WAL
+/// convention), keeping it in the same directory.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
 }
 
 /// Current time in microseconds since the Unix epoch (UTC). Saturates
@@ -1101,6 +1312,151 @@ mod tests {
         );
         assert!(stats.page_count >= 2, "header + at least one data page");
         assert!(store.get(keep.id).unwrap().is_some());
+    }
+
+    /// A store on a shared [`SimVfs`] with a [`WordEmbedder`], plus the vfs and
+    /// path so the vacuum tests can reopen after the swap.
+    fn store_on(vfs: &Arc<dyn Vfs>, path: &str, groups: &[&[&'static str]]) -> Store {
+        let opts = StoreOptions {
+            embedder: Some(Arc::new(WordEmbedder::new(groups))),
+            ..StoreOptions::default()
+        };
+        Store::create_with(Arc::clone(vfs), Path::new(path), opts).unwrap()
+    }
+
+    #[test]
+    fn vacuum_preserves_live_records_and_drops_tombstones() {
+        let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+        let mut store = store_on(&vfs, "m.mind", &[&["rust"], &["python"]]);
+
+        let keep = store
+            .remember(
+                MemoryDraft::new("rust ownership is nice")
+                    .project("embedmind")
+                    .agent("claude-code")
+                    .session("s1")
+                    .meta("weight", Scalar::I64(7)),
+            )
+            .unwrap();
+        let gone = store
+            .remember(MemoryDraft::new("python gil is annoying"))
+            .unwrap();
+        let keep2 = store
+            .remember(MemoryDraft::new("more rust rust content"))
+            .unwrap();
+        store.forget(gone.id).unwrap();
+
+        store.vacuum().unwrap();
+
+        // Live records survive byte-for-byte (id, provenance, metadata).
+        let got = store.get(keep.id).unwrap().unwrap();
+        assert_eq!(got.content, "rust ownership is nice");
+        assert_eq!(got.project.as_deref(), Some("embedmind"));
+        assert_eq!(got.provenance.agent, "claude-code");
+        assert_eq!(got.provenance.session_id.as_deref(), Some("s1"));
+        assert_eq!(
+            got.provenance.created_at_micros,
+            keep.provenance.created_at_micros
+        );
+        assert_eq!(got.metadata["weight"], Scalar::I64(7));
+        assert!(store.get(keep2.id).unwrap().is_some());
+
+        // The forgotten memory is gone entirely — not even a tombstone remains.
+        assert_eq!(store.get(gone.id).unwrap(), None);
+        let all: Vec<Memory> = store.iter_all().collect::<Result<_>>().unwrap();
+        assert_eq!(all.len(), 2, "no tombstone left behind after vacuum");
+        assert!(all.iter().all(|m| !m.tombstone));
+
+        // Indexes were rebuilt without the dead: fts counts only the living,
+        // and recall/search still work against the vacuumed file.
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.live_memories, 2);
+        assert_eq!(stats.forgotten_memories, 0);
+        assert_eq!(stats.fts_documents, 2);
+        let hits = store.search_text(Query::new("rust")).unwrap();
+        let ids: Vec<Ulid> = hits.iter().map(|h| h.id).collect();
+        assert!(ids.contains(&keep.id) && ids.contains(&keep2.id));
+        assert!(!ids.contains(&gone.id));
+        let recalled = store.recall(Query::new("python")).unwrap();
+        assert!(
+            recalled.iter().all(|r| r.id != gone.id),
+            "the forgotten python doc must not resurface in recall"
+        );
+    }
+
+    #[test]
+    fn vacuum_shrinks_the_file_and_reopens_clean() {
+        let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+        let mut store = store_on(&vfs, "m.mind", &[&["rust"]]);
+        // Enough memories that forgetting most of them frees real pages.
+        let mut ids = Vec::new();
+        for i in 0..40 {
+            ids.push(
+                store
+                    .remember(MemoryDraft::new(format!(
+                        "rust memory number {i} {}",
+                        "content ".repeat(20)
+                    )))
+                    .unwrap()
+                    .id,
+            );
+        }
+        let before = store.stats().unwrap();
+        for id in ids.iter().take(30) {
+            store.forget(*id).unwrap();
+        }
+        store.vacuum().unwrap();
+        let after = store.stats().unwrap();
+
+        assert!(
+            after.file_bytes <= before.file_bytes,
+            "vacuum must never grow the file: {} -> {}",
+            before.file_bytes,
+            after.file_bytes
+        );
+        assert!(
+            after.file_bytes < before.file_bytes,
+            "forgetting 75% then vacuuming should reclaim pages"
+        );
+        assert_eq!(after.live_memories, 10);
+
+        // The store is usable after vacuum, and survives a clean close + reopen
+        // (the swap left a single, well-formed file — no orphan temp/scratch).
+        let survivor = ids[35];
+        assert!(store.get(survivor).unwrap().is_some());
+        store.close().unwrap();
+        assert!(!vfs.exists(Path::new("m.mind-vacuum-tmp")));
+        assert!(!vfs.exists(Path::new("m.mind-vacuum-scratch")));
+
+        let opts = StoreOptions {
+            embedder: Some(Arc::new(WordEmbedder::new(&[&["rust"]]))),
+            ..StoreOptions::default()
+        };
+        let store = Store::open_with(Arc::clone(&vfs), Path::new("m.mind"), opts).unwrap();
+        assert_eq!(store.stats().unwrap().live_memories, 10);
+        assert!(store.get(survivor).unwrap().is_some());
+    }
+
+    #[test]
+    fn vacuum_with_nothing_forgotten_is_idempotent() {
+        let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+        let mut store = store_on(&vfs, "m.mind", &[&["rust"], &["python"]]);
+        for i in 0..12 {
+            store
+                .remember(MemoryDraft::new(format!("rust and python doc {i}")))
+                .unwrap();
+        }
+        let before = store.stats().unwrap();
+        store.vacuum().unwrap();
+        let after = store.stats().unwrap();
+        assert_eq!(after.live_memories, before.live_memories);
+        assert_eq!(after.fts_documents, before.fts_documents);
+        assert!(
+            after.file_bytes <= before.file_bytes,
+            "a no-tombstone vacuum still must not grow the file"
+        );
+        // Still fully queryable.
+        assert!(!store.search_text(Query::new("rust")).unwrap().is_empty());
     }
 
     #[test]
