@@ -33,6 +33,7 @@ const OFF_MAGIC: usize = 0;
 const OFF_FORMAT_VERSION: usize = 8;
 const OFF_PAGE_SIZE: usize = 12;
 const OFF_PAGE_COUNT: usize = 16;
+const OFF_FTS_ROOT: usize = 156;
 const MAGIC: &[u8; 8] = b"MINDFMT1";
 
 /// Builds a small store (no embedder — the header layout under test is
@@ -88,15 +89,16 @@ fn header_is_fixed_little_endian_per_format_spec() {
         "magic must be ASCII MINDFMT1 at offset 0 (FORMAT §4)"
     );
 
-    // format_version = 1, written little-endian: bytes must be 01 00 00 00,
-    // NOT 00 00 00 01 (big-endian). This is the concrete G3 assertion — it
-    // would fail on a big-endian host if the engine used native byte order.
+    // format_version = 2 (full-text index landed, ADR 0011), written
+    // little-endian: bytes must be 02 00 00 00, NOT 00 00 00 02 (big-endian).
+    // This is the concrete G3 assertion — it would fail on a big-endian host
+    // if the engine used native byte order.
     assert_eq!(
         &header[OFF_FORMAT_VERSION..OFF_FORMAT_VERSION + 4],
-        &[0x01, 0x00, 0x00, 0x00],
-        "format_version must be little-endian 1"
+        &[0x02, 0x00, 0x00, 0x00],
+        "format_version must be little-endian 2"
     );
-    assert_eq!(le_u32(&header, OFF_FORMAT_VERSION), 1);
+    assert_eq!(le_u32(&header, OFF_FORMAT_VERSION), 2);
 
     // page_size = 4096 = 0x1000, little-endian: 00 10 00 00.
     assert_eq!(
@@ -114,6 +116,16 @@ fn header_is_fixed_little_endian_per_format_spec() {
     assert!(
         (2..1024).contains(&page_count),
         "page_count read little-endian must be a small sane value, got {page_count}"
+    );
+
+    // fts_root_page (ADR 0011, FORMAT §4/§11): the two `remember`s indexed
+    // content, so the full-text meta page exists — a small, sane page number
+    // read little-endian, with the high bytes zero (a native-endian write on a
+    // big-endian host would smear it). This also pins the field's offset (156).
+    let fts_root = le_u64(&header, OFF_FTS_ROOT);
+    assert!(
+        (2..1024).contains(&fts_root),
+        "fts_root_page read little-endian must be a small sane page number, got {fts_root}"
     );
 }
 

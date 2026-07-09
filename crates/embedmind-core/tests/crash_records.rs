@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use embedmind_core::api::{MemoryDraft, Store, StoreOptions};
+use embedmind_core::api::{MemoryDraft, Query, Store, StoreOptions};
 use embedmind_core::storage::sim::{CrashMode, SimVfs, SplitMix64};
 use embedmind_core::{Memory, Result, Scalar, Ulid};
 
@@ -243,6 +243,30 @@ fn check_invariants(vfs: &SimVfs, model: &Model, ctx: &str) {
                 got.is_none(),
                 expected[content],
                 "I5 violated ({ctx}): get({id}) vs tombstone state"
+            );
+        }
+    }
+
+    // I3/I5 for the full-text index (B2, docs/adr/0011): its pages ride the
+    // same WAL transactions as the records, so recovery must leave a
+    // queryable index whose live hits are a subset of the surviving live
+    // memories — never a dangling posting to a record that isn't there.
+    let live_contents: std::collections::BTreeSet<&String> = expected
+        .iter()
+        .filter(|&(_, &tomb)| !tomb)
+        .map(|(c, _)| c)
+        .collect();
+    for content in &live_contents {
+        // Query a distinctive token from the content ("mem-<workload>-<n>…").
+        let token = content.split('-').nth(1).unwrap_or("mem");
+        let hits = store
+            .search_text(Query::new(token))
+            .unwrap_or_else(|e| panic!("I5 fts search ({ctx}): {e}"));
+        for hit in hits {
+            assert!(
+                live_contents.contains(&hit.content),
+                "I3 violated ({ctx}): fts returned a non-surviving memory {:?}",
+                hit.content
             );
         }
     }

@@ -38,6 +38,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_fts_page"
+path = "fuzz_targets/fuzz_fts_page.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_wal_replay"
 path = "fuzz_targets/fuzz_wal_replay.rs"
 test = false

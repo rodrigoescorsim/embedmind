@@ -147,6 +147,12 @@ fn main() {
         if (1..=7).contains(&page_type) && seen.insert(page_type) {
             write_seed("fuzz_page", &format!("seed-type-{page_type:02x}"), page);
         }
+        // FTS dictionary (0x08) and postings (0x09) pages seed their own
+        // target (docs/adr/0011). The dictionary meta/inner/leaf all share
+        // 0x08; one real instance of each on-disk type is enough to start.
+        if (0x08..=0x09).contains(&page_type) && seen.insert(page_type) {
+            write_seed("fuzz_fts_page", &format!("seed-type-{page_type:02x}"), page);
+        }
     }
 
     // fuzz_open_full: a cleanly closed single-file store (default page size).

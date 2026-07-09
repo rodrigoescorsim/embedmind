@@ -41,6 +41,13 @@ pub fn fuzz_page(data: &[u8]) {
     btree::fuzz_decode_page(data);
 }
 
+/// `fuzz_fts_page`: full-text dictionary (meta/inner/leaf) and postings
+/// parsers over raw bytes — the format that landed with B2 (`docs/adr/0011`).
+/// Must return, never panic/OOM, on arbitrary input.
+pub fn fuzz_fts_page(data: &[u8]) {
+    crate::index::fts::fuzz_decode_page(data);
+}
+
 /// `fuzz_wal_replay`: full recovery with arbitrary bytes as the WAL sidecar
 /// of a valid base store. Recovery must yield an openable store or a typed
 /// error; every page read after it must be `Ok` or a typed error.
@@ -130,6 +137,7 @@ mod tests {
             fuzz_header(&data);
             fuzz_record(&data);
             fuzz_page(&data);
+            fuzz_fts_page(&data);
             // The whole-store bodies are heavier; sample them.
             if round % 10 == 0 {
                 fuzz_wal_replay(&data);
