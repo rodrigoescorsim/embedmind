@@ -346,6 +346,154 @@ fn without_project_context_recall_defaults_to_everything() {
     assert_eq!(result["hits"].as_array().unwrap().len(), 2);
 }
 
+/// S10: the `recall` tool accepts an optional `filters` object — exact-value
+/// and numeric-range filters, ANDed — and returns only matching memories. The
+/// schema addition is backward compatible: the earlier tests that never send
+/// `filters` still pass, and `tools/list` still advertises the same three
+/// tools.
+#[test]
+fn recall_filters_by_metadata_through_the_protocol() {
+    let responses = roundtrip(
+        embedding_store(),
+        &[
+            initialize_request(1),
+            call(
+                2,
+                "remember",
+                json!({
+                    "content": "deploy runbook for the release",
+                    "metadata": { "topic": "ops", "priority": 9 },
+                }),
+            ),
+            call(
+                3,
+                "remember",
+                json!({
+                    "content": "design notes for the release",
+                    "metadata": { "topic": "design", "priority": 2 },
+                }),
+            ),
+            // Exact-value filter: only the ops memory.
+            call(
+                4,
+                "recall",
+                json!({ "query": "release", "scope": "all", "filters": { "topic": "ops" } }),
+            ),
+            // Numeric range: priority >= 5, still only the ops memory.
+            call(
+                5,
+                "recall",
+                json!({
+                    "query": "release", "scope": "all",
+                    "filters": { "priority": { "min": 5 } },
+                }),
+            ),
+            // Two filters ANDed, one of which excludes everything ⇒ no hits.
+            call(
+                6,
+                "recall",
+                json!({
+                    "query": "release", "scope": "all",
+                    "filters": { "topic": "ops", "priority": { "max": 1 } },
+                }),
+            ),
+        ],
+    );
+    let ops_id = responses[1]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let by_value = responses[3]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert_eq!(by_value.len(), 1, "topic=ops must keep exactly one memory");
+    assert_eq!(by_value[0]["id"], ops_id);
+
+    let by_range = responses[4]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        by_range.len(),
+        1,
+        "priority>=5 must keep exactly one memory"
+    );
+    assert_eq!(by_range[0]["id"], ops_id);
+
+    let anded = responses[5]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert!(anded.is_empty(), "AND of disjoint filters yields no hits");
+}
+
+/// S10 edges through the protocol: a filter on a key no memory has returns
+/// zero hits (not an error), while a type-incompatible filter is surfaced as
+/// a tool error (`isError: true`), not a crash.
+#[test]
+fn recall_filter_edges_absent_key_and_type_mismatch() {
+    let responses = roundtrip(
+        embedding_store(),
+        &[
+            call(
+                1,
+                "remember",
+                json!({ "content": "a note", "metadata": { "topic": "ops" } }),
+            ),
+            // Absent key ⇒ 0 hits, still a normal (non-error) result.
+            call(
+                2,
+                "recall",
+                json!({ "query": "note", "scope": "all", "filters": { "missing": "x" } }),
+            ),
+            // Type mismatch: integer filter over a stored string ⇒ tool error.
+            call(
+                3,
+                "recall",
+                json!({ "query": "note", "scope": "all", "filters": { "topic": 3 } }),
+            ),
+        ],
+    );
+    let absent = &responses[1]["result"];
+    assert_ne!(absent.get("isError").and_then(Value::as_bool), Some(true));
+    assert!(
+        absent["structuredContent"]["hits"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "absent-key filter must yield 0 hits, not an error"
+    );
+    assert_eq!(
+        responses[2]["result"]["isError"], true,
+        "type-incompatible filter must be a tool error"
+    );
+}
+
+/// A malformed `filters` argument (not an object, or a filter that is neither
+/// a scalar nor a valid range) is a protocol error (`-32602`), caught before
+/// the engine runs.
+#[test]
+fn malformed_filters_argument_is_a_protocol_error() {
+    let responses = roundtrip(
+        kv_store(),
+        &[
+            call(1, "recall", json!({ "query": "x", "filters": [1, 2, 3] })),
+            call(
+                2,
+                "recall",
+                json!({ "query": "x", "filters": { "k": { "bogus": 1 } } }),
+            ),
+        ],
+    );
+    assert_eq!(
+        responses[0]["error"]["code"], -32602,
+        "filters must be an object"
+    );
+    assert_eq!(
+        responses[1]["error"]["code"], -32602,
+        "a range object needs min/max, not arbitrary keys"
+    );
+}
+
 #[test]
 fn invalid_scope_is_a_protocol_error() {
     let responses = roundtrip(

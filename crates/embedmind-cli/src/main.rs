@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use embedmind_core::{MemoryDraft, Query, Store, Ulid};
+use std::collections::BTreeMap;
+
+use embedmind_core::{Filter, MemoryDraft, Query, Scalar, Store, Ulid};
 use embedmind_mcp::{McpServer, detect_project};
 
 #[derive(Parser)]
@@ -54,6 +56,12 @@ enum Command {
         /// Search every project (explicit global fallback)
         #[arg(long)]
         all: bool,
+        /// Metadata filter (repeatable, all ANDed). Forms: `key=value` for an
+        /// exact match, `key>=n` / `key<=n` for an open numeric bound, or
+        /// `key=lo..hi` for a closed numeric range. Repeat `>=`/`<=` on the
+        /// same key to bound both ends.
+        #[arg(long = "filter", value_name = "KEY=VALUE")]
+        filters: Vec<String>,
     },
     /// Delete one memory by id
     Forget { id: String },
@@ -98,7 +106,8 @@ fn run(cli: Cli) -> Result<(), String> {
             limit,
             project,
             all,
-        } => recall(&file, query, limit, project, all),
+            filters,
+        } => recall(&file, query, limit, project, all, filters),
         Command::Forget { id } => forget(&file, &id),
         Command::Stats => stats(&file),
         Command::Vacuum => Err(
@@ -171,9 +180,13 @@ fn recall(
     limit: usize,
     project: Option<String>,
     all: bool,
+    filters: Vec<String>,
 ) -> Result<(), String> {
     let store = open(file)?;
     let mut query = Query::new(text).limit(limit);
+    if !filters.is_empty() {
+        query = query.filters(parse_filters(&filters)?);
+    }
     let scope = if all {
         None
     } else {
@@ -259,6 +272,116 @@ fn default_memory_file() -> Result<PathBuf, String> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .ok_or("cannot determine home directory (HOME/USERPROFILE unset); pass --file")?;
     Ok(PathBuf::from(home).join(".embedmind").join("memory.mind"))
+}
+
+/// Parses `--filter` arguments into the engine's `key -> Filter` map (S10).
+/// Pure argument transport — the AND semantics, type-matching and
+/// anti-under-return all live in the engine. Supported forms per argument:
+///
+/// - `key=lo..hi` — closed numeric range `[lo, hi]`.
+/// - `key>=n` / `key<=n` — open numeric bound; repeating both on one key
+///   bounds both ends (they merge into one range).
+/// - `key=value` — exact match; `value` is typed by parse (i64, then f64,
+///   then bool `true`/`false`, else string).
+fn parse_filters(specs: &[String]) -> Result<BTreeMap<String, Filter>, String> {
+    let mut out: BTreeMap<String, Filter> = BTreeMap::new();
+    for spec in specs {
+        let (key, filter) = if let Some((key, n)) = spec.split_once(">=") {
+            (
+                key,
+                Filter::Range {
+                    min: Some(parse_num(n)?),
+                    max: None,
+                },
+            )
+        } else if let Some((key, n)) = spec.split_once("<=") {
+            (
+                key,
+                Filter::Range {
+                    min: None,
+                    max: Some(parse_num(n)?),
+                },
+            )
+        } else if let Some((key, value)) = spec.split_once('=') {
+            if let Some((lo, hi)) = value.split_once("..") {
+                (
+                    key,
+                    Filter::Range {
+                        min: Some(parse_num(lo)?),
+                        max: Some(parse_num(hi)?),
+                    },
+                )
+            } else {
+                (key, Filter::Eq(parse_scalar(value)))
+            }
+        } else {
+            return Err(format!(
+                "invalid --filter '{spec}': expected key=value, key=lo..hi, key>=n or key<=n"
+            ));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(format!("invalid --filter '{spec}': empty key"));
+        }
+        merge_filter(&mut out, key, filter, spec)?;
+    }
+    Ok(out)
+}
+
+/// Inserts `filter` under `key`, merging two open range bounds on the same key
+/// (`key>=n` plus `key<=m`) into one closed range. Any other collision on a
+/// key is a conflicting filter and an error.
+fn merge_filter(
+    out: &mut BTreeMap<String, Filter>,
+    key: &str,
+    filter: Filter,
+    spec: &str,
+) -> Result<(), String> {
+    match (out.remove(key), filter) {
+        (None, f) => {
+            out.insert(key.to_string(), f);
+        }
+        (Some(Filter::Range { min: m1, max: x1 }), Filter::Range { min: m2, max: x2 }) => {
+            out.insert(
+                key.to_string(),
+                Filter::Range {
+                    min: m1.or(m2),
+                    max: x1.or(x2),
+                },
+            );
+        }
+        (Some(_), _) => {
+            return Err(format!(
+                "conflicting --filter for key '{key}' (from '{spec}')"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Parses a numeric range bound; both integers and floats are accepted and
+/// carried as `f64` (the engine compares numeric metadata as `f64`).
+fn parse_num(s: &str) -> Result<f64, String> {
+    s.trim()
+        .parse::<f64>()
+        .map_err(|_| format!("invalid numeric bound '{s}' in --filter"))
+}
+
+/// Types a bare `key=value` right-hand side: integer, then float, then boolean
+/// `true`/`false`, else a string — the natural CLI inference. Metadata values
+/// stored as the matching type will compare equal in the engine.
+fn parse_scalar(value: &str) -> Scalar {
+    if let Ok(i) = value.parse::<i64>() {
+        Scalar::I64(i)
+    } else if let Ok(f) = value.parse::<f64>() {
+        Scalar::F64(f)
+    } else if value == "true" {
+        Scalar::Bool(true)
+    } else if value == "false" {
+        Scalar::Bool(false)
+    } else {
+        Scalar::Str(value.to_string())
+    }
 }
 
 fn human_bytes(bytes: u64) -> String {

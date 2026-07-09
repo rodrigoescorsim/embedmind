@@ -154,6 +154,90 @@ fn vacuum_is_a_clear_not_implemented_error() {
     assert!(stderr.contains("not implemented"), "{stderr}");
 }
 
+/// `embedmind recall --filter` narrows results by metadata (S10). Metadata is
+/// set through the MCP `serve` path (the CLI `remember` has no metadata flag),
+/// then a filtered CLI recall must return only the matching memory.
+#[test]
+fn recall_filter_narrows_by_metadata() {
+    let scratch = Scratch::new("filter");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    // Store two memories with distinct metadata via `serve` (one process).
+    let mut child = Command::new(env!("CARGO_BIN_EXE_embedmind"))
+        .args(["--file", file, "serve"])
+        .current_dir(scratch.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("serve must spawn");
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin
+            .write_all(
+                concat!(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"remember","arguments":{"content":"deploy runbook for the release","project":null,"metadata":{"topic":"ops","priority":9}}}}"#,
+                    "\n",
+                    r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"remember","arguments":{"content":"design notes for the release","project":null,"metadata":{"topic":"design","priority":2}}}}"#,
+                    "\n",
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+    drop(child.stdin.take());
+    assert!(child.wait_with_output().unwrap().status.success());
+
+    // Filter topic=ops: only the ops memory comes back.
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "recall",
+            "release",
+            "--all",
+            "--filter",
+            "topic=ops",
+        ],
+    );
+    assert!(ok, "filtered recall failed: {stderr}");
+    assert!(
+        stdout.contains("deploy runbook"),
+        "ops memory expected: {stdout}"
+    );
+    assert!(
+        !stdout.contains("design notes"),
+        "design memory must be filtered out: {stdout}"
+    );
+
+    // Numeric range priority>=5: still only the ops memory (priority 9).
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "recall",
+            "release",
+            "--all",
+            "--filter",
+            "priority>=5",
+        ],
+    );
+    assert!(ok, "range recall failed: {stderr}");
+    assert!(stdout.contains("deploy runbook"), "{stdout}");
+    assert!(!stdout.contains("design notes"), "{stdout}");
+
+    // A malformed filter is a clear error, not a silent empty result.
+    let (ok, _, stderr) = run(
+        scratch.path(),
+        &["--file", file, "recall", "release", "--filter", "garbage"],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("invalid --filter"), "{stderr}");
+}
+
 /// `embedmind serve` speaks MCP over stdio — the exact integration the
 /// README promises (`claude mcp add embedmind -- embedmind serve`).
 #[test]

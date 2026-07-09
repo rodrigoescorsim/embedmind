@@ -11,7 +11,7 @@
 
 use std::io::{BufRead, Write};
 
-use embedmind_core::{MemoryDraft, Query, Scalar, Store, Ulid};
+use embedmind_core::{Filter, MemoryDraft, Query, Scalar, Store, Ulid};
 use serde_json::{Value, json};
 
 /// Protocol revisions this server knows; the handshake echoes the client's
@@ -214,6 +214,28 @@ impl McpServer {
             query = query.limit(usize::try_from(limit).unwrap_or(usize::MAX));
         }
 
+        // Optional metadata filters (S10): `{ key: value | {min?, max?} }`, all
+        // ANDed. A bare scalar is an equality filter; an object with min/max is
+        // a numeric range. Absent = no filtering — the schema stays backward
+        // compatible for clients that never send `filters`.
+        if let Some(filters) = args.get("filters") {
+            let entries = filters.as_object().ok_or((
+                INVALID_PARAMS,
+                "recall: 'filters' must be an object of key -> value or {min?, max?}".to_string(),
+            ))?;
+            let mut parsed = std::collections::BTreeMap::new();
+            for (key, spec) in entries {
+                let filter = json_to_filter(spec).ok_or((
+                    INVALID_PARAMS,
+                    "recall: each filter must be a string/number/bool/null value or a \
+                     {min?, max?} range object with numeric bounds"
+                        .to_string(),
+                ))?;
+                parsed.insert(key.clone(), filter);
+            }
+            query = query.filters(parsed);
+        }
+
         let scope_all = match args.get("scope").and_then(Value::as_str) {
             None | Some("project") => false,
             Some("all") => true,
@@ -317,6 +339,40 @@ fn json_to_scalar(value: &Value) -> Option<Scalar> {
     }
 }
 
+/// Maps one JSON filter spec to the engine's [`Filter`] (S10). A bare scalar
+/// (string/number/bool/null) is an equality filter; an object carrying `min`
+/// and/or `max` numeric bounds is a range. Anything else (an array, an object
+/// with no bounds or non-numeric bounds) has no filter representation and is
+/// rejected as a protocol error — the shell parses, it does not interpret.
+fn json_to_filter(spec: &Value) -> Option<Filter> {
+    match spec {
+        Value::Object(map) => {
+            // A range object: at least one of min/max, both numeric if present.
+            // An empty object or unknown keys are rejected (None) so a typo
+            // never silently becomes a match-everything filter.
+            let bound = |name: &str| -> Option<Option<f64>> {
+                match map.get(name) {
+                    None => Some(None),
+                    Some(v) => v.as_f64().map(Some),
+                }
+            };
+            let min = bound("min")?;
+            let max = bound("max")?;
+            if min.is_none() && max.is_none() {
+                return None; // {} or only unrecognized keys — not a range
+            }
+            // Reject stray keys beyond min/max so malformed specs fail loudly.
+            if map.keys().any(|k| k != "min" && k != "max") {
+                return None;
+            }
+            Some(Filter::Range { min, max })
+        }
+        // Bare scalar ⇒ equality. Arrays have no scalar/range meaning.
+        Value::Array(_) => None,
+        scalar => json_to_scalar(scalar).map(Filter::Eq),
+    }
+}
+
 /// The `tools/list` response: three stable schemas — they are public API
 /// (DESIGN §8) and must only change with versioning.
 fn tools_list() -> Value {
@@ -378,6 +434,28 @@ fn tools_list() -> Value {
                             "description": "\"project\" (default) = the current \
                                             project's memories; \"all\" = everything.",
                             "default": "project"
+                        },
+                        "filters": {
+                            "type": "object",
+                            "description": "Optional metadata filters, all ANDed. \
+                                            Each key maps to either an exact value \
+                                            (string/number/boolean/null) or a numeric \
+                                            range object {\"min\": n, \"max\": n} (either \
+                                            bound may be omitted). A memory is returned \
+                                            only if it satisfies every filter; a filter \
+                                            on a key a memory lacks excludes it.",
+                            "additionalProperties": {
+                                "oneOf": [
+                                    { "type": ["string", "number", "boolean", "null"] },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "min": { "type": "number" },
+                                            "max": { "type": "number" }
+                                        }
+                                    }
+                                ]
+                            }
                         }
                     },
                     "required": ["query"]
