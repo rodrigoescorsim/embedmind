@@ -190,11 +190,7 @@ impl Pager {
             pager: self,
             dirty: BTreeMap::new(),
             page_count,
-            root_btree: None,
-            hnsw_meta: None,
-            fts_root: None,
-            graph_root: None,
-            embedding: None,
+            pending: PendingHeader::default(),
         })
     }
 
@@ -261,39 +257,28 @@ impl Pager {
         &mut self,
         dirty: BTreeMap<u64, Vec<u8>>,
         new_page_count: u64,
-        new_root_btree: Option<u64>,
-        new_hnsw_meta: Option<u64>,
-        new_fts_root: Option<u64>,
-        new_graph_root: Option<u64>,
-        new_embedding: Option<(String, u16)>,
+        pending: PendingHeader,
     ) -> Result<u64> {
         self.ensure_usable()?;
-        if dirty.is_empty()
-            && new_page_count == self.header.page_count
-            && new_root_btree.is_none()
-            && new_hnsw_meta.is_none()
-            && new_fts_root.is_none()
-            && new_graph_root.is_none()
-            && new_embedding.is_none()
-        {
+        if dirty.is_empty() && new_page_count == self.header.page_count && pending.is_empty() {
             return Ok(self.header.txn_counter); // empty transaction: no-op
         }
 
         let mut new_header = self.header.clone();
         new_header.page_count = new_page_count;
-        if let Some(root) = new_root_btree {
+        if let Some(root) = pending.root_btree {
             new_header.root_btree_page = root;
         }
-        if let Some(hnsw_meta) = new_hnsw_meta {
+        if let Some(hnsw_meta) = pending.hnsw_meta {
             new_header.hnsw_meta_page = hnsw_meta;
         }
-        if let Some(fts_root) = new_fts_root {
+        if let Some(fts_root) = pending.fts_root {
             new_header.fts_root_page = fts_root;
         }
-        if let Some(graph_root) = new_graph_root {
+        if let Some(graph_root) = pending.graph_root {
             new_header.graph_root_page = graph_root;
         }
-        if let Some((model_id, dims)) = new_embedding {
+        if let Some((model_id, dims)) = pending.embedding {
             new_header.embedding_model_id = model_id;
             new_header.embedding_dims = dims;
         }
@@ -331,6 +316,34 @@ impl Pager {
     }
 }
 
+/// Pending header-field updates a transaction carries to its commit frame:
+/// index root moves and the one-time embedding stamp. All applied to page 0
+/// atomically with the commit, all discarded on rollback.
+#[derive(Debug, Default)]
+struct PendingHeader {
+    /// Record B-tree root move (the root pointer lives in page 0).
+    root_btree: Option<u64>,
+    /// HNSW meta page move.
+    hnsw_meta: Option<u64>,
+    /// Full-text dictionary root move (`docs/adr/0011`).
+    fts_root: Option<u64>,
+    /// Graph meta page move (`docs/adr/0012`).
+    graph_root: Option<u64>,
+    /// Embedding model id + dims stamp (set once on a fresh store,
+    /// `docs/adr/0004`).
+    embedding: Option<(String, u16)>,
+}
+
+impl PendingHeader {
+    fn is_empty(&self) -> bool {
+        self.root_btree.is_none()
+            && self.hnsw_meta.is_none()
+            && self.fts_root.is_none()
+            && self.graph_root.is_none()
+            && self.embedding.is_none()
+    }
+}
+
 /// An in-flight transaction. All writes are buffered; nothing touches disk
 /// until [`Txn::commit`]. Dropping rolls back.
 pub struct Txn<'p> {
@@ -339,22 +352,8 @@ pub struct Txn<'p> {
     dirty: BTreeMap<u64, Vec<u8>>,
     /// Working page count (grows with allocations).
     page_count: u64,
-    /// Pending B-tree root move; applied to the header atomically with the
-    /// commit frame (the root pointer lives in page 0).
-    root_btree: Option<u64>,
-    /// Pending HNSW meta page move; applied to the header atomically with the
-    /// commit frame, same as `root_btree`.
-    hnsw_meta: Option<u64>,
-    /// Pending full-text dictionary root move (`docs/adr/0011`); applied to
-    /// the header atomically with the commit frame, same as `root_btree`.
-    fts_root: Option<u64>,
-    /// Pending graph meta page move (`docs/adr/0012`); applied to the header
-    /// atomically with the commit frame, same as `root_btree`.
-    graph_root: Option<u64>,
-    /// Pending embedding model id + dims stamp (set once on a fresh store,
-    /// `docs/adr/0004`); applied to the header atomically with the commit
-    /// frame, discarded on rollback.
-    embedding: Option<(String, u16)>,
+    /// Pending header updates, applied atomically with the commit frame.
+    pending: PendingHeader,
 }
 
 impl Txn<'_> {
@@ -426,49 +425,57 @@ impl Txn<'_> {
     /// Record B-tree root as seen by this transaction (its own pending move
     /// included); 0 = no tree yet.
     pub fn root_btree_page(&self) -> u64 {
-        self.root_btree.unwrap_or(self.pager.header.root_btree_page)
+        self.pending
+            .root_btree
+            .unwrap_or(self.pager.header.root_btree_page)
     }
 
     /// Moves the record B-tree root. Becomes durable with the commit frame;
     /// discarded on rollback like any other buffered write.
     pub fn set_root_btree_page(&mut self, page_no: u64) {
-        self.root_btree = Some(page_no);
+        self.pending.root_btree = Some(page_no);
     }
 
     /// HNSW meta page as seen by this transaction (its own pending move
     /// included); 0 = no vector index yet.
     pub fn hnsw_meta_page(&self) -> u64 {
-        self.hnsw_meta.unwrap_or(self.pager.header.hnsw_meta_page)
+        self.pending
+            .hnsw_meta
+            .unwrap_or(self.pager.header.hnsw_meta_page)
     }
 
     /// Moves the HNSW meta page pointer. Becomes durable with the commit
     /// frame; discarded on rollback like any other buffered write.
     pub fn set_hnsw_meta_page(&mut self, page_no: u64) {
-        self.hnsw_meta = Some(page_no);
+        self.pending.hnsw_meta = Some(page_no);
     }
 
     /// Full-text dictionary root as seen by this transaction (its own pending
     /// move included); 0 = no full-text index yet (`docs/adr/0011`).
     pub fn fts_root_page(&self) -> u64 {
-        self.fts_root.unwrap_or(self.pager.header.fts_root_page)
+        self.pending
+            .fts_root
+            .unwrap_or(self.pager.header.fts_root_page)
     }
 
     /// Moves the full-text dictionary root pointer. Becomes durable with the
     /// commit frame; discarded on rollback like any other buffered write.
     pub fn set_fts_root_page(&mut self, page_no: u64) {
-        self.fts_root = Some(page_no);
+        self.pending.fts_root = Some(page_no);
     }
 
     /// Graph meta page as seen by this transaction (its own pending move
     /// included); 0 = no graph yet (`docs/adr/0012`).
     pub fn graph_root_page(&self) -> u64 {
-        self.graph_root.unwrap_or(self.pager.header.graph_root_page)
+        self.pending
+            .graph_root
+            .unwrap_or(self.pager.header.graph_root_page)
     }
 
     /// Moves the graph meta page pointer. Becomes durable with the commit
     /// frame; discarded on rollback like any other buffered write.
     pub fn set_graph_root_page(&mut self, page_no: u64) {
-        self.graph_root = Some(page_no);
+        self.pending.graph_root = Some(page_no);
     }
 
     /// Stamps the header's embedding `model_id` + `dims` — done once against a
@@ -481,7 +488,7 @@ impl Txn<'_> {
                 "embedding_model_id exceeds 64 bytes",
             ));
         }
-        self.embedding = Some((model_id.to_owned(), dims));
+        self.pending.embedding = Some((model_id.to_owned(), dims));
         Ok(())
     }
 
@@ -492,15 +499,9 @@ impl Txn<'_> {
             pager,
             dirty,
             page_count,
-            root_btree,
-            hnsw_meta,
-            fts_root,
-            graph_root,
-            embedding,
+            pending,
         } = self;
-        pager.commit_txn(
-            dirty, page_count, root_btree, hnsw_meta, fts_root, graph_root, embedding,
-        )
+        pager.commit_txn(dirty, page_count, pending)
     }
 }
 

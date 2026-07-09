@@ -43,6 +43,7 @@
 //!   is an in-memory memo over [`PageSource`], not a page cache — it can
 //!   never go stale across operations because it never outlives one.
 
+pub(crate) mod dict;
 pub mod fts;
 
 use std::cmp::Ordering;

@@ -14,11 +14,13 @@
 //! - **`fts_root_page`** (header) points at one fixed-size **meta page**:
 //!   corpus statistics for BM25 (`doc_count`, `total_tokens`) plus the root
 //!   page of the dictionary. Fixed size forever, like `HNSW_META`.
-//! - The **dictionary** is a slotted B-tree keyed by term bytes (variable
-//!   length, sorted lexicographically). Its leaf cells hold the term's
-//!   **postings**: `doc_freq` then a list of `(record_id, term_freq)` sorted
-//!   by id. A postings list too large to inline spills to an `FTS_POSTINGS`
-//!   overflow chain, exactly like an oversized record spills to `OVERFLOW`.
+//! - The **dictionary** is the shared byte-keyed paged B-tree
+//!   ([`crate::index::dict`], also used by the graph layer — ADR 0012),
+//!   instantiated with the `FtsDict`/`FtsPostings` page types and keyed by
+//!   term bytes. Its leaf values hold the term's **postings**: `doc_freq`
+//!   then a list of `(record_id, term_freq)` sorted by id. A postings list
+//!   too large to inline spills to an `FTS_POSTINGS` overflow chain, exactly
+//!   like an oversized record spills to `OVERFLOW`.
 //! - Meta / inner / leaf dictionary nodes share the one `FtsDict` page type,
 //!   told apart by a node-kind byte at the start of the page body — so the
 //!   index adds only two page types (`docs/FORMAT.md` §3.1).
@@ -46,7 +48,8 @@ use std::collections::HashMap;
 use ulid::Ulid;
 
 use crate::error::{Error, Result};
-use crate::format::{PAGE_HEADER_LEN, PAGE_TRAILER_LEN, PageHeader, PageType, stamp_page_checksum};
+use crate::format::{PAGE_HEADER_LEN, PageHeader, PageType, stamp_page_checksum};
+use crate::index::dict;
 use crate::storage::btree::PageSource;
 use crate::storage::pager::Txn;
 
@@ -61,20 +64,13 @@ const BM25_B: f32 = 0.75;
 /// words are far shorter; this only clips hostile input.
 const MAX_TERM_LEN: usize = 128;
 
-/// Node-kind byte at the first body offset of every `FtsDict` page.
-const NODE_META: u8 = 0;
-const NODE_INNER: u8 = 1;
-const NODE_LEAF: u8 = 2;
-
-/// Depth cap while descending the dictionary — a healthy tree is a handful of
-/// levels deep; anything past this is a corrupt file (pointer cycle),
-/// reported as a typed error instead of looping forever (mirrors the record
-/// B-tree's `MAX_DEPTH`).
-const MAX_DEPTH: usize = 64;
-
-/// Postings cell tags (first byte of a dictionary leaf value).
-const POSTINGS_INLINE: u8 = 0;
-const POSTINGS_OVERFLOW: u8 = 1;
+/// The full-text dictionary instance: `FtsDict` nodes, `FtsPostings`
+/// overflow, keys bounded by [`MAX_TERM_LEN`] (`docs/FORMAT.md` §11).
+const FTS_DICT: dict::DictSpec = dict::DictSpec {
+    dict: PageType::FtsDict,
+    overflow: PageType::FtsPostings,
+    max_key_len: MAX_TERM_LEN,
+};
 
 /// Bytes per posting entry on disk: `record_id` (16) + `term_freq` (u32).
 const POSTING_LEN: usize = 20;
@@ -175,11 +171,11 @@ impl FtsMeta {
         }
         .encode_into(&mut page);
         let mut off = PAGE_HEADER_LEN;
-        page[off] = NODE_META;
+        page[off] = dict::NODE_META;
         off += 1;
-        put_u64(&mut page, &mut off, self.doc_count);
-        put_u64(&mut page, &mut off, self.total_tokens);
-        put_u64(&mut page, &mut off, self.dict_root);
+        dict::put_u64(&mut page, &mut off, self.doc_count);
+        dict::put_u64(&mut page, &mut off, self.total_tokens);
+        dict::put_u64(&mut page, &mut off, self.dict_root);
         stamp_page_checksum(&mut page);
         Ok(page)
     }
@@ -191,13 +187,13 @@ impl FtsMeta {
             return Err(malformed(page_no, "not an FTS page"));
         }
         let mut off = PAGE_HEADER_LEN;
-        if page.get(off).copied() != Some(NODE_META) {
+        if page.get(off).copied() != Some(dict::NODE_META) {
             return Err(malformed(page_no, "not an FTS meta page"));
         }
         off += 1;
-        let doc_count = get_u64(page, &mut off, page_no)?;
-        let total_tokens = get_u64(page, &mut off, page_no)?;
-        let dict_root = get_u64(page, &mut off, page_no)?;
+        let doc_count = dict::get_u64(page, &mut off, page_no)?;
+        let total_tokens = dict::get_u64(page, &mut off, page_no)?;
+        let dict_root = dict::get_u64(page, &mut off, page_no)?;
         Ok(FtsMeta {
             doc_count,
             total_tokens,
@@ -279,7 +275,7 @@ impl Postings {
     /// allocating (fuzz rule, `docs/TESTING.md` §3) and rejects unsorted or
     /// duplicate ids (a corrupt or hostile page).
     fn decode(body: &[u8], page_no: u64) -> Result<Self> {
-        let count = read_u32(body, 0, page_no)? as usize;
+        let count = dict::read_u32(body, 0, page_no)? as usize;
         let need = 4usize
             .checked_add(
                 count
@@ -303,7 +299,7 @@ impl Postings {
                 return Err(malformed(page_no, "unsorted fts postings"));
             }
             prev = Some(record_id);
-            let term_freq = read_u32(body, off + 16, page_no)?;
+            let term_freq = dict::read_u32(body, off + 16, page_no)?;
             if term_freq == 0 {
                 return Err(malformed(page_no, "fts posting zero term_freq"));
             }
@@ -317,513 +313,11 @@ impl Postings {
     }
 }
 
-/// Overflow-chain payload capacity of one `FTS_POSTINGS` page.
-fn postings_capacity(page_size: u32) -> usize {
-    page_size as usize - PAGE_HEADER_LEN - PAGE_TRAILER_LEN
-}
-
-/// Writes a postings body into a fresh `FTS_POSTINGS` chain; returns the head.
-fn write_postings_chain(txn: &mut Txn<'_>, body: &[u8]) -> Result<u64> {
-    let cap = postings_capacity(txn.page_size());
-    let chunks: Vec<&[u8]> = if body.is_empty() {
-        vec![&body[..0]]
-    } else {
-        body.chunks(cap).collect()
-    };
-    let mut pages = Vec::with_capacity(chunks.len());
-    for _ in &chunks {
-        pages.push(txn.allocate_page()?);
-    }
-    let page_size = txn.page_size() as usize;
-    for (i, chunk) in chunks.iter().enumerate() {
-        let mut page = vec![0u8; page_size];
-        PageHeader {
-            page_type: PageType::FtsPostings,
-            entry_count: chunk.len() as u32,
-            next_page: pages.get(i + 1).copied().unwrap_or(0),
-        }
-        .encode_into(&mut page);
-        page[PAGE_HEADER_LEN..PAGE_HEADER_LEN + chunk.len()].copy_from_slice(chunk);
-        stamp_page_checksum(&mut page);
-        txn.write_page(pages[i], &page)?;
-    }
-    pages
-        .first()
-        .copied()
-        .ok_or(Error::Internal("empty fts postings chain"))
-}
-
-/// Reads an `FTS_POSTINGS` chain of exactly `total_len` bytes. Bounded: each
-/// hop consumes at least one payload byte, so a cycle cannot loop forever.
-fn read_postings_chain(src: &dyn PageSource, first_page: u64, total_len: u32) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut remaining = total_len as usize;
-    let mut page_no = first_page;
-    loop {
-        let page = src.page(page_no)?;
-        let header =
-            PageHeader::decode(&page).ok_or_else(|| malformed(page_no, "fts postings header"))?;
-        if header.page_type != PageType::FtsPostings {
-            return Err(malformed(page_no, "not an fts postings page"));
-        }
-        let used = header.entry_count as usize;
-        if used > remaining || used > postings_capacity(src.page_size()) {
-            return Err(malformed(page_no, "fts postings payload length"));
-        }
-        let payload = page
-            .get(PAGE_HEADER_LEN..PAGE_HEADER_LEN + used)
-            .ok_or_else(|| malformed(page_no, "fts postings payload bounds"))?;
-        out.extend_from_slice(payload);
-        remaining -= used;
-        if remaining == 0 {
-            break;
-        }
-        if header.next_page == 0 {
-            return Err(malformed(page_no, "broken fts postings chain"));
-        }
-        page_no = header.next_page;
-    }
-    Ok(out)
-}
-
-// ---------------------------------------------------------------------------
-// Dictionary node (de)serialization
-// ---------------------------------------------------------------------------
-
-/// A dictionary leaf value: postings inline, or a pointer to their chain.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Value {
-    Inline(Vec<u8>),
-    Overflow { total_len: u32, first_page: u64 },
-}
-
-impl Value {
-    fn encoded_len(&self) -> usize {
-        match self {
-            // tag + u32 len + body
-            Value::Inline(b) => 1 + 4 + b.len(),
-            // tag + u32 total_len + u64 first_page
-            Value::Overflow { .. } => 1 + 4 + 8,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct LeafEntry {
-    term: Vec<u8>,
-    value: Value,
-}
-
-impl LeafEntry {
-    /// term-len (u16) + term bytes + value.
-    fn footprint(&self) -> usize {
-        2 + self.term.len() + self.value.encoded_len()
-    }
-}
-
-#[derive(Debug)]
-struct InnerNode {
-    /// `(separator_term, child)`: child covers terms `<= separator`. Sorted.
-    entries: Vec<(Vec<u8>, u64)>,
-    /// Child for terms greater than every separator.
-    rightmost: u64,
-}
-
-#[derive(Debug)]
-enum Node {
-    Leaf(Vec<LeafEntry>),
-    Inner(InnerNode),
-}
-
-/// Usable content bytes on a page (after common header + checksum trailer).
-fn usable(page_size: u32) -> usize {
-    page_size as usize - PAGE_HEADER_LEN - PAGE_TRAILER_LEN
-}
-
-/// Cap on a single leaf entry's footprint: a quarter of the usable space, so
-/// two halves after any upsert provably fit (same split argument as the
-/// record B-tree, `docs/FORMAT.md` §5.1). Values above the matching inline cap
-/// spill to an overflow chain, keeping every entry within this bound.
-fn max_entry_footprint(page_size: u32) -> usize {
-    usable(page_size) / 4
-}
-
-/// Largest postings body stored inline; larger ones overflow. Derived from
-/// [`max_entry_footprint`] minus the worst-case term and framing overhead.
-fn max_inline_postings(page_size: u32) -> usize {
-    // footprint = 2 (term len) + term + 1 (tag) + 4 (len) + body.
-    max_entry_footprint(page_size).saturating_sub(2 + MAX_TERM_LEN + 1 + 4)
-}
-
-fn decode_node(page: &[u8], page_no: u64) -> Result<Node> {
-    let header = PageHeader::decode(page).ok_or_else(|| malformed(page_no, "fts page header"))?;
-    if header.page_type != PageType::FtsDict {
-        return Err(malformed(page_no, "not an FTS dict page"));
-    }
-    let content_end = page.len() - PAGE_TRAILER_LEN;
-    let mut off = PAGE_HEADER_LEN;
-    let kind = *page
-        .get(off)
-        .ok_or_else(|| malformed(page_no, "fts node kind"))?;
-    off += 1;
-    let n = header.entry_count as usize;
-    match kind {
-        NODE_LEAF => {
-            let mut entries = Vec::with_capacity(n.min(1024));
-            let mut prev: Option<Vec<u8>> = None;
-            for _ in 0..n {
-                let term = get_bytes_u16(page, &mut off, content_end, page_no, "fts leaf term")?;
-                if prev.as_ref().is_some_and(|p| p.as_slice() >= term) {
-                    return Err(malformed(page_no, "unsorted fts leaf terms"));
-                }
-                let tag = *page
-                    .get(off)
-                    .ok_or_else(|| malformed(page_no, "fts value tag"))?;
-                off += 1;
-                let value = match tag {
-                    POSTINGS_INLINE => {
-                        let body = get_bytes_u32(
-                            page,
-                            &mut off,
-                            content_end,
-                            page_no,
-                            "fts inline value",
-                        )?;
-                        Value::Inline(body.to_vec())
-                    }
-                    POSTINGS_OVERFLOW => {
-                        let total_len = get_u32(page, &mut off, page_no)?;
-                        let first_page = get_u64(page, &mut off, page_no)?;
-                        if first_page == 0 {
-                            return Err(malformed(page_no, "fts null overflow page"));
-                        }
-                        Value::Overflow {
-                            total_len,
-                            first_page,
-                        }
-                    }
-                    _ => return Err(malformed(page_no, "fts value tag")),
-                };
-                prev = Some(term.to_vec());
-                entries.push(LeafEntry {
-                    term: term.to_vec(),
-                    value,
-                });
-            }
-            Ok(Node::Leaf(entries))
-        }
-        NODE_INNER => {
-            if n == 0 {
-                return Err(malformed(page_no, "empty fts inner node"));
-            }
-            let rightmost = get_u64(page, &mut off, page_no)?;
-            if rightmost == 0 {
-                return Err(malformed(page_no, "fts null rightmost child"));
-            }
-            let mut entries = Vec::with_capacity(n.min(1024));
-            let mut prev: Option<Vec<u8>> = None;
-            for _ in 0..n {
-                let term = get_bytes_u16(page, &mut off, content_end, page_no, "fts inner term")?;
-                if prev.as_ref().is_some_and(|p| p.as_slice() >= term) {
-                    return Err(malformed(page_no, "unsorted fts inner terms"));
-                }
-                let key = term.to_vec();
-                let child = get_u64(page, &mut off, page_no)?;
-                if child == 0 {
-                    return Err(malformed(page_no, "fts null child"));
-                }
-                prev = Some(key.clone());
-                entries.push((key, child));
-            }
-            Ok(Node::Inner(InnerNode { entries, rightmost }))
-        }
-        _ => Err(malformed(page_no, "unexpected fts node kind")),
-    }
-}
-
-/// Encodes a leaf. `None` = does not fit at this page size (caller splits).
-fn encode_leaf(entries: &[LeafEntry], page_size: u32) -> Option<Vec<u8>> {
-    let mut body_len = 1; // node kind
-    for e in entries {
-        body_len += e.footprint();
-    }
-    if PAGE_HEADER_LEN + body_len > page_size as usize - PAGE_TRAILER_LEN {
-        return None;
-    }
-    let mut page = vec![0u8; page_size as usize];
-    PageHeader {
-        page_type: PageType::FtsDict,
-        entry_count: entries.len() as u32,
-        next_page: 0,
-    }
-    .encode_into(&mut page);
-    let mut off = PAGE_HEADER_LEN;
-    page[off] = NODE_LEAF;
-    off += 1;
-    for e in entries {
-        put_bytes_u16(&mut page, &mut off, &e.term);
-        match &e.value {
-            Value::Inline(body) => {
-                page[off] = POSTINGS_INLINE;
-                off += 1;
-                put_bytes_u32(&mut page, &mut off, body);
-            }
-            Value::Overflow {
-                total_len,
-                first_page,
-            } => {
-                page[off] = POSTINGS_OVERFLOW;
-                off += 1;
-                put_u32(&mut page, &mut off, *total_len);
-                put_u64(&mut page, &mut off, *first_page);
-            }
-        }
-    }
-    stamp_page_checksum(&mut page);
-    Some(page)
-}
-
-/// Encodes an inner node. `None` = too many entries for this page size.
-fn encode_inner(node: &InnerNode, page_size: u32) -> Option<Vec<u8>> {
-    if node.entries.is_empty() {
-        return None;
-    }
-    let mut body_len = 1 + 8; // node kind + rightmost
-    for (term, _) in &node.entries {
-        body_len += 2 + term.len() + 8;
-    }
-    if PAGE_HEADER_LEN + body_len > page_size as usize - PAGE_TRAILER_LEN {
-        return None;
-    }
-    let mut page = vec![0u8; page_size as usize];
-    PageHeader {
-        page_type: PageType::FtsDict,
-        entry_count: node.entries.len() as u32,
-        next_page: 0,
-    }
-    .encode_into(&mut page);
-    let mut off = PAGE_HEADER_LEN;
-    page[off] = NODE_INNER;
-    off += 1;
-    put_u64(&mut page, &mut off, node.rightmost);
-    for (term, child) in &node.entries {
-        put_bytes_u16(&mut page, &mut off, term);
-        put_u64(&mut page, &mut off, *child);
-    }
-    stamp_page_checksum(&mut page);
-    Some(page)
-}
-
-// ---------------------------------------------------------------------------
-// Dictionary lookup / insert
-// ---------------------------------------------------------------------------
-
 /// Reads a term's postings from the dictionary, or `None` if absent.
-fn dict_get(src: &dyn PageSource, root: u64, term: &[u8]) -> Result<Option<Postings>> {
-    if root == 0 {
-        return Ok(None);
-    }
-    let mut page_no = root;
-    for _ in 0..MAX_DEPTH {
-        let page = src.page(page_no)?;
-        match decode_node(&page, page_no)? {
-            Node::Inner(node) => page_no = child_for(&node, term),
-            Node::Leaf(entries) => {
-                return match entries.binary_search_by(|e| e.term.as_slice().cmp(term)) {
-                    Ok(i) => Ok(Some(resolve_value(src, &entries[i].value)?)),
-                    Err(_) => Ok(None),
-                };
-            }
-        }
-    }
-    Err(malformed(page_no, "fts tree deeper than MAX_DEPTH"))
-}
-
-fn child_for(node: &InnerNode, term: &[u8]) -> u64 {
-    match node.entries.iter().find(|(sep, _)| term <= sep.as_slice()) {
-        Some((_, child)) => *child,
-        None => node.rightmost,
-    }
-}
-
-fn resolve_value(src: &dyn PageSource, value: &Value) -> Result<Postings> {
-    let (body, page_no) = match value {
-        Value::Inline(b) => (b.clone(), 0),
-        Value::Overflow {
-            total_len,
-            first_page,
-        } => (
-            read_postings_chain(src, *first_page, *total_len)?,
-            *first_page,
-        ),
-    };
-    Postings::decode(&body, page_no)
-}
-
-/// Builds the leaf [`Value`] for a postings list, spilling to an overflow
-/// chain when it is too large to inline.
-fn make_value(txn: &mut Txn<'_>, postings: &Postings) -> Result<Value> {
-    let body = postings.encode();
-    if body.len() <= max_inline_postings(txn.page_size()) {
-        Ok(Value::Inline(body))
-    } else {
-        let total_len = u32::try_from(body.len())
-            .map_err(|_| Error::InvalidArgument("fts postings exceed u32"))?;
-        let first_page = write_postings_chain(txn, &body)?;
-        Ok(Value::Overflow {
-            total_len,
-            first_page,
-        })
-    }
-}
-
-enum Ins {
-    Fit,
-    Split { sep: Vec<u8>, right: u64 },
-}
-
-/// Inserts or replaces `term → postings`, updating the dictionary root as
-/// needed. Replacing a value that had an overflow chain orphans the old chain
-/// until `vacuum` (same documented leak as the record B-tree).
-fn dict_upsert(txn: &mut Txn<'_>, root: u64, term: &[u8], postings: &Postings) -> Result<u64> {
-    let value = make_value(txn, postings)?;
-    let page_size = txn.page_size();
-    if root == 0 {
-        let page_no = txn.allocate_page()?;
-        let entry = LeafEntry {
-            term: term.to_vec(),
-            value,
-        };
-        let page = encode_leaf(std::slice::from_ref(&entry), page_size)
-            .ok_or(Error::Internal("fresh fts leaf does not fit"))?;
-        txn.write_page(page_no, &page)?;
-        return Ok(page_no);
-    }
-    match dict_insert_rec(txn, root, term, value, 0)? {
-        Ins::Fit => Ok(root),
-        Ins::Split { sep, right } => {
-            let new_root = txn.allocate_page()?;
-            let node = InnerNode {
-                entries: vec![(sep, root)],
-                rightmost: right,
-            };
-            let page = encode_inner(&node, page_size)
-                .ok_or(Error::Internal("fresh fts root does not fit"))?;
-            txn.write_page(new_root, &page)?;
-            Ok(new_root)
-        }
-    }
-}
-
-fn dict_insert_rec(
-    txn: &mut Txn<'_>,
-    page_no: u64,
-    term: &[u8],
-    value: Value,
-    depth: usize,
-) -> Result<Ins> {
-    if depth >= MAX_DEPTH {
-        return Err(malformed(page_no, "fts tree deeper than MAX_DEPTH"));
-    }
-    let page_size = txn.page_size();
-    let page = txn.read_page(page_no)?;
-    match decode_node(&page, page_no)? {
-        Node::Leaf(mut entries) => {
-            match entries.binary_search_by(|e| e.term.as_slice().cmp(term)) {
-                Ok(i) => entries[i].value = value,
-                Err(i) => entries.insert(
-                    i,
-                    LeafEntry {
-                        term: term.to_vec(),
-                        value,
-                    },
-                ),
-            }
-            if let Some(encoded) = encode_leaf(&entries, page_size) {
-                txn.write_page(page_no, &encoded)?;
-                return Ok(Ins::Fit);
-            }
-            // Split at the byte midpoint; every entry footprint is capped at
-            // usable/4, so both halves provably fit (docs/FORMAT.md §5.1).
-            let total: usize = entries.iter().map(LeafEntry::footprint).sum();
-            let mut acc = 0;
-            let mut cut = entries.len();
-            for (i, e) in entries.iter().enumerate() {
-                acc += e.footprint();
-                if acc >= total / 2 {
-                    cut = i + 1;
-                    break;
-                }
-            }
-            let right_entries = entries.split_off(cut);
-            if right_entries.is_empty() {
-                return Err(Error::Internal("fts leaf split produced an empty half"));
-            }
-            let sep = entries
-                .last()
-                .ok_or(Error::Internal("fts leaf split empty left"))?
-                .term
-                .clone();
-            let (Some(left_page), Some(right_page)) = (
-                encode_leaf(&entries, page_size),
-                encode_leaf(&right_entries, page_size),
-            ) else {
-                return Err(Error::Internal("fts leaf split does not fit"));
-            };
-            let right = txn.allocate_page()?;
-            txn.write_page(page_no, &left_page)?;
-            txn.write_page(right, &right_page)?;
-            Ok(Ins::Split { sep, right })
-        }
-        Node::Inner(mut node) => {
-            let idx = node
-                .entries
-                .iter()
-                .position(|(sep, _)| term <= sep.as_slice())
-                .unwrap_or(node.entries.len());
-            let child = match node.entries.get(idx) {
-                Some((_, c)) => *c,
-                None => node.rightmost,
-            };
-            match dict_insert_rec(txn, child, term, value, depth + 1)? {
-                Ins::Fit => Ok(Ins::Fit),
-                Ins::Split { sep, right } => {
-                    match node.entries.get_mut(idx) {
-                        Some(entry) => entry.1 = right,
-                        None => node.rightmost = right,
-                    }
-                    node.entries.insert(idx, (sep, child));
-                    if let Some(encoded) = encode_inner(&node, page_size) {
-                        txn.write_page(page_no, &encoded)?;
-                        return Ok(Ins::Fit);
-                    }
-                    let m = node.entries.len() / 2;
-                    let right_entries = node.entries.split_off(m + 1);
-                    let (promoted_key, promoted_child) = node
-                        .entries
-                        .pop()
-                        .ok_or(Error::Internal("fts inner split underflow"))?;
-                    let right_node = InnerNode {
-                        entries: right_entries,
-                        rightmost: node.rightmost,
-                    };
-                    node.rightmost = promoted_child;
-                    let (Some(left_page), Some(right_page)) = (
-                        encode_inner(&node, page_size),
-                        encode_inner(&right_node, page_size),
-                    ) else {
-                        return Err(Error::Internal("fts inner split does not fit"));
-                    };
-                    let right = txn.allocate_page()?;
-                    txn.write_page(page_no, &left_page)?;
-                    txn.write_page(right, &right_page)?;
-                    Ok(Ins::Split {
-                        sep: promoted_key,
-                        right,
-                    })
-                }
-            }
-        }
+fn postings_for(src: &dyn PageSource, root: u64, term: &[u8]) -> Result<Option<Postings>> {
+    match dict::get(src, FTS_DICT, root, term)? {
+        Some((body, page_no)) => Ok(Some(Postings::decode(&body, page_no)?)),
+        None => Ok(None),
     }
 }
 
@@ -860,9 +354,9 @@ pub fn index_document(txn: &mut Txn<'_>, record_id: Ulid, content: &str) -> Resu
     let mut root = meta.dict_root;
     for (term, tf) in terms {
         let term_bytes = term.as_bytes();
-        let mut postings = dict_get(txn, root, term_bytes)?.unwrap_or_default();
+        let mut postings = postings_for(txn, root, term_bytes)?.unwrap_or_default();
         postings.upsert(record_id, tf);
-        root = dict_upsert(txn, root, term_bytes, &postings)?;
+        root = dict::upsert(txn, FTS_DICT, root, term_bytes, &postings.encode())?;
     }
 
     meta.dict_root = root;
@@ -935,7 +429,7 @@ pub fn search(
     let mut kept: HashMap<Ulid, bool> = HashMap::new();
 
     for term in &query_terms {
-        let Some(postings) = dict_get(src, meta.dict_root, term.as_bytes())? else {
+        let Some(postings) = postings_for(src, meta.dict_root, term.as_bytes())? else {
             continue;
         };
         let df = postings.entries.len() as f32;
@@ -986,120 +480,12 @@ pub fn indexed_documents(src: &dyn PageSource, fts_root_page: u64) -> Result<u64
     Ok(load_meta(src, fts_root_page)?.map_or(0, |m| m.doc_count))
 }
 
-// ---------------------------------------------------------------------------
-// Little-endian read/write helpers (bounds-checked; no panics)
-// ---------------------------------------------------------------------------
-
-fn put_u32(buf: &mut [u8], off: &mut usize, v: u32) {
-    if let Some(dst) = buf.get_mut(*off..*off + 4) {
-        dst.copy_from_slice(&v.to_le_bytes());
-    }
-    *off += 4;
-}
-
-fn put_u64(buf: &mut [u8], off: &mut usize, v: u64) {
-    if let Some(dst) = buf.get_mut(*off..*off + 8) {
-        dst.copy_from_slice(&v.to_le_bytes());
-    }
-    *off += 8;
-}
-
-fn put_bytes_u16(buf: &mut [u8], off: &mut usize, v: &[u8]) {
-    let len = v.len() as u16;
-    if let Some(dst) = buf.get_mut(*off..*off + 2) {
-        dst.copy_from_slice(&len.to_le_bytes());
-    }
-    *off += 2;
-    if let Some(dst) = buf.get_mut(*off..*off + v.len()) {
-        dst.copy_from_slice(v);
-    }
-    *off += v.len();
-}
-
-fn put_bytes_u32(buf: &mut [u8], off: &mut usize, v: &[u8]) {
-    let len = v.len() as u32;
-    if let Some(dst) = buf.get_mut(*off..*off + 4) {
-        dst.copy_from_slice(&len.to_le_bytes());
-    }
-    *off += 4;
-    if let Some(dst) = buf.get_mut(*off..*off + v.len()) {
-        dst.copy_from_slice(v);
-    }
-    *off += v.len();
-}
-
-fn read_u32(buf: &[u8], off: usize, page_no: u64) -> Result<u32> {
-    buf.get(off..off + 4)
-        .and_then(|b| b.try_into().ok())
-        .map(u32::from_le_bytes)
-        .ok_or_else(|| malformed(page_no, "fts short read"))
-}
-
-fn get_u32(buf: &[u8], off: &mut usize, page_no: u64) -> Result<u32> {
-    let v = read_u32(buf, *off, page_no)?;
-    *off += 4;
-    Ok(v)
-}
-
-fn get_u64(buf: &[u8], off: &mut usize, page_no: u64) -> Result<u64> {
-    let v = buf
-        .get(*off..*off + 8)
-        .and_then(|b| b.try_into().ok())
-        .map(u64::from_le_bytes)
-        .ok_or_else(|| malformed(page_no, "fts short read"))?;
-    *off += 8;
-    Ok(v)
-}
-
-/// Reads a u16-length-prefixed byte slice, validating the length against the
-/// page content bound before returning it (fuzz rule, `docs/TESTING.md` §3).
-fn get_bytes_u16<'a>(
-    buf: &'a [u8],
-    off: &mut usize,
-    content_end: usize,
-    page_no: u64,
-    what: &'static str,
-) -> Result<&'a [u8]> {
-    let len = buf
-        .get(*off..*off + 2)
-        .and_then(|b| b.try_into().ok())
-        .map(u16::from_le_bytes)
-        .ok_or_else(|| malformed(page_no, what))? as usize;
-    *off += 2;
-    let end = off
-        .checked_add(len)
-        .filter(|&e| e <= content_end && e <= buf.len())
-        .ok_or_else(|| malformed(page_no, what))?;
-    let out = &buf[*off..end];
-    *off = end;
-    Ok(out)
-}
-
-/// Reads a u32-length-prefixed byte slice with the same bounds guarantee.
-fn get_bytes_u32<'a>(
-    buf: &'a [u8],
-    off: &mut usize,
-    content_end: usize,
-    page_no: u64,
-    what: &'static str,
-) -> Result<&'a [u8]> {
-    let len = read_u32(buf, *off, page_no)? as usize;
-    *off += 4;
-    let end = off
-        .checked_add(len)
-        .filter(|&e| e <= content_end && e <= buf.len())
-        .ok_or_else(|| malformed(page_no, what))?;
-    let out = &buf[*off..end];
-    *off = end;
-    Ok(out)
-}
-
 /// Fuzz-only surface: decode one page as each FTS node kind and as postings,
 /// exercising every parser branch. Must return, never panic (`fuzz_fts_page`
 /// target, `docs/TESTING.md` §3).
 #[doc(hidden)]
 pub fn fuzz_decode_page(page: &[u8]) {
-    let _ = decode_node(page, 1);
+    dict::fuzz_decode_node(page, FTS_DICT);
     let _ = FtsMeta::decode(page, 1);
     // Postings bodies live at the page content region; try decoding the body.
     if page.len() > PAGE_HEADER_LEN {
@@ -1333,14 +719,14 @@ mod tests {
             fuzz_decode_page(&page); // must return, never panic
         }
         // Mutated valid leaf/meta pages exercise deeper branches.
-        let entry = LeafEntry {
-            term: b"rust".to_vec(),
-            value: Value::Overflow {
+        let entry = dict::LeafEntry {
+            key: b"rust".to_vec(),
+            value: dict::Value::Overflow {
                 total_len: 40,
                 first_page: 5,
             },
         };
-        let valid = encode_leaf(std::slice::from_ref(&entry), 512).unwrap();
+        let valid = dict::encode_leaf(std::slice::from_ref(&entry), 512, FTS_DICT).unwrap();
         let meta = FtsMeta {
             doc_count: 3,
             total_tokens: 30,
