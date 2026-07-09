@@ -15,6 +15,20 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Basic provenance exposed: agent filter on recall + per-agent stats
+  breakdown** (S14 / task C2, roadmap 3.2) — the agent/session data every
+  memory already carried (core decision 3) is now queryable, with no file-format
+  change. `recall` gains an optional agent filter (`Query::agent`), applied in
+  the same `keep` predicate as scope/tombstone/metadata filters, so it composes
+  with them and keeps the S2 adaptive-`ef_search` anti-under-return guarantee
+  across the vector, text and hybrid paths. `stats` gains `StoreStats::by_agent`
+  — a breakdown of **live** memories per writing agent (empty agent = unknown
+  provenance), each with its distinct session ids. Shells: the MCP `recall` tool
+  takes an optional `agent` argument (additive, backward compatible) and a new
+  **read-only `stats` tool** reports the live/forgotten counts and the per-agent
+  breakdown; the CLI adds `recall --agent <name>` and a "by agent" section in
+  `embedmind stats`. Attestation and full history/time-travel stay explicitly
+  out of scope (founder decision, post-traction). Spec: `docs/01-spec.md` S14.
 - **Graph layer: explicit entities + typed relations between memories** (S13 /
   task C1, roadmap 3.1, **ADR 0012**) — the vector + text + **graph** depth no
   embedded memory engine has complete. `remember` accepts entity tags

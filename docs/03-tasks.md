@@ -204,14 +204,17 @@ vs. "só vetor" que nenhum embarcado tem completo.
   (versionado); relações somem com tombstone do alvo; fuzz target do parser novo.
 - **Verificação:** `cargo test -p embedmind-core graph` + fuzz smoke.
 
-### C2. Proveniência básica exposta (item 3.2)
+### C2. Proveniência básica exposta (item 3.2) [✅ ENTREGUE]
 
-Filtro por agente no `recall` (`filters` já existente da B3) + breakdown por agente no
-`stats`. Atestação e histórico completo ficam fora do escopo (decisão do founder,
-pós-tração).
+Filtro por agente no `recall` (`Query::agent`, mesmo predicado `keep` da B3) + breakdown
+por agente vivo no `stats` (`StoreStats::by_agent`, com sessões distintas por agente),
+exposto por MCP (`recall` ganha `agent`; novo tool read-only `stats`) e CLI
+(`recall --agent`; seção "by agent" no `stats`). Atestação e histórico completo ficam
+fora do escopo (decisão do founder, pós-tração).
 
 - **DoD:** story S14 verde via MCP e CLI.
-- **Verificação:** teste round-trip de proveniência.
+- **Verificação:** round-trip de proveniência em `embedmind-core` (api), `embedmind-mcp`
+  (protocol) e `embedmind` (cli).
 
 ### C4. [MANUAL — founder] 3º post + go/no-go do dia 90 (itens 3.3, 3.4)
 
