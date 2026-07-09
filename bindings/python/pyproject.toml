@@ -1,0 +1,43 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "embedmind"
+# Kept in lockstep with the Rust crates' 0.1.0-dev; PEP 440 spells a dev
+# pre-release `0.1.0.dev0`, not `0.1.0-dev`.
+version = "0.1.0.dev0"
+description = "Persistent memory for AI agents — one local file, no server. Python bindings for the EmbedMind engine."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Rodrigo Escorsim", email = "rodrigo.escorsim@gmail.com" }]
+keywords = ["embeddings", "vector", "memory", "ai", "agents", "llm", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/rodrigoescorsim/embedmind"
+Repository = "https://github.com/rodrigoescorsim/embedmind"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+# Build the abi3 wheel; the module name comes from the crate's `[lib] name`.
+# `bindings = "pyo3"` is auto-detected, but pinning it keeps the intent explicit.
+bindings = "pyo3"
+# The compiled module ships as the top-level `embedmind` package.
+module-name = "embedmind"
+# maturin auto-detects `embedmind.pyi` next to the crate and ships it (plus a
+# `py.typed` marker) as `embedmind/__init__.pyi`, so type-checkers see the API
+# without an explicit `include`.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,37 @@
+# Python bindings (B5, roadmap 2.5). Its own workspace, like `fuzz`: PyO3
+# emits `unsafe` glue that the main workspace's `unsafe_code = "forbid"` lint
+# would reject, and maturin drives this crate directly as an extension module.
+# The engine crate is pulled in by path — the bindings are a shell over
+# `embedmind_core::api`, exactly like the CLI/MCP (CLAUDE.md decision 2).
+[package]
+name = "embedmind-python"
+version = "0.1.0-dev"
+edition = "2024"
+license = "MIT"
+authors = ["Rodrigo Escorsim <rodrigo.escorsim@gmail.com>"]
+rust-version = "1.90"
+repository = "https://github.com/rodrigoescorsim/embedmind"
+homepage = "https://github.com/rodrigoescorsim/embedmind"
+publish = false
+description = "Python bindings for EmbedMind: persistent memory for AI agents"
+
+[lib]
+# The import name Python sees (`import embedmind`). maturin reads this.
+name = "embedmind"
+# `cdylib` for the Python extension module; `rlib` so `cargo test` can build
+# the crate's own Rust-side unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# By path only — this crate lives outside the main workspace, so it cannot use
+# the workspace inheritance the other shells rely on.
+embedmind-core = { path = "../../crates/embedmind-core" }
+# `abi3-py39`: build one wheel per platform that works on CPython 3.9+, rather
+# than one wheel per interpreter version. `extension-module` drops the libpython
+# link requirement (the interpreter provides the symbols at import time).
+pyo3 = { version = "0.26", features = ["extension-module", "abi3-py39"] }
+
+[lints.rust]
+# The engine forbids unsafe; the bindings cannot (PyO3's generated glue needs
+# it), so this crate warns instead — no hand-written unsafe should slip in.
+unsafe_code = "warn"
