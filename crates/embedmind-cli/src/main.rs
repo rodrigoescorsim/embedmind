@@ -62,6 +62,10 @@ enum Command {
         /// same key to bound both ends.
         #[arg(long = "filter", value_name = "KEY=VALUE")]
         filters: Vec<String>,
+        /// Only recall memories written by this agent (basic provenance;
+        /// see `stats` for which agents have memories)
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Delete one memory by id
     Forget { id: String },
@@ -107,7 +111,8 @@ fn run(cli: Cli) -> Result<(), String> {
             project,
             all,
             filters,
-        } => recall(&file, query, limit, project, all, filters),
+            agent,
+        } => recall(&file, query, limit, project, all, filters, agent),
         Command::Forget { id } => forget(&file, &id),
         Command::Stats => stats(&file),
         Command::Vacuum => vacuum(&file),
@@ -177,11 +182,15 @@ fn recall(
     project: Option<String>,
     all: bool,
     filters: Vec<String>,
+    agent: Option<String>,
 ) -> Result<(), String> {
     let store = open(file)?;
     let mut query = Query::new(text).limit(limit);
     if !filters.is_empty() {
         query = query.filters(parse_filters(&filters)?);
+    }
+    if let Some(agent) = &agent {
+        query = query.agent(agent.clone());
     }
     let scope = if all {
         None
@@ -202,6 +211,9 @@ fn recall(
     match &scope {
         Some(name) => eprintln!("searching project: {name} (use --all for everything)"),
         None => eprintln!("searching all projects"),
+    }
+    if let Some(agent) = &agent {
+        eprintln!("filtered to agent: {agent}");
     }
     if hits.is_empty() {
         eprintln!("no memories found");
@@ -252,6 +264,25 @@ fn stats(file: &Path) -> Result<(), String> {
             stats.embedding_dims
         ),
         None => println!("embedding model:    none (KV-only so far)"),
+    }
+    // Provenance breakdown (S14): live memories per writing agent, biggest
+    // first. Only shown when there is at least one live memory.
+    if !stats.by_agent.is_empty() {
+        println!("by agent:");
+        let mut agents: Vec<_> = stats.by_agent.iter().collect();
+        agents.sort_by(|a, b| b.1.live_memories.cmp(&a.1.live_memories).then(a.0.cmp(b.0)));
+        for (agent, agent_stats) in agents {
+            let name = if agent.is_empty() { "(unknown)" } else { agent };
+            let sessions = match agent_stats.sessions.len() {
+                0 => String::new(),
+                1 => ", 1 session".to_string(),
+                n => format!(", {n} sessions"),
+            };
+            println!(
+                "  {name:<18}{} memories{sessions}",
+                agent_stats.live_memories
+            );
+        }
     }
     Ok(())
 }

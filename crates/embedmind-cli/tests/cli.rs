@@ -312,6 +312,80 @@ fn recall_filter_narrows_by_metadata() {
     assert!(stderr.contains("invalid --filter"), "{stderr}");
 }
 
+/// S14: `embedmind recall --agent` narrows results by writing agent, and
+/// `embedmind stats` shows the per-agent breakdown of live memories. Two
+/// memories are stored under different agents via `serve` (whose agent is the
+/// `clientInfo.name`), since the CLI `remember` always writes as "cli".
+#[test]
+fn recall_by_agent_and_stats_breakdown() {
+    let scratch = Scratch::new("provenance");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    // Agent "alpha-agent" and "beta-agent" each remember one memory, in one
+    // serve process per agent (agent = clientInfo.name from initialize).
+    for (agent, content) in [
+        ("alpha-agent", "the cat sat on the warm mat"),
+        ("beta-agent", "a feline naps on the soft rug"),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_embedmind"))
+            .args(["--file", file, "serve"])
+            .current_dir(scratch.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("serve must spawn");
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            let init = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"clientInfo":{{"name":"{agent}","version":"0"}}}}}}"#
+            );
+            let remember = format!(
+                r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"remember","arguments":{{"content":"{content}","project":null}}}}}}"#
+            );
+            stdin
+                .write_all(format!("{init}\n{remember}\n").as_bytes())
+                .unwrap();
+        }
+        drop(child.stdin.take());
+        assert!(child.wait_with_output().unwrap().status.success());
+    }
+
+    // recall --agent alpha-agent: only alpha's memory, even for a query that
+    // semantically matches both.
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "recall",
+            "a resting cat",
+            "--all",
+            "--agent",
+            "alpha-agent",
+        ],
+    );
+    assert!(ok, "agent-filtered recall failed: {stderr}");
+    assert!(stdout.contains("cat sat on the warm mat"), "{stdout}");
+    assert!(
+        !stdout.contains("feline naps"),
+        "beta's memory must be filtered out: {stdout}"
+    );
+    assert!(
+        stderr.contains("filtered to agent: alpha-agent"),
+        "{stderr}"
+    );
+
+    // stats shows both agents, one live memory each.
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "stats"]);
+    assert!(ok);
+    assert!(stdout.contains("live memories:      2"), "{stdout}");
+    assert!(stdout.contains("by agent:"), "{stdout}");
+    assert!(stdout.contains("alpha-agent"), "{stdout}");
+    assert!(stdout.contains("beta-agent"), "{stdout}");
+}
+
 /// `embedmind serve` speaks MCP over stdio — the exact integration the
 /// README promises (`claude mcp add embedmind -- embedmind serve`).
 #[test]
