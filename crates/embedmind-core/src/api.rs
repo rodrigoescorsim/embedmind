@@ -217,25 +217,74 @@ impl Store {
         Ok(Memory::from_record(record))
     }
 
-    /// Nearest-neighbor search over `remember`ed content, best match first,
-    /// each hit carrying its similarity score. Requires this store to have an
-    /// [`Embedder`] (`StoreOptions::embedder` / [`Store::create`]); returns
-    /// [`Error::InvalidArgument`] otherwise. Tombstoned memories are always
-    /// excluded (`docs/adr/0003`); `query.scope` additionally filters by
-    /// project (DESIGN.md §7).
+    /// Hybrid recall: fuses vector similarity (HNSW) and full-text (BM25) with
+    /// Reciprocal Rank Fusion (`k = 60`, `docs/adr/0005`, [`crate::recall`]),
+    /// best fused rank first. A hit that appears in only one of the two lists
+    /// still makes the result — fusion is a union, never an intersection, so a
+    /// rare exact term or a semantic synonym is never dropped for lacking a
+    /// match on the other side.
+    ///
+    /// Requires this store to have an [`Embedder`] (`StoreOptions::embedder` /
+    /// [`Store::create`]); returns [`Error::InvalidArgument`] otherwise, since
+    /// the vector half is mandatory. On an older `.mind` with **no full-text
+    /// index** (a pre-M2 file), recall silently degrades to vector-only rather
+    /// than erroring — use [`Store::recall_detailed`] to observe that the
+    /// degradation happened. Tombstoned memories are always excluded
+    /// (`docs/adr/0003`); `query.scope` additionally filters by project
+    /// (DESIGN.md §7); the vector half keeps the adaptive `ef_search`
+    /// anti-under-return guarantee of S2 (DESIGN §5).
+    ///
+    /// Each returned [`Recalled`] carries its **RRF** score (small, e.g.
+    /// `~0.016` for a rank-0 hit), not a cosine similarity — the two source
+    /// scales are intentionally discarded (`docs/adr/0005`).
     pub fn recall(&self, query: Query) -> Result<Vec<Recalled>> {
+        Ok(self.recall_detailed(query)?.hits)
+    }
+
+    /// [`Store::recall`] plus a flag telling the caller whether recall had to
+    /// fall back to vector-only because the file has no full-text index. The
+    /// MCP/CLI shells use the flag to surface the "keyword search unavailable
+    /// on this older store" warning; plain [`Store::recall`] hides it.
+    pub fn recall_detailed(&self, query: Query) -> Result<RecallOutcome> {
         let Some(embedder) = &self.embedder else {
             return Err(Error::InvalidArgument(
                 "this store has no embedder; recall requires one (see StoreOptions::embedder)",
             ));
         };
-        let mut vector = embedder.embed(&query.text)?;
-        index::normalize(&mut vector);
         let root = self.pager.header().root_btree_page;
-        let hnsw_meta_page = self.pager.header().hnsw_meta_page;
         let pager = &self.pager;
         let scope = query.scope.clone();
-        let hits = index::search(
+
+        // Shared record cache: the vector filter, the text `keep`/`doc_len`
+        // closures, and the final hit reconstruction all read the same records.
+        // One B-tree read per id, reused everywhere (RefCell so the several
+        // closures can borrow it mutably in turn).
+        let cache: std::cell::RefCell<BTreeMap<Ulid, Option<MemoryRecord>>> =
+            std::cell::RefCell::new(BTreeMap::new());
+        let load = |id: Ulid| -> Result<Option<MemoryRecord>> {
+            if let Some(rec) = cache.borrow().get(&id) {
+                return Ok(rec.clone());
+            }
+            let rec = match btree::get(pager, root, &id.to_bytes())? {
+                Some(bytes) => Some(MemoryRecord::decode(&bytes)?),
+                None => None,
+            };
+            cache.borrow_mut().insert(id, rec.clone());
+            Ok(rec)
+        };
+        let in_scope = |rec: &MemoryRecord| {
+            !rec.tombstone
+                && match &scope {
+                    Scope::All => true,
+                    Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
+                }
+        };
+
+        // --- Vector half (HNSW) ------------------------------------------
+        let mut vector = embedder.embed(&query.text)?;
+        index::normalize(&mut vector);
+        let hnsw_meta_page = self.pager.header().hnsw_meta_page;
+        let vec_hits = index::search(
             &self.pager,
             hnsw_meta_page,
             embedder.dims(),
@@ -244,36 +293,121 @@ impl Store {
             SearchParams {
                 ef_search: query.ef_search,
             },
-            |record_id| {
-                // Re-check liveness/scope against the record itself: the
-                // HNSW graph only stores record ids, never tombstone/project
-                // state, which can change (forget) after a node was indexed.
-                match btree::get(pager, root, &record_id.to_bytes()) {
-                    Ok(Some(bytes)) => match MemoryRecord::decode(&bytes) {
-                        Ok(rec) => {
-                            !rec.tombstone
-                                && match &scope {
-                                    Scope::All => true,
-                                    Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
-                                }
-                        }
-                        Err(_) => false,
-                    },
-                    _ => false,
-                }
-            },
+            // Re-check liveness/scope against the record itself: the HNSW graph
+            // stores only record ids, never tombstone/project state, which can
+            // change (forget) after a node was indexed.
+            |id| matches!(load(id), Ok(Some(rec)) if in_scope(&rec)),
         )?;
+        let vec_ids: Vec<Ulid> = vec_hits.iter().map(|h| h.record_id).collect();
 
-        let mut out = Vec::with_capacity(hits.len());
-        for hit in hits {
-            if let Some(bytes) = btree::get(&self.pager, root, &hit.record_id.to_bytes())? {
-                out.push(Recalled {
-                    memory: Memory::from_record(MemoryRecord::decode(&bytes)?),
-                    score: hit.score,
+        // --- Full-text half (BM25) ---------------------------------------
+        // A file with no full-text index (fts_root_page == 0) is a pre-M2
+        // store: skip the keyword search and degrade to vector-only, silently
+        // but reported via the outcome flag. An *empty* index (root set, zero
+        // docs) is not degradation — it just contributes nothing.
+        let fts_root = self.pager.header().fts_root_page;
+        let degraded_to_vector_only = fts_root == 0;
+        let text_ids: Vec<Ulid> = if degraded_to_vector_only {
+            Vec::new()
+        } else {
+            let text_hits = index::fts::search(
+                &self.pager,
+                fts_root,
+                &query.text,
+                query.limit,
+                |id| matches!(load(id), Ok(Some(rec)) if in_scope(&rec)),
+                |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),
+            )?;
+            text_hits.iter().map(|h| h.record_id).collect()
+        };
+
+        // --- Fuse (RRF k=60, union) --------------------------------------
+        let fused = crate::recall::fuse(&vec_ids, &text_ids, query.limit);
+        let mut hits = Vec::with_capacity(fused.len());
+        for f in fused {
+            // Every fused id came from a list whose closure already loaded and
+            // scope-checked it, so this is a cache hit, not a fresh read.
+            if let Some(rec) = load(f.record_id)? {
+                hits.push(Recalled {
+                    memory: Memory::from_record(rec),
+                    score: f.score,
                 });
             }
         }
-        Ok(out)
+        Ok(RecallOutcome {
+            hits,
+            degraded_to_vector_only,
+        })
+    }
+
+    /// Vector-only recall: the HNSW half of [`Store::recall`] with **no**
+    /// full-text fusion — the pure nearest-neighbor list, live + in-scope,
+    /// best first. This is the operation the benchmark harness grades against
+    /// the brute-force baseline (`docs/BENCHMARKS.md` §3: `recall@10` measures
+    /// the *index's* approximation quality, isolated from RRF fusion), and it
+    /// is what recall degrades to on a pre-M2 file. Same embedder requirement,
+    /// scope, tombstone re-check, and adaptive `ef_search` guarantee as
+    /// [`Store::recall`]; the only difference is that BM25 never contributes.
+    pub fn recall_vector(&self, query: Query) -> Result<Vec<Recalled>> {
+        let Some(embedder) = &self.embedder else {
+            return Err(Error::InvalidArgument(
+                "this store has no embedder; recall requires one (see StoreOptions::embedder)",
+            ));
+        };
+        let root = self.pager.header().root_btree_page;
+        let pager = &self.pager;
+        let scope = query.scope.clone();
+
+        let cache: std::cell::RefCell<BTreeMap<Ulid, Option<MemoryRecord>>> =
+            std::cell::RefCell::new(BTreeMap::new());
+        let load = |id: Ulid| -> Result<Option<MemoryRecord>> {
+            if let Some(rec) = cache.borrow().get(&id) {
+                return Ok(rec.clone());
+            }
+            let rec = match btree::get(pager, root, &id.to_bytes())? {
+                Some(bytes) => Some(MemoryRecord::decode(&bytes)?),
+                None => None,
+            };
+            cache.borrow_mut().insert(id, rec.clone());
+            Ok(rec)
+        };
+        let in_scope = |rec: &MemoryRecord| {
+            !rec.tombstone
+                && match &scope {
+                    Scope::All => true,
+                    Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
+                }
+        };
+
+        let mut vector = embedder.embed(&query.text)?;
+        index::normalize(&mut vector);
+        let hnsw_meta_page = self.pager.header().hnsw_meta_page;
+        let vec_hits = index::search(
+            &self.pager,
+            hnsw_meta_page,
+            embedder.dims(),
+            &vector,
+            query.limit,
+            SearchParams {
+                ef_search: query.ef_search,
+            },
+            |id| matches!(load(id), Ok(Some(rec)) if in_scope(&rec)),
+        )?;
+
+        // Reuse the RRF scorer with an empty text list so a vector-only hit
+        // carries the same score it would in a degraded hybrid recall.
+        let vec_ids: Vec<Ulid> = vec_hits.iter().map(|h| h.record_id).collect();
+        let fused = crate::recall::fuse(&vec_ids, &[], query.limit);
+        let mut hits = Vec::with_capacity(fused.len());
+        for f in fused {
+            if let Some(rec) = load(f.record_id)? {
+                hits.push(Recalled {
+                    memory: Memory::from_record(rec),
+                    score: f.score,
+                });
+            }
+        }
+        Ok(hits)
     }
 
     /// Full-text (BM25) search over `remember`ed content — the keyword half
@@ -616,14 +750,32 @@ pub struct StoreStats {
     pub embedding_dims: u16,
 }
 
-/// One [`Store::recall`] hit: the memory plus its similarity score. Derefs
+/// The full result of [`Store::recall_detailed`]: the fused hits plus whether
+/// recall had to degrade to vector-only for lack of a full-text index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallOutcome {
+    /// Hits, best fused rank first (see [`Recalled`]).
+    pub hits: Vec<Recalled>,
+    /// `true` when the store had no full-text index (a pre-M2 `.mind`), so the
+    /// BM25 half was skipped and these hits are vector-only. Never an error —
+    /// old files still recall, just without keyword matching. Shells surface
+    /// this as a warning.
+    pub degraded_to_vector_only: bool,
+}
+
+/// One [`Store::recall`] hit: the memory plus its fused relevance score. Derefs
 /// to [`Memory`], so `hit.content`, `hit.id`, … read naturally.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recalled {
     /// The recalled memory.
     pub memory: Memory,
-    /// Cosine similarity to the query, in `[-1, 1]`; higher is closer. For a
-    /// chunked memory this is its best chunk's score (DESIGN §6).
+    /// Reciprocal Rank Fusion score (`docs/adr/0005`): the sum of `1/(60 +
+    /// rank + 1)` over the vector and text lists this memory ranked in. Small
+    /// and positive (a rank-0 hit contributes `~0.0164` per list); higher is
+    /// more relevant. It is a *rank* score, not a cosine similarity or a BM25
+    /// score — those scales are deliberately discarded so there is nothing to
+    /// calibrate. When recall degraded to vector-only, only the vector list
+    /// contributes.
     pub score: f32,
 }
 
@@ -681,6 +833,65 @@ mod tests {
         )
         .unwrap();
         (vfs, store)
+    }
+
+    /// A tiny deterministic [`Embedder`] for the hybrid-recall golden tests.
+    /// Each memory/query embeds as the (L2-normalizable) sum of one fixed axis
+    /// per *known* word; unknown words contribute nothing. Because the axis is
+    /// per-*concept*, synonyms can be made to share an axis, so "carro" and
+    /// "automóvel" embed close even though BM25 sees two different tokens —
+    /// exactly the semantic-synonym case S9 must handle. No ONNX, no I/O, fully
+    /// reproducible: the wrong tool for shipping, the right one for asserting
+    /// fusion behaviour without a real model's noise.
+    #[derive(Debug)]
+    struct WordEmbedder {
+        /// word → axis index into a `DIMS`-dimensional space.
+        axes: std::collections::HashMap<&'static str, usize>,
+    }
+
+    impl WordEmbedder {
+        const DIMS: u16 = 16;
+
+        /// `groups`: each inner slice is a set of synonyms that share one axis.
+        fn new(groups: &[&[&'static str]]) -> Self {
+            let mut axes = std::collections::HashMap::new();
+            for (axis, group) in groups.iter().enumerate() {
+                assert!(axis < Self::DIMS as usize, "too many concept axes");
+                for &word in *group {
+                    axes.insert(word, axis);
+                }
+            }
+            WordEmbedder { axes }
+        }
+    }
+
+    impl Embedder for WordEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            let mut v = vec![0.0f32; Self::DIMS as usize];
+            for token in crate::index::fts::tokenize(text) {
+                if let Some(&axis) = self.axes.get(token.as_str()) {
+                    v[axis] += 1.0;
+                }
+            }
+            Ok(v)
+        }
+        fn id(&self) -> crate::embed::ModelId {
+            "test-word-embedder-v1"
+        }
+        fn dims(&self) -> u16 {
+            Self::DIMS
+        }
+    }
+
+    /// A store whose recall uses [`WordEmbedder`] over the given synonym
+    /// groups — the seam the hybrid golden tests share.
+    fn store_with_embedder(groups: &[&[&'static str]]) -> Store {
+        let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+        let opts = StoreOptions {
+            embedder: Some(Arc::new(WordEmbedder::new(groups))),
+            ..StoreOptions::default()
+        };
+        Store::create_with(vfs, Path::new("m.mind"), opts).unwrap()
     }
 
     #[test]
@@ -826,6 +1037,123 @@ mod tests {
         let after = store.search_text(Query::new("rust")).unwrap();
         assert!(after.iter().all(|h| h.id != c.id));
         assert!(after.iter().any(|h| h.id == a.id));
+    }
+
+    // --- S9 hybrid-recall golden cases (RRF fusion, docs/adr/0005) ---------
+
+    /// Synonym groups shared by the golden cases: "carro"/"automóvel"/"veículo"
+    /// share a semantic axis; the other content words get their own axes so
+    /// they don't accidentally collide. Rare exact tokens (part numbers) are
+    /// deliberately *absent* from the embedder — they carry no semantics, only
+    /// a keyword match.
+    fn golden_store() -> Store {
+        store_with_embedder(&[
+            &["carro", "automóvel", "veículo"],
+            &["rápido", "veloz"],
+            &["motor", "elétrico"],
+            &["gato", "felino"],
+        ])
+    }
+
+    #[test]
+    fn golden_rare_exact_term_is_found_via_text_half() {
+        let mut store = golden_store();
+        // A rare exact token no embedder axis covers: only BM25 can match it.
+        let target = store
+            .remember(MemoryDraft::new("firmware revision zqx-8842 shipped"))
+            .unwrap();
+        for filler in [
+            "the carro is rápido",
+            "an elétrico motor hums",
+            "a felino naps",
+        ] {
+            store.remember(MemoryDraft::new(filler)).unwrap();
+        }
+
+        let out = store.recall_detailed(Query::new("zqx-8842")).unwrap();
+        assert!(!out.degraded_to_vector_only, "store has an fts index");
+        assert_eq!(
+            out.hits.first().map(|h| h.id),
+            Some(target.id),
+            "the rare exact term must surface its memory even though the vector \
+             half has no axis for it"
+        );
+    }
+
+    #[test]
+    fn golden_semantic_synonym_is_found_via_vector_half() {
+        let mut store = golden_store();
+        // Content says "automóvel"; the query says "carro" — different tokens,
+        // so BM25 alone would miss it. They share a vector axis, so the vector
+        // half brings it in.
+        let target = store
+            .remember(MemoryDraft::new("comprei um automóvel novo"))
+            .unwrap();
+        for filler in ["o gato dorme", "firmware zqx-8842 note", "a felino naps"] {
+            store.remember(MemoryDraft::new(filler)).unwrap();
+        }
+
+        let hits = store.recall(Query::new("carro")).unwrap();
+        assert!(
+            hits.iter().any(|h| h.id == target.id),
+            "a semantic synonym must be recalled via the vector half"
+        );
+    }
+
+    #[test]
+    fn golden_both_halves_agree_ranks_first() {
+        let mut store = golden_store();
+        // This one matches on *both* axes: the exact word "carro" (BM25) and
+        // its semantic axis (vector). It must beat a memory that matches only
+        // one half.
+        let both = store
+            .remember(MemoryDraft::new("o carro é rápido"))
+            .unwrap();
+        // Vector-only: synonym, no shared token with the query "carro rápido".
+        store
+            .remember(MemoryDraft::new("um veículo veloz"))
+            .unwrap();
+        // Text-only-ish filler.
+        store.remember(MemoryDraft::new("o gato dorme")).unwrap();
+
+        let hits = store.recall(Query::new("carro rápido")).unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.id),
+            Some(both.id),
+            "the memory matching both the keyword and the semantic halves \
+             must rank first under RRF"
+        );
+        // Fusion is a union: the vector-only synonym is still present.
+        assert!(hits.len() >= 2);
+    }
+
+    #[test]
+    fn recall_degrades_to_vector_only_without_an_fts_index_with_warning() {
+        // With content stored, `remember` has built the fts index, so recall
+        // is hybrid and does not report degradation.
+        let mut store = golden_store();
+        let target = store
+            .remember(MemoryDraft::new("comprei um automóvel"))
+            .unwrap();
+        let normal = store.recall_detailed(Query::new("carro")).unwrap();
+        assert!(!normal.degraded_to_vector_only, "index present ⇒ hybrid");
+        assert!(normal.hits.iter().any(|h| h.id == target.id));
+
+        // A store on which nothing was ever `remember`ed has no fts index yet
+        // (fts_root_page == 0) — the same state a pre-M2 `.mind` presents.
+        // Recall must degrade to vector-only, report it via the flag, and
+        // never error.
+        let empty = store_with_embedder(&[&["carro"]]);
+        assert_eq!(empty.pager.header().fts_root_page, 0, "no fts index yet");
+        let degraded = empty.recall_detailed(Query::new("carro")).unwrap();
+        assert!(
+            degraded.degraded_to_vector_only,
+            "no fts index must degrade to vector-only and report it"
+        );
+        assert!(
+            degraded.hits.is_empty(),
+            "empty store has nothing to recall"
+        );
     }
 
     #[test]
