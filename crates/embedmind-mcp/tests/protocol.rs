@@ -106,14 +106,14 @@ fn unsupported_protocol_version_gets_the_latest() {
 }
 
 #[test]
-fn tools_list_exposes_the_three_stable_tools() {
+fn tools_list_exposes_the_stable_tools() {
     let responses = roundtrip(
         kv_store(),
         &[json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })],
     );
     let tools = responses[0]["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["remember", "recall", "forget"]);
+    assert_eq!(names, ["remember", "recall", "stats", "forget"]);
     for tool in tools {
         assert!(tool["inputSchema"]["type"] == "object");
         assert!(tool["description"].as_str().unwrap().len() > 10);
@@ -492,6 +492,139 @@ fn malformed_filters_argument_is_a_protocol_error() {
         responses[1]["error"]["code"], -32602,
         "a range object needs min/max, not arbitrary keys"
     );
+}
+
+/// S14: `recall` accepts an optional `agent` filter and returns only memories
+/// written by that agent. The writing agent is the `clientInfo.name` from
+/// `initialize`, so this test drives two servers with different client names
+/// against the same store, then recalls filtered by one of them.
+#[test]
+fn recall_filters_by_agent_through_the_protocol() {
+    let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+    let opts = StoreOptions {
+        embedder: Some(Arc::new(OnnxEmbedder::load().expect("model must load"))),
+        ..StoreOptions::default()
+    };
+    let store = Store::create_with(vfs, Path::new("m.mind"), opts).unwrap();
+    let mut server = McpServer::new(store, None);
+
+    // Agent "cli" remembers one; agent "claude-code" remembers another.
+    let feed = |server: &mut McpServer, reqs: &[Value]| -> Vec<Value> {
+        let input: String = reqs.iter().map(|r| format!("{r}\n")).collect();
+        let mut out = Vec::new();
+        server.serve(input.as_bytes(), &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+
+    let r1 = feed(
+        &mut server,
+        &[
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "clientInfo": { "name": "cli", "version": "0" } },
+            }),
+            call(2, "remember", json!({ "content": "the cat sat on the mat" })),
+        ],
+    );
+    let cli_id = r1[1]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r2 = feed(
+        &mut server,
+        &[
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "clientInfo": { "name": "claude-code", "version": "0" } },
+            }),
+            call(2, "remember", json!({ "content": "a feline naps on the rug" })),
+        ],
+    );
+    let claude_id = r2[1]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Recall filtered to agent "cli": only that agent's memory.
+    let r3 = feed(
+        &mut server,
+        &[call(
+            1,
+            "recall",
+            json!({ "query": "a resting cat", "scope": "all", "agent": "cli" }),
+        )],
+    );
+    let hits = r3[0]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert_eq!(hits.len(), 1, "agent filter keeps exactly one memory");
+    assert_eq!(hits[0]["id"], cli_id);
+    assert_eq!(hits[0]["provenance"]["agent"], "cli");
+    assert_ne!(hits[0]["id"], Value::String(claude_id));
+}
+
+/// S14: the `stats` tool reports live/forgotten counts and a per-agent
+/// breakdown of live memories, all through the protocol.
+#[test]
+fn stats_tool_reports_provenance_breakdown() {
+    let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+    let store = Store::create_with(vfs, Path::new("m.mind"), StoreOptions::default()).unwrap();
+    let mut server = McpServer::new(store, None);
+
+    let feed = |server: &mut McpServer, reqs: &[Value]| -> Vec<Value> {
+        let input: String = reqs.iter().map(|r| format!("{r}\n")).collect();
+        let mut out = Vec::new();
+        server.serve(input.as_bytes(), &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+
+    // "cli" writes two memories.
+    feed(
+        &mut server,
+        &[
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "clientInfo": { "name": "cli", "version": "0" } },
+            }),
+            call(2, "remember", json!({ "content": "one" })),
+            call(3, "remember", json!({ "content": "two" })),
+        ],
+    );
+    // "claude-code" writes one, then forgets it.
+    let r = feed(
+        &mut server,
+        &[
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "clientInfo": { "name": "claude-code", "version": "0" } },
+            }),
+            call(2, "remember", json!({ "content": "three" })),
+        ],
+    );
+    let doomed = r[1]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    feed(&mut server, &[call(3, "forget", json!({ "id": doomed }))]);
+
+    let stats = feed(&mut server, &[call(1, "stats", json!({}))]);
+    let content = &stats[0]["result"]["structuredContent"];
+    assert_eq!(content["live_memories"], 2);
+    assert_eq!(content["forgotten_memories"], 1);
+    let by_agent = content["by_agent"].as_array().unwrap();
+    // Only "cli" has live memories; the forgotten claude-code memory drops out.
+    assert_eq!(by_agent.len(), 1);
+    assert_eq!(by_agent[0]["agent"], "cli");
+    assert_eq!(by_agent[0]["live_memories"], 2);
 }
 
 #[test]

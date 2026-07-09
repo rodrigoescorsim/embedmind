@@ -134,6 +134,7 @@ impl McpServer {
         let outcome = match name {
             "remember" => self.tool_remember(&args)?,
             "recall" => self.tool_recall(&args)?,
+            "stats" => self.tool_stats(&args)?,
             "forget" => self.tool_forget(&args)?,
             _ => return Err((INVALID_PARAMS, format!("unknown tool: {name}"))),
         };
@@ -236,6 +237,16 @@ impl McpServer {
             query = query.filters(parsed);
         }
 
+        // Optional provenance filter by writing agent (S14): keep only memories
+        // whose recorded agent equals this string. Absent = no agent filtering.
+        if let Some(agent) = args.get("agent") {
+            let agent = agent.as_str().ok_or((
+                INVALID_PARAMS,
+                "recall: 'agent' must be a string".to_string(),
+            ))?;
+            query = query.agent(agent.to_string());
+        }
+
         let scope_all = match args.get("scope").and_then(Value::as_str) {
             None | Some("project") => false,
             Some("all") => true,
@@ -286,6 +297,33 @@ impl McpServer {
                     })
                     .collect();
                 Ok(json!({ "hits": hits, "scope": applied_scope }))
+            }
+            Err(e) => Err(e.to_string()),
+        })
+    }
+
+    /// `stats()` → live/forgotten counts plus a per-agent breakdown of live
+    /// memories (S14 basic provenance). Read-only; takes no arguments.
+    #[allow(clippy::type_complexity)]
+    fn tool_stats(&mut self, _args: &Value) -> Result<Result<Value, String>, (i64, String)> {
+        Ok(match self.store.stats() {
+            Ok(stats) => {
+                let by_agent: Vec<Value> = stats
+                    .by_agent
+                    .iter()
+                    .map(|(agent, s)| {
+                        json!({
+                            "agent": agent,
+                            "live_memories": s.live_memories,
+                            "sessions": s.sessions.iter().collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                Ok(json!({
+                    "live_memories": stats.live_memories,
+                    "forgotten_memories": stats.forgotten_memories,
+                    "by_agent": by_agent,
+                }))
             }
             Err(e) => Err(e.to_string()),
         })
@@ -456,9 +494,25 @@ fn tools_list() -> Value {
                                     }
                                 ]
                             }
+                        },
+                        "agent": {
+                            "type": "string",
+                            "description": "Return only memories written by this agent \
+                                            (basic provenance). See the stats tool for \
+                                            the list of agents that have memories."
                         }
                     },
                     "required": ["query"]
+                }
+            },
+            {
+                "name": "stats",
+                "description": "Report memory-file counts: live and forgotten memories, \
+                                and a breakdown of live memories by the agent that wrote \
+                                them (with the distinct sessions per agent). Read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
                 }
             },
             {
