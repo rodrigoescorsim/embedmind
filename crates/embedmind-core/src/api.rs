@@ -11,7 +11,7 @@
 //! in-scope memories. A `Store` without an embedder behaves exactly as
 //! before — vector recall is a non-breaking addition, not a requirement.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -898,11 +898,22 @@ impl Store {
     pub fn stats(&self) -> Result<StoreStats> {
         let mut live_memories = 0u64;
         let mut forgotten_memories = 0u64;
+        // Provenance breakdown (S14): one bucket per writing agent, counting
+        // only live memories (forgotten ones are on their way out and would
+        // skew the picture of "who has memories now"). Distinct sessions per
+        // agent come along for free.
+        let mut by_agent: BTreeMap<String, AgentStats> = BTreeMap::new();
         for memory in self.iter_all() {
-            if memory?.tombstone {
+            let memory = memory?;
+            if memory.tombstone {
                 forgotten_memories += 1;
-            } else {
-                live_memories += 1;
+                continue;
+            }
+            live_memories += 1;
+            let bucket = by_agent.entry(memory.provenance.agent).or_default();
+            bucket.live_memories += 1;
+            if let Some(session) = memory.provenance.session_id {
+                bucket.sessions.insert(session);
             }
         }
         let header = self.pager.header();
@@ -911,6 +922,7 @@ impl Store {
         Ok(StoreStats {
             live_memories,
             forgotten_memories,
+            by_agent,
             index_entries: index::node_count(&self.pager, header.hnsw_meta_page)?,
             fts_documents: index::fts::indexed_documents(&self.pager, header.fts_root_page)?,
             graph_entities,
@@ -938,7 +950,8 @@ impl Store {
     }
 }
 
-/// Whether a record is live and within `query`'s project scope — the shared
+/// Whether a record is live, within `query`'s project scope, and written by
+/// the queried agent (when an agent filter is set, S14) — the shared
 /// liveness/scope half of every `recall`/`search_text` `keep` predicate.
 /// Metadata filters ([`Query::record_passes_filters`]) compose on top of this.
 fn in_scope(query: &Query, rec: &MemoryRecord) -> bool {
@@ -946,6 +959,10 @@ fn in_scope(query: &Query, rec: &MemoryRecord) -> bool {
         && match &query.scope {
             Scope::All => true,
             Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
+        }
+        && match &query.agent {
+            None => true,
+            Some(agent) => &rec.provenance.agent == agent,
         }
 }
 
@@ -1108,6 +1125,13 @@ pub struct Query {
     /// predicate, so the adaptive `ef_search` anti-under-return guarantee of
     /// S2 covers filtered results too.
     filters: BTreeMap<String, Filter>,
+    /// Provenance filter by writing agent (S14): when set, only memories whose
+    /// [`Provenance::agent`] equals this string are kept. `None` (the default)
+    /// = no agent filtering. Agent lives on the record's provenance, not its
+    /// metadata, so it is a dedicated field rather than a [`Filter`]; it is
+    /// applied in the same `in_scope`/`keep` predicate as scope and tombstone,
+    /// so filtered recall keeps the S2 anti-under-return guarantee.
+    agent: Option<String>,
     /// HNSW candidate list size at layer 0 (`docs/adr/0002`): higher trades
     /// latency for recall.
     ef_search: u16,
@@ -1125,6 +1149,7 @@ impl Query {
             limit: DEFAULT_RECALL_LIMIT,
             scope: Scope::All,
             filters: BTreeMap::new(),
+            agent: None,
             ef_search: crate::format::HNSW_DEFAULT_EF_SEARCH,
             expand_related: false,
         }
@@ -1170,6 +1195,16 @@ impl Query {
     /// parsing a `filters` argument into a map.
     pub fn filters(mut self, filters: BTreeMap<String, Filter>) -> Self {
         self.filters = filters;
+        self
+    }
+
+    /// Filters recall to memories written by exactly this agent (S14 basic
+    /// provenance, CLAUDE.md decision 3). The agent is compared against the
+    /// record's [`Provenance::agent`]; an empty-string agent matches memories
+    /// stored with unknown provenance. Composes (AND) with scope and metadata
+    /// filters. Pass an empty option to clear it.
+    pub fn agent(mut self, agent: impl Into<String>) -> Self {
+        self.agent = Some(agent.into());
         self
     }
 
@@ -1228,6 +1263,18 @@ impl Memory {
     }
 }
 
+/// One agent's slice of a [`StoreStats`] provenance breakdown (S14): how many
+/// live memories it wrote and which sessions it wrote them under.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentStats {
+    /// Live memories this agent wrote.
+    pub live_memories: u64,
+    /// Distinct sessions this agent wrote under. Memories with no session id
+    /// contribute nothing here, so this can be empty even when
+    /// `live_memories > 0`.
+    pub sessions: BTreeSet<String>,
+}
+
 /// What [`Store::stats`] reports — the numbers behind `embedmind stats`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreStats {
@@ -1235,6 +1282,11 @@ pub struct StoreStats {
     pub live_memories: u64,
     /// Tombstoned memories awaiting `vacuum` (`docs/adr/0003`).
     pub forgotten_memories: u64,
+    /// Live-memory breakdown by writing agent (S14 basic provenance): one
+    /// entry per distinct [`Provenance::agent`], keyed by the agent string
+    /// (the empty string groups memories with unknown provenance). Empty when
+    /// the store has no live memories. Forgotten memories are not counted.
+    pub by_agent: BTreeMap<String, AgentStats>,
     /// HNSW graph entries — one per indexed chunk, so a long memory
     /// (DESIGN §6) counts once per chunk. 0 = no vector index yet.
     pub index_entries: u64,
@@ -1715,6 +1767,94 @@ mod tests {
         let after = store.search_text(Query::new("rust")).unwrap();
         assert!(after.iter().all(|h| h.id != c.id));
         assert!(after.iter().any(|h| h.id == a.id));
+    }
+
+    // --- S14 basic provenance exposed (agent filter + stats breakdown) -----
+
+    #[test]
+    fn recall_filters_by_agent() {
+        let mut store = store_with_embedder(&[&["rust"], &["python"]]);
+        let by_cli = store
+            .remember(MemoryDraft::new("rust note from the cli").agent("cli"))
+            .unwrap();
+        let by_claude = store
+            .remember(MemoryDraft::new("rust note from claude").agent("claude-code"))
+            .unwrap();
+
+        // No agent filter: both surface.
+        let all = store.recall(Query::new("rust")).unwrap();
+        let ids: Vec<Ulid> = all.iter().map(|h| h.id).collect();
+        assert!(ids.contains(&by_cli.id) && ids.contains(&by_claude.id));
+
+        // Filter to one agent: only that agent's memory, through both halves.
+        let only_cli = store.recall(Query::new("rust").agent("cli")).unwrap();
+        assert_eq!(only_cli.len(), 1);
+        assert_eq!(only_cli[0].id, by_cli.id);
+        assert_eq!(only_cli[0].provenance.agent, "cli");
+
+        // The agent filter also constrains the pure keyword half.
+        let text_cli = store
+            .search_text(Query::new("rust").agent("claude-code"))
+            .unwrap();
+        assert_eq!(text_cli.len(), 1);
+        assert_eq!(text_cli[0].id, by_claude.id);
+
+        // An agent nobody used yields nothing, never an error.
+        assert!(
+            store
+                .recall(Query::new("rust").agent("nobody"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn stats_breaks_down_live_memories_by_agent_and_session() {
+        let (_, mut store) = store();
+        store
+            .remember(MemoryDraft::new("a").agent("cli").session("s1"))
+            .unwrap();
+        store
+            .remember(MemoryDraft::new("b").agent("cli").session("s1"))
+            .unwrap();
+        store
+            .remember(MemoryDraft::new("c").agent("cli").session("s2"))
+            .unwrap();
+        store
+            .remember(MemoryDraft::new("d").agent("claude-code"))
+            .unwrap();
+        let doomed = store
+            .remember(MemoryDraft::new("e").agent("claude-code"))
+            .unwrap();
+        store.forget(doomed.id).unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.live_memories, 4);
+        assert_eq!(stats.forgotten_memories, 1);
+
+        // Two live agents; the forgotten memory does not inflate its agent.
+        let cli = &stats.by_agent["cli"];
+        assert_eq!(cli.live_memories, 3);
+        assert_eq!(
+            cli.sessions,
+            ["s1".to_owned(), "s2".to_owned()].into_iter().collect(),
+            "distinct sessions, deduplicated"
+        );
+        let claude = &stats.by_agent["claude-code"];
+        assert_eq!(claude.live_memories, 1);
+        assert!(
+            claude.sessions.is_empty(),
+            "no session id ⇒ no session recorded"
+        );
+        assert_eq!(stats.by_agent.len(), 2);
+    }
+
+    #[test]
+    fn stats_by_agent_groups_unknown_provenance_under_the_empty_agent() {
+        let (_, mut store) = store();
+        store.remember(MemoryDraft::new("no agent set")).unwrap();
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.by_agent[""].live_memories, 1);
     }
 
     // --- S9 hybrid-recall golden cases (RRF fusion, docs/adr/0005) ---------

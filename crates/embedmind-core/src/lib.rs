@@ -31,8 +31,8 @@ pub mod storage;
 pub mod fuzz;
 
 pub use api::{
-    Memory, MemoryDraft, Query, RecallOutcome, Recalled, RelatedMemory, Scope, Store, StoreOptions,
-    StoreStats,
+    AgentStats, Memory, MemoryDraft, Query, RecallOutcome, Recalled, RelatedMemory, Scope, Store,
+    StoreOptions, StoreStats,
 };
 pub use error::{Error, Result};
 pub use record::{Filter, Scalar};
