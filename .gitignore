@@ -1,8 +1,17 @@
 /target
 *.mind
 *.mind-wal
+# Python bindings build/test scaffolding (bindings/python): wheels land in
+# target/wheels, the local venv and pytest/maturin caches are throwaway.
+.venv/
+__pycache__/
+.pytest_cache/
 fuzz/target
 fuzz/artifacts
+# The Python bindings are their own workspace with its own target/ (wheels land
+# in bindings/python/target/wheels); the crate is excluded from the root
+# workspace, so the root /target rule does not cover it.
+bindings/python/target
 # Materialized benchmark datasets are large build products regenerated from the
 # committed specs (benches/src/dataset.rs), never committed themselves.
 benches/data/

@@ -8,7 +8,10 @@ members = [
 ]
 # The fuzz crate is its own workspace: it needs nightly + libFuzzer (Linux CI
 # job), and must not drag those requirements into the stable build.
-exclude = ["fuzz"]
+# The Python bindings are excluded too: PyO3's generated glue needs `unsafe`,
+# which the workspace's `unsafe_code = "forbid"` lint would reject, and maturin
+# drives that crate directly (bindings/python).
+exclude = ["fuzz", "bindings/python"]
 
 [workspace.package]
 version = "0.1.0-dev"
