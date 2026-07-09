@@ -527,7 +527,11 @@ fn recall_filters_by_agent_through_the_protocol() {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": { "clientInfo": { "name": "cli", "version": "0" } },
             }),
-            call(2, "remember", json!({ "content": "the cat sat on the mat" })),
+            call(
+                2,
+                "remember",
+                json!({ "content": "the cat sat on the mat" }),
+            ),
         ],
     );
     let cli_id = r1[1]["result"]["structuredContent"]["id"]
@@ -542,7 +546,11 @@ fn recall_filters_by_agent_through_the_protocol() {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": { "clientInfo": { "name": "claude-code", "version": "0" } },
             }),
-            call(2, "remember", json!({ "content": "a feline naps on the rug" })),
+            call(
+                2,
+                "remember",
+                json!({ "content": "a feline naps on the rug" }),
+            ),
         ],
     );
     let claude_id = r2[1]["result"]["structuredContent"]["id"]
