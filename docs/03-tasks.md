@@ -165,7 +165,7 @@ semântica AND; mesma garantia anti-sub-retorno do ef_search adaptativo.
   schema MCP atualizado de forma retrocompatível.
 - **Verificação:** `cargo test -p embedmind-core filters` + E2E MCP.
 
-### B4. `embedmind vacuum` real (v0.2, promessa registrada no CLI)
+### B4. `embedmind vacuum` real (v0.2, promessa registrada no CLI) [✅ ENTREGUE]
 
 Reconstrução por cópia (nunca in-place): novo arquivo sem tombstones/overflow órfãos,
 índices reconstruídos, troca atômica no final; crash em qualquer ponto preserva o

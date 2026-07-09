@@ -127,15 +127,15 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
 - **Verificação:** teste E2E que dirige uma sessão MCP completa via pipes stdio contra
   o binário real.
 
-### S7. CLI standalone [✅ implementada, exceto `vacuum`]
+### S7. CLI standalone [✅ implementada]
 
 - **Dado** o binário instalado, **quando** rodo `embedmind remember|recall|forget|
-  stats|serve` (com `--file`, `--project`, `--global`, `--all`, `--limit`), **então**
-  cada comando opera sobre `~/.embedmind/memory.mind` por default com a mesma semântica
-  das tools MCP; `stats` reporta contagens, layout do arquivo, entradas de índice e o
-  modelo de embedding gravado.
-- **Borda:** `embedmind vacuum` falha com "not implemented, planned for v0.2" explícito
-  — nunca finge que funcionou. Erros saem em stderr com exit code ≠ 0.
+  stats|vacuum|serve` (com `--file`, `--project`, `--global`, `--all`, `--limit`),
+  **então** cada comando opera sobre `~/.embedmind/memory.mind` por default com a mesma
+  semântica das tools MCP; `stats` reporta contagens, layout do arquivo, entradas de
+  índice e o modelo de embedding gravado.
+- **Borda:** `embedmind vacuum` reconstrói por cópia e imprime o tamanho antes → depois
+  e a contagem recuperada (S11). Erros saem em stderr com exit code ≠ 0.
 - **Verificação:** testes E2E do crate `embedmind-cli` sobre o binário real.
 
 ### S8. Instalação em 1 comando [◔ parcial — falta release]
@@ -179,7 +179,7 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
   erro tipado.
 - **Verificação:** `cargo test -p embedmind-core filters`.
 
-### S11. Vacuum — recuperar espaço [⬜ pendente, v0.2]
+### S11. Vacuum — recuperar espaço [✅ implementada]
 
 - **Dado** memórias esquecidas acumuladas, **quando** rodo `embedmind vacuum`,
   **então** tombstones e cadeias de overflow órfãs são removidos, o índice HNSW é
