@@ -155,6 +155,49 @@ mod tests {
         }
     }
 
+    /// Replays every seed file committed under `fuzz/corpus/<target>/` through
+    /// its matching body (`docs/TESTING.md` §3: "the corpus... grows with
+    /// every CI run's new coverage"). This is the part coverage-guided fuzzing
+    /// alone doesn't give you on stable/Windows: a fixed regression corpus
+    /// that every `cargo test` run replays, so a previously-minimized crash
+    /// input can never silently start passing unnoticed.
+    #[test]
+    #[allow(clippy::type_complexity)]
+    fn fuzz_corpus_seeds_never_panic() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus");
+        let targets: &[(&str, fn(&[u8]))] = &[
+            ("fuzz_header", fuzz_header),
+            ("fuzz_record", fuzz_record),
+            ("fuzz_page", fuzz_page),
+            ("fuzz_fts_page", fuzz_fts_page),
+            ("fuzz_graph_page", fuzz_graph_page),
+            ("fuzz_wal_replay", fuzz_wal_replay),
+            ("fuzz_open_full", fuzz_open_full),
+        ];
+        let mut total_files = 0usize;
+        for (name, body) in targets {
+            let dir = root.join(name);
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("corpus dir {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry
+                    .unwrap_or_else(|e| panic!("corpus dir {}: {e}", dir.display()))
+                    .path();
+                if !path.is_file() {
+                    continue;
+                }
+                let data = std::fs::read(&path)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+                body(&data);
+                total_files += 1;
+            }
+        }
+        assert!(
+            total_files >= targets.len(),
+            "expected at least one seed per fuzz target"
+        );
+    }
+
     /// The whole-file body must also survive a *valid* file prefix followed
     /// by garbage — the shape real corruption takes.
     #[test]

@@ -80,6 +80,7 @@ Rules:
 - Length prefixes are validated against remaining page bytes **before** allocation (fuzzers find unchecked-length OOMs in minutes).
 - The corpus lives in `fuzz/corpus/` in the repo, seeded from harness-generated valid files, and grows with every CI run's new coverage.
 - Every fuzz crash gets: minimized input committed to `fuzz/regressions/`, fix, and a changelog entry (brutal honesty policy).
+- The committed corpus doesn't only feed `cargo-fuzz`: `embedmind-core`'s `fuzz_corpus_seeds_never_panic` test (`src/fuzz.rs`) replays every seed file under `fuzz/corpus/<target>/` through its matching body on every `cargo test`, stable-only, no libFuzzer required — so a fix regression is caught on the founder's Windows machine too, not just in the nightly fuzz job.
 
 CI: short fuzz pass (~2 min/target) on every PR; nightly job runs 1h/target.
 
