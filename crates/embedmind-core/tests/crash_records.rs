@@ -72,6 +72,10 @@ struct Model {
     /// `(id, content)` of every confirmed live remember — for `forget`
     /// targets and `get` verification.
     ids: Vec<(Ulid, String)>,
+    /// Graph data attached to each *attempted* remember, keyed by content
+    /// (S13): the entity tag plus the content of the relation target, when
+    /// one existed. Immutable once written, so no per-snapshot tracking.
+    graph: BTreeMap<String, (String, Option<String>)>,
 }
 
 impl Model {
@@ -80,6 +84,7 @@ impl Model {
             snapshots: vec![RefState::new()],
             confirmed: 0,
             ids: Vec::new(),
+            graph: BTreeMap::new(),
         }
     }
 
@@ -93,17 +98,36 @@ impl Model {
 }
 
 /// One durable `remember`, mirrored in the model (snapshot pushed at attempt
-/// time, confirmed on `Ok` — see module docs).
+/// time, confirmed on `Ok` — see module docs). Every remember also carries
+/// graph data (S13): one of three shared entity tags, plus a relation to the
+/// most recent confirmed-live memory when one exists — so graph pages (both
+/// ends of the edge!) ride the same injected transactions as the record.
 fn do_remember(store: &mut Store, model: &mut Model, content: String) -> Result<()> {
+    let entity = format!("topic-{}", content.len() % 3);
+    let target = model
+        .ids
+        .iter()
+        .rev()
+        .find(|(_, c)| model.current().get(c) == Some(&false))
+        .map(|(id, c)| (*id, c.clone()));
+
     let mut next = model.current().clone();
     next.insert(content.clone(), false);
     model.snapshots.push(next);
-    let memory = store.remember(
-        MemoryDraft::new(content.clone())
-            .project("harness")
-            .agent("crash-test")
-            .meta("len", Scalar::I64(content.len() as i64)),
-    )?;
+    model.graph.insert(
+        content.clone(),
+        (entity.clone(), target.as_ref().map(|(_, c)| c.clone())),
+    );
+
+    let mut draft = MemoryDraft::new(content.clone())
+        .project("harness")
+        .agent("crash-test")
+        .meta("len", Scalar::I64(content.len() as i64))
+        .entity(entity);
+    if let Some((target_id, _)) = target {
+        draft = draft.relation("follows", target_id);
+    }
+    let memory = store.remember(draft)?;
     assert_eq!(
         store.txn_counter(),
         model.attempted(),
@@ -269,6 +293,78 @@ fn check_invariants(vfs: &SimVfs, model: &Model, ctx: &str) {
                 hit.content
             );
         }
+    }
+
+    // I3/I5 for the graph layer (S13, docs/adr/0012): graph pages ride the
+    // same transactions as the records, so each survivor's entity tag and
+    // relation must read back exactly — both directions of every edge — and
+    // tombstoned ends must be filtered out of `related`/`entity_members`.
+    let by_content: BTreeMap<&String, &Memory> =
+        survivors.iter().map(|m| (&m.content, m)).collect();
+    for m in &survivors {
+        let (entity, target) = &model.graph[&m.content];
+        assert_eq!(
+            store
+                .entities_of(m.id)
+                .unwrap_or_else(|e| panic!("entities_of ({ctx}): {e}")),
+            vec![entity.clone()],
+            "I5 violated ({ctx}): entity tag of {:?}",
+            m.content
+        );
+        let related = store
+            .related(m.id)
+            .unwrap_or_else(|e| panic!("related ({ctx}): {e}"));
+        // Outgoing: exactly the recorded target, iff it survived live.
+        let outgoing: Vec<_> = related.iter().filter(|r| r.outgoing).collect();
+        match target
+            .as_ref()
+            .and_then(|tc| by_content.get(tc))
+            .filter(|t| !t.tombstone)
+        {
+            Some(t) => {
+                assert_eq!(outgoing.len(), 1, "({ctx}): outgoing of {:?}", m.content);
+                assert_eq!(outgoing[0].memory.id, t.id, "({ctx})");
+                assert_eq!(outgoing[0].kind, "follows", "({ctx})");
+            }
+            None => assert!(
+                outgoing.is_empty(),
+                "I3 violated ({ctx}): dangling outgoing edge from {:?}",
+                m.content
+            ),
+        }
+        // Incoming: exactly the live survivors that recorded m as target.
+        let incoming_got: std::collections::BTreeSet<&str> = related
+            .iter()
+            .filter(|r| !r.outgoing)
+            .map(|r| r.memory.content.as_str())
+            .collect();
+        let incoming_want: std::collections::BTreeSet<&str> = survivors
+            .iter()
+            .filter(|s| {
+                !s.tombstone && model.graph[&s.content].1.as_deref() == Some(m.content.as_str())
+            })
+            .map(|s| s.content.as_str())
+            .collect();
+        assert_eq!(
+            incoming_got, incoming_want,
+            "I5 violated ({ctx}): incoming edges of {:?}",
+            m.content
+        );
+    }
+    // Entity navigation returns exactly the live survivors under each tag.
+    for entity in ["topic-0", "topic-1", "topic-2"] {
+        let got: std::collections::BTreeSet<String> = store
+            .entity_members(entity)
+            .unwrap_or_else(|e| panic!("entity_members ({ctx}): {e}"))
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        let want: std::collections::BTreeSet<String> = survivors
+            .iter()
+            .filter(|m| !m.tombstone && model.graph[&m.content].0 == entity)
+            .map(|m| m.content.clone())
+            .collect();
+        assert_eq!(got, want, "I5 violated ({ctx}): members of {entity:?}");
     }
 
     // The recovered store must be fully usable.
