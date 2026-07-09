@@ -50,6 +50,83 @@ pub enum Scalar {
     Str(String),
 }
 
+impl Scalar {
+    /// This scalar as an `f64` if it is numeric (`I64`/`F64`), for range
+    /// comparisons. `None` for the non-ordered types (`Null`/`Bool`/`Str`).
+    fn as_ordered(&self) -> Option<f64> {
+        match self {
+            Scalar::I64(v) => Some(*v as f64),
+            Scalar::F64(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+/// One metadata-filter predicate on a single key (S10, `docs/01-spec.md`).
+/// A [`crate::api::Query`] carries a map of `key → Filter`; a memory passes
+/// only when it satisfies **every** entry (AND semantics).
+///
+/// Filters read a memory's stored [`Scalar`] for the key and either accept it
+/// or reject it. Two kinds:
+///
+/// - [`Filter::Eq`] — exact match against a scalar of the *same* type. Matching
+///   an integer filter against a stored string is a type mismatch (a typed
+///   error), not a silent miss: comparing across types is a caller bug worth
+///   surfacing (`docs/01-spec.md` S10 edge). A missing key is a plain non-match
+///   (0 hits), never an error.
+/// - [`Filter::Range`] — half-open-or-closed numeric window `[min?, max?]` over
+///   the ordered types (`I64`/`F64`, compared as `f64`). Applying a range to a
+///   stored non-numeric value (string/bool/null) is the same typed mismatch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Filter {
+    /// Stored value must equal this scalar, and be the same type. A stored
+    /// value of a different type is a type mismatch (typed error).
+    Eq(Scalar),
+    /// Stored value (numeric) must fall within the inclusive bounds. `None`
+    /// bound = open on that side. A stored non-numeric value is a mismatch.
+    Range {
+        /// Inclusive lower bound, or `None` for unbounded below.
+        min: Option<f64>,
+        /// Inclusive upper bound, or `None` for unbounded above.
+        max: Option<f64>,
+    },
+}
+
+impl Filter {
+    /// Evaluates this predicate against the value stored under its key, or
+    /// `None` when the memory has no such key.
+    ///
+    /// - Missing key ⇒ `Ok(false)` — a non-match, not an error (S10 edge: a
+    ///   filter on an absent key yields 0 hits, never a failure).
+    /// - Type mismatch (e.g. an `Eq(I64)` filter over a stored string, or any
+    ///   `Range` over a non-numeric value) ⇒ `Err(InvalidArgument)`, so the
+    ///   caller learns its filter cannot apply instead of silently dropping
+    ///   every hit.
+    pub fn matches(&self, stored: Option<&Scalar>) -> Result<bool> {
+        let Some(stored) = stored else {
+            return Ok(false); // absent key: honest non-match, never an error
+        };
+        match self {
+            Filter::Eq(want) => {
+                if std::mem::discriminant(want) != std::mem::discriminant(stored) {
+                    return Err(Error::InvalidArgument(
+                        "recall filter type mismatch: stored value has a different type",
+                    ));
+                }
+                Ok(want == stored)
+            }
+            Filter::Range { min, max } => {
+                let Some(value) = stored.as_ordered() else {
+                    return Err(Error::InvalidArgument(
+                        "recall range filter requires a numeric stored value",
+                    ));
+                };
+                Ok(min.is_none_or(|lo| value >= lo) && max.is_none_or(|hi| value <= hi))
+            }
+        }
+    }
+}
+
 /// Who wrote a memory, and when. Basic provenance is free (the seed of the
 /// premium traceability tier — CLAUDE.md decision 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,6 +484,79 @@ mod tests {
             let i = (next() as usize) % buf.len();
             buf[i] ^= (next() as u8) | 1;
             let _ = MemoryRecord::decode(&buf);
+        }
+    }
+
+    // --- Metadata filters (S10) --------------------------------------------
+
+    #[test]
+    fn filter_eq_matches_same_type_and_value() {
+        let hit = Scalar::Str("ops".into());
+        assert!(Filter::Eq(hit.clone()).matches(Some(&hit)).unwrap());
+        assert!(
+            !Filter::Eq(Scalar::Str("ops".into()))
+                .matches(Some(&Scalar::Str("design".into())))
+                .unwrap(),
+            "same type, different value ⇒ no match"
+        );
+        assert!(Filter::Eq(Scalar::I64(3)).matches(Some(&Scalar::I64(3))).unwrap());
+        assert!(Filter::Eq(Scalar::Bool(true)).matches(Some(&Scalar::Bool(true))).unwrap());
+    }
+
+    #[test]
+    fn filter_on_absent_key_is_non_match_not_error() {
+        assert!(!Filter::Eq(Scalar::I64(1)).matches(None).unwrap());
+        assert!(
+            !Filter::Range {
+                min: Some(0.0),
+                max: Some(1.0)
+            }
+            .matches(None)
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn filter_eq_type_mismatch_is_typed_error() {
+        // Integer filter over a stored string, and vice-versa.
+        assert!(matches!(
+            Filter::Eq(Scalar::I64(3)).matches(Some(&Scalar::Str("x".into()))),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            Filter::Eq(Scalar::Str("x".into())).matches(Some(&Scalar::I64(3))),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn filter_range_over_numeric_types_and_bounds() {
+        let range = |min, max| Filter::Range { min, max };
+        // Closed window over an i64.
+        assert!(range(Some(4.0), Some(10.0)).matches(Some(&Scalar::I64(5))).unwrap());
+        assert!(!range(Some(4.0), Some(10.0)).matches(Some(&Scalar::I64(1))).unwrap());
+        // Inclusive bounds.
+        assert!(range(Some(4.0), Some(10.0)).matches(Some(&Scalar::I64(4))).unwrap());
+        assert!(range(Some(4.0), Some(10.0)).matches(Some(&Scalar::I64(10))).unwrap());
+        // Open-ended.
+        assert!(range(Some(0.5), None).matches(Some(&Scalar::F64(0.9))).unwrap());
+        assert!(!range(Some(0.5), None).matches(Some(&Scalar::F64(0.2))).unwrap());
+        assert!(range(None, Some(0.5)).matches(Some(&Scalar::F64(0.2))).unwrap());
+        // Numeric filters cross the i64/f64 line: an f64 window over an i64.
+        assert!(range(Some(2.5), Some(3.5)).matches(Some(&Scalar::I64(3))).unwrap());
+    }
+
+    #[test]
+    fn filter_range_over_non_numeric_is_typed_error() {
+        let range = Filter::Range {
+            min: Some(0.0),
+            max: Some(1.0),
+        };
+        for stored in [Scalar::Str("x".into()), Scalar::Bool(true), Scalar::Null] {
+            assert!(
+                matches!(range.matches(Some(&stored)), Err(Error::InvalidArgument(_))),
+                "range over {stored:?} must be a typed error"
+            );
         }
     }
 }

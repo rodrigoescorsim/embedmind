@@ -20,7 +20,7 @@ use ulid::Ulid;
 use crate::embed::{Embedder, OnnxEmbedder};
 use crate::error::{Error, Result};
 use crate::index::{self, SearchParams};
-use crate::record::{MemoryRecord, Provenance, Scalar, VecRef};
+use crate::record::{Filter, MemoryRecord, Provenance, Scalar, VecRef};
 use crate::storage::btree;
 use crate::storage::{Pager, PagerOptions, RealVfs, Vfs};
 
@@ -253,7 +253,6 @@ impl Store {
         };
         let root = self.pager.header().root_btree_page;
         let pager = &self.pager;
-        let scope = query.scope.clone();
 
         // Shared record cache: the vector filter, the text `keep`/`doc_len`
         // closures, and the final hit reconstruction all read the same records.
@@ -272,12 +271,29 @@ impl Store {
             cache.borrow_mut().insert(id, rec.clone());
             Ok(rec)
         };
-        let in_scope = |rec: &MemoryRecord| {
-            !rec.tombstone
-                && match &scope {
-                    Scope::All => true,
-                    Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
-                }
+
+        // `keep`: live + in-scope + passes every metadata filter. Feeding the
+        // filters into the *same* predicate the two searches use means the
+        // adaptive `ef_search` anti-under-return guarantee (S2, DESIGN §5)
+        // covers filtered results — a filter that excludes candidates makes
+        // the search widen, never silently under-return. A filter type
+        // mismatch is a typed error, but `keep` must yield a plain `bool`, so
+        // the first such error is stashed here and surfaced after the search.
+        let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
+        let keep = |id: Ulid| -> bool {
+            if filter_error.borrow().is_some() {
+                return false; // a mismatch already occurred; stop admitting
+            }
+            match load(id) {
+                Ok(Some(rec)) if in_scope(&query, &rec) => match query.record_passes_filters(&rec) {
+                    Ok(pass) => pass,
+                    Err(e) => {
+                        *filter_error.borrow_mut() = Some(e);
+                        false
+                    }
+                },
+                _ => false,
+            }
         };
 
         // --- Vector half (HNSW) ------------------------------------------
@@ -293,11 +309,14 @@ impl Store {
             SearchParams {
                 ef_search: query.ef_search,
             },
-            // Re-check liveness/scope against the record itself: the HNSW graph
-            // stores only record ids, never tombstone/project state, which can
-            // change (forget) after a node was indexed.
-            |id| matches!(load(id), Ok(Some(rec)) if in_scope(&rec)),
+            // Re-check liveness/scope/filters against the record itself: the
+            // HNSW graph stores only record ids, never tombstone/project/
+            // metadata state, which can change (forget) after indexing.
+            &keep,
         )?;
+        if let Some(e) = filter_error.borrow_mut().take() {
+            return Err(e);
+        }
         let vec_ids: Vec<Ulid> = vec_hits.iter().map(|h| h.record_id).collect();
 
         // --- Full-text half (BM25) ---------------------------------------
@@ -315,9 +334,12 @@ impl Store {
                 fts_root,
                 &query.text,
                 query.limit,
-                |id| matches!(load(id), Ok(Some(rec)) if in_scope(&rec)),
+                &keep,
                 |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),
             )?;
+            if let Some(e) = filter_error.borrow_mut().take() {
+                return Err(e);
+            }
             text_hits.iter().map(|h| h.record_id).collect()
         };
 
@@ -356,7 +378,6 @@ impl Store {
         };
         let root = self.pager.header().root_btree_page;
         let pager = &self.pager;
-        let scope = query.scope.clone();
 
         let cache: std::cell::RefCell<BTreeMap<Ulid, Option<MemoryRecord>>> =
             std::cell::RefCell::new(BTreeMap::new());
@@ -371,12 +392,24 @@ impl Store {
             cache.borrow_mut().insert(id, rec.clone());
             Ok(rec)
         };
-        let in_scope = |rec: &MemoryRecord| {
-            !rec.tombstone
-                && match &scope {
-                    Scope::All => true,
-                    Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
-                }
+
+        // Same live + in-scope + metadata-filter `keep` as `recall_detailed`,
+        // with the type-mismatch error stashed and surfaced after the search.
+        let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
+        let keep = |id: Ulid| -> bool {
+            if filter_error.borrow().is_some() {
+                return false;
+            }
+            match load(id) {
+                Ok(Some(rec)) if in_scope(&query, &rec) => match query.record_passes_filters(&rec) {
+                    Ok(pass) => pass,
+                    Err(e) => {
+                        *filter_error.borrow_mut() = Some(e);
+                        false
+                    }
+                },
+                _ => false,
+            }
         };
 
         let mut vector = embedder.embed(&query.text)?;
@@ -391,8 +424,11 @@ impl Store {
             SearchParams {
                 ef_search: query.ef_search,
             },
-            |id| matches!(load(id), Ok(Some(rec)) if in_scope(&rec)),
+            &keep,
         )?;
+        if let Some(e) = filter_error.borrow_mut().take() {
+            return Err(e);
+        }
 
         // Reuse the RRF scorer with an empty text list so a vector-only hit
         // carries the same score it would in a degraded hybrid recall.
@@ -421,7 +457,6 @@ impl Store {
         let root = self.pager.header().root_btree_page;
         let fts_root = self.pager.header().fts_root_page;
         let pager = &self.pager;
-        let scope = query.scope.clone();
         // Cache each candidate's record so `keep` and `doc_len` — two separate
         // closures `fts::search` may both call for one id — share a single
         // B-tree read. `RefCell` because both closures borrow it mutably.
@@ -439,25 +474,37 @@ impl Store {
             Ok(rec)
         };
 
+        // keep: live + in-scope + metadata filters (same re-check the vector
+        // path does); a filter type mismatch is stashed and surfaced below.
+        let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
         let hits = index::fts::search(
             &self.pager,
             fts_root,
             &query.text,
             query.limit,
-            // keep: live + in-scope (same re-check the vector path does).
-            |id| match load(id) {
-                Ok(Some(rec)) => {
-                    !rec.tombstone
-                        && match &scope {
-                            Scope::All => true,
-                            Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
-                        }
+            |id| {
+                if filter_error.borrow().is_some() {
+                    return false;
                 }
-                _ => false,
+                match load(id) {
+                    Ok(Some(rec)) if in_scope(&query, &rec) => {
+                        match query.record_passes_filters(&rec) {
+                            Ok(pass) => pass,
+                            Err(e) => {
+                                *filter_error.borrow_mut() = Some(e);
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                }
             },
             // doc_len: BM25 length normalization from the current content.
             |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),
         )?;
+        if let Some(e) = filter_error.borrow_mut().take() {
+            return Err(e);
+        }
 
         let mut out = Vec::with_capacity(hits.len());
         for hit in hits {
@@ -564,6 +611,17 @@ impl Store {
     }
 }
 
+/// Whether a record is live and within `query`'s project scope — the shared
+/// liveness/scope half of every `recall`/`search_text` `keep` predicate.
+/// Metadata filters ([`Query::record_passes_filters`]) compose on top of this.
+fn in_scope(query: &Query, rec: &MemoryRecord) -> bool {
+    !rec.tombstone
+        && match &query.scope {
+            Scope::All => true,
+            Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
+        }
+}
+
 /// Current time in microseconds since the Unix epoch (UTC). Saturates
 /// instead of failing on absurd clocks.
 fn now_micros() -> i64 {
@@ -651,6 +709,12 @@ pub struct Query {
     limit: usize,
     /// Project filter.
     scope: Scope,
+    /// Metadata filters (S10): `key → predicate`, ANDed together. A memory is
+    /// kept only when it satisfies every entry. Empty (the default) = no
+    /// metadata filtering. Composed with scope/tombstone in the same `keep`
+    /// predicate, so the adaptive `ef_search` anti-under-return guarantee of
+    /// S2 covers filtered results too.
+    filters: BTreeMap<String, Filter>,
     /// HNSW candidate list size at layer 0 (`docs/adr/0002`): higher trades
     /// latency for recall.
     ef_search: u16,
@@ -664,6 +728,7 @@ impl Query {
             text: text.into(),
             limit: DEFAULT_RECALL_LIMIT,
             scope: Scope::All,
+            filters: BTreeMap::new(),
             ef_search: crate::format::HNSW_DEFAULT_EF_SEARCH,
         }
     }
@@ -691,6 +756,37 @@ impl Query {
     pub fn ef_search(mut self, ef_search: u16) -> Self {
         self.ef_search = ef_search;
         self
+    }
+
+    /// Adds one metadata filter (S10): a memory is kept only if the value it
+    /// stored under `key` satisfies `filter`. Filters are ANDed — call this
+    /// once per key. A filter on a key a memory does not have simply excludes
+    /// that memory (0 hits, never an error); a filter whose type disagrees
+    /// with the stored value's type surfaces a typed error from
+    /// [`Store::recall`] (`docs/01-spec.md` S10).
+    pub fn filter(mut self, key: impl Into<String>, filter: Filter) -> Self {
+        self.filters.insert(key.into(), filter);
+        self
+    }
+
+    /// Replaces all metadata filters at once — the seam the shells use after
+    /// parsing a `filters` argument into a map.
+    pub fn filters(mut self, filters: BTreeMap<String, Filter>) -> Self {
+        self.filters = filters;
+        self
+    }
+
+    /// Whether `record`'s metadata passes **every** filter (AND). Returns a
+    /// typed error on the first filter whose type disagrees with the stored
+    /// value; a filter on an absent key is a plain non-match (`Ok(false)`).
+    /// Empty filter set ⇒ always `Ok(true)`.
+    fn record_passes_filters(&self, record: &MemoryRecord) -> Result<bool> {
+        for (key, filter) in &self.filters {
+            if !filter.matches(record.metadata.get(key))? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 

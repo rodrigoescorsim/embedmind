@@ -34,5 +34,5 @@ pub use api::{
     Memory, MemoryDraft, Query, RecallOutcome, Recalled, Scope, Store, StoreOptions, StoreStats,
 };
 pub use error::{Error, Result};
-pub use record::Scalar;
+pub use record::{Filter, Scalar};
 pub use ulid::Ulid;
