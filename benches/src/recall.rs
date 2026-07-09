@@ -54,10 +54,12 @@ pub fn query_texts(spec: &DatasetSpec, n: usize) -> Vec<String> {
 /// materialized dataset (`dataset::materialize`), so their vectors match.
 ///
 /// For each query the exact top-k comes from [`baseline::top_k`] and the
-/// approximate top-k from [`Store::recall`]; both use the identical query
-/// vector because `Store::recall` embeds the text with the same model this
-/// harness embeds it with. Overlap / k is that query's recall; the mean is the
-/// report.
+/// approximate top-k from [`Store::recall_vector`] — the pure HNSW half, *not*
+/// the RRF-fused hybrid recall: this metric isolates the index's approximation
+/// quality (`docs/BENCHMARKS.md` §3), which fusing in BM25 keyword hits would
+/// contaminate. Both sides use the identical query vector because
+/// `recall_vector` embeds the text with the same model this harness embeds it
+/// with. Overlap / k is that query's recall; the mean is the report.
 pub fn measure(
     store: &Store,
     set: &VectorSet,
@@ -77,7 +79,7 @@ pub fn measure(
             .collect();
 
         let approx: HashSet<Ulid> = store
-            .recall(Query::new(text.clone()).limit(k))?
+            .recall_vector(Query::new(text.clone()).limit(k))?
             .into_iter()
             .map(|r| r.id)
             .collect();
