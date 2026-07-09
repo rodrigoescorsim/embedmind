@@ -56,11 +56,10 @@ benchmark harness portability, testing EmbedMind with an MCP host I haven't trie
 
 ## Licensing of contributions
 
-The core is MIT. By submitting a PR you agree your contribution is licensed under MIT.
-Premium modules (history, compliance, traceability, team sync — see the README table)
-are developed separately under a commercial license and are **not** part of this repo;
-PRs implementing premium-tier features in the MIT core will be declined to keep the
-open-core boundary unambiguous.
+The project is MIT. By submitting a PR you agree your contribution is licensed under MIT.
+Some directions (history/time-travel, encryption at rest, RBAC/audit, team sync) are
+deliberately out of scope for now — PRs implementing them will be declined until the
+project's roadmap opens those areas up.
 
 ## Reporting bugs
 

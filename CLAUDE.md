@@ -4,11 +4,11 @@ Contexto para IA e colaboradores. Leia antes de propor ou implementar qualquer c
 
 ## O que é este projeto
 
-**EmbedMind** é uma engine embarcada de memória para agentes de IA (vetor + full-text + grafo, arquivo único, crash-safe, Rust), **empacotada e lançada como servidor MCP de memória + CLI** — não como "um banco de dados". É a aposta principal do plano open-core de 90 dias do founder (Rodrigo Escorsim, dev sênior C++/Rust, solo).
+**EmbedMind** é uma engine embarcada de memória para agentes de IA (vetor + full-text + grafo, arquivo único, crash-safe, Rust), **empacotada e lançada como servidor MCP de memória + CLI** — não como "um banco de dados". É a aposta principal do plano de construção de 90 dias do founder (Rodrigo Escorsim, dev sênior C++/Rust, solo).
 
 **Este é o repo de código** (privado até o fim do M1; a partir daqui, os documentos deste repo são a versão canônica). Documentos de origem do planejamento — fora deste repo, na pasta local `C:\workspace\Rodrigo\empreendedor_digital\ideias\`:
 
-- `estrategias_negocio_github_2026_07.html` — card #1: tese, moat, prós/contras, tier enterprise.
+- `estrategias_negocio_github_2026_07.html` — card #1: tese, moat, prós/contras.
 - `plano_construcao_open_core_2026_07.html` — plano de execução de 90 dias (M0–M3), métricas de go/no-go.
 - `projetos/EmbedMind/` — rascunhos originais destes documentos (snapshot histórico).
 
@@ -18,12 +18,11 @@ Documentos deste repo: [README.md](README.md) (público, pitch/UX), [ROADMAP.md]
 
 1. **Empacotamento: MCP server + CLI, não "database".** A porta de entrada é "memória persistente para seus agentes" (`remember`/`recall`/`forget`), plug-and-play. A engine gradua para crate/lib independente com bindings depois que amadurecer.
 2. **A engine é o ativo; o MCP é casca descartável.** Se o protocolo MCP perder relevância, a engine sobrevive. Nunca deixar lógica de domínio vazar para a camada MCP.
-3. **Open-core:** núcleo MIT completo e genuinamente útil. Premium segue as 4 classes: **histórico** (time-travel), **compliance** (criptografia, RBAC, auditoria, air-gap), **rastreabilidade** (proveniência plena), **integrações** (sync/equipe/conectores). Proveniência *básica* (qual agente/sessão gravou) é grátis — é a semente da rastreabilidade premium.
-4. **Tier enterprise = tese ex-CodeVault reabsorvida:** o dev de banco/fintech descobre o repo, usa grátis; o compliance da empresa exige a versão paga (criptografia, RBAC, auditoria, air-gap). Self-service, **zero venda B2B ativa** — a empresa vem ao produto.
-5. **Crash-safety antes de features.** WAL primeiro. Um único bug de corrupção de dados mata a marca — confiabilidade É o moat. Fuzzing e testes de crash no CI desde o início.
-6. **Repo privado até o fim do M1** (v0.1 de ponta a ponta). Lançamento público coordenado na semana 5. Se no dia 45 ainda estiver privado, é alarme vermelho — lançar o que existir.
-7. **Benchmark honesto** vs. sqlite-vec/zvec no README, mesmo perdendo em algo — honestidade técnica é diferencial de marca.
-8. **QuantForge está excluída do portfólio** por decisão do founder; não sugerir pivôs nessa direção.
+3. **Núcleo MIT completo e genuinamente útil.** Proveniência *básica* (qual agente/sessão gravou) faz parte do núcleo. Ficam **fora do escopo dos 90 dias**: time-travel/histórico, criptografia at-rest, RBAC/auditoria/air-gap, atestação de proveniência, sync de equipe/conectores — qualquer decisão sobre se/como oferecê-los é do founder, pós-tração, fora deste repo. A criptografia fica **reservada no formato** desde o dia 1 (ADR 0007) para nunca quebrar o formato depois.
+4. **Crash-safety antes de features.** WAL primeiro. Um único bug de corrupção de dados mata a marca — confiabilidade É o moat. Fuzzing e testes de crash no CI desde o início.
+5. **Repo privado até o fim do M1** (v0.1 de ponta a ponta). Lançamento público coordenado na semana 5. Se no dia 45 ainda estiver privado, é alarme vermelho — lançar o que existir.
+6. **Benchmark honesto** vs. sqlite-vec/zvec no README, mesmo perdendo em algo — honestidade técnica é diferencial de marca.
+7. **QuantForge está excluída do portfólio** por decisão do founder; não sugerir pivôs nessa direção.
 
 ## Arquitetura (alvo)
 
@@ -55,12 +54,12 @@ crates/
 
 - Solo, sem equipe, sem capital externo; dedicação majoritária mas divide com CacheSnap/consultoria.
 - **Zero venda ativa:** nada de funil comercial, reuniões de vendas ou outbound. GitHub + conteúdo técnico + self-service.
-- Open-source como mecanismo de validação: métricas GitHub (issues de terceiros, PRs externos, downloads recorrentes, lista Pro) substituem entrevistas com clientes.
+- Open-source como mecanismo de validação: métricas GitHub (issues de terceiros, PRs externos, downloads recorrentes) substituem entrevistas com clientes.
 - SLA público de suporte "best effort" no README — proteger contra burnout de manutenção OSS.
 
 ## O que NÃO fazer
 
 - Não adicionar dependência de nuvem, telemetria obrigatória ou qualquer chamada de rede no núcleo — "nada sai da máquina" é auditável no código e é parte do produto.
-- Não implementar features premium no núcleo MIT (ver divisão na decisão 3).
+- Não implementar as features fora de escopo da decisão 3 (time-travel, criptografia, RBAC/auditoria, atestação, sync) sem decisão explícita do founder.
 - Não quebrar o formato de arquivo sem versionamento + caminho de migração.
 - Não expandir escopo do M1 (ver [ROADMAP.md](ROADMAP.md)) — 4 semanas até algo usável vence 12 meses de engine perfeita.

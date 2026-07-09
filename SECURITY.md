@@ -27,8 +27,8 @@ that matters:
 - Dependency vulnerabilities (`cargo audit` runs in CI).
 
 Out of scope: attacks requiring an attacker who already has write access to your files
-with your privileges (they can simply delete the file), and the premium encryption
-module until it ships.
+with your privileges (they can simply delete the file), and encryption at rest until it
+ships (the format reserves it, but it is not implemented yet).
 
 ## Supported versions
 

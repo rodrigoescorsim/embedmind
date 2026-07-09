@@ -27,4 +27,4 @@ acontece precisa ser claro e seguro.
 ## Consequências
 
 - Modelo mental simples; erro de segundo escritor é explícito, não deadlock nem corrupção.
-- Memória compartilhada de equipe (multi-escritor real) fica corretamente empurrada para o premium de sync (M4+), onde a coordenação é por replicação, não por lock de arquivo.
+- Memória compartilhada de equipe (multi-escritor real) fica corretamente empurrada para uma futura camada de sync (M4+, se houver demanda), onde a coordenação é por replicação, não por lock de arquivo.

@@ -10,7 +10,7 @@ Uma engine de memória embarcada, in-process, num único arquivo crash-safe, exp
 
 **Dentro do escopo v0.1 (M1):** arquivo único + WAL, KV store, busca vetorial HNSW, embeddings ONNX embarcados, MCP `remember`/`recall`/`forget`, contexto automático de projeto, CLI mínimo.
 
-**Fora do escopo v0.1 (não implementar antes da hora):** full-text (M2), filtros de metadados (M2), grafo (M3), criptografia/RBAC (premium, pós-90), sync (premium), compactação online, multi-processo escritor.
+**Fora do escopo v0.1 (não implementar antes da hora):** full-text (M2), filtros de metadados (M2), grafo (M3), criptografia/RBAC (pós-90), sync (pós-90), compactação online, multi-processo escritor.
 
 **Requisitos não-funcionais que governam tudo:**
 
@@ -72,7 +72,7 @@ Regras de dependência: cascas dependem só de `api`; `embed` é plugável (trai
 - **Página 4 KiB** com checksum xxh3 por página (detecção de corrupção silenciosa — pré-requisito da marca "nunca corrompeu").
 - **Endianness little-endian fixa**; campos de tamanho variável com length-prefix. Nada de `repr(C)` cru serializado — todo (de)serialize explícito e fuzzável.
 - **`format_version` com política escrita no código:** versão maior desconhecida → abre somente-leitura ou recusa com mensagem clara; migrações sempre via `embedmind migrate` (cópia, nunca in-place destrutivo).
-- **Criptografia (premium) reservada no formato desde o dia 1:** flag + salt/KDF no header e páginas cifráveis individualmente (AES-256-GCM por página, nonce derivado de page_no + epoch). Não implementar agora; **não** ter que quebrar o formato depois.
+- **Criptografia (futura) reservada no formato desde o dia 1:** flag + salt/KDF no header e páginas cifráveis individualmente (AES-256-GCM por página, nonce derivado de page_no + epoch). Não implementar agora; **não** ter que quebrar o formato depois.
 
 ### 3.2 Modelo de dados (record de memória)
 
@@ -83,7 +83,7 @@ MemoryRecord {
     embedding: VecRef,           // ponteiro p/ bloco de vetor (f32 ou i8 quantizado)
     metadata: BTreeMap<String, Scalar>,  // chaves livres, valores tipados
     project: Option<String>,     // escopo (ver §7)
-    provenance: Provenance {     // básico grátis (semente do premium)
+    provenance: Provenance {     // proveniência básica (núcleo)
         agent: String,           // "claude-code", "cursor", "cli", ...
         session_id: Option<String>,
         created_at: DateTime,
@@ -129,7 +129,7 @@ MemoryRecord {
 
 - Runtime: crate `ort` (ONNX Runtime, CPU). Modelo default: **all-MiniLM-L6-v2 quantizado int8** (~23 MB, 384 dims) — o melhor custo/qualidade para memória semântica curta; multilíngue razoável (importante: founder pt-BR).
 - **[ABERTO]** avaliar `bge-small` ou modelo multilíngue dedicado se o recall em português decepcionar no dogfooding. A troca é config, não código (`trait Embedder { fn embed(&self, text: &str) -> Vec<f32>; fn id(&self) -> ModelId; }`).
-- O `model_id` + dims ficam gravados no header; **misturar embeddings de modelos diferentes no mesmo arquivo é erro** — trocar de modelo exige `embedmind reembed` (que é também o caminho de upgrade quando modelos melhorarem: já previsto como feature premium de histórico/reprocessamento).
+- O `model_id` + dims ficam gravados no header; **misturar embeddings de modelos diferentes no mesmo arquivo é erro** — trocar de modelo exige `embedmind reembed` (que é também o caminho de upgrade quando modelos melhorarem).
 - Tokenização: `tokenizers` (HF) com o vocab embutido no binário. **Chunking (nível de índice, não de registro):** memórias > 510 tokens de conteúdo são divididas em janelas de 510 tokens com overlap de 64 (`Embedder::embed_chunks`); cada chunk vira **um nó a mais no HNSW apontando para o mesmo `record_id`** — o registro permanece inteiro, sem `parent_id` nem registros-filho. A busca dedup-a por `record_id` (fica o melhor chunk) e devolve a memória inteira, nunca o chunk. `vec_ref` do registro aponta para o vetor do primeiro chunk. Teto: 128 chunks por memória (~57k tokens) — acima disso `remember` falha com erro tipado em vez de indexar visão truncada. Queries usam `embed` simples (truncam na primeira janela — queries são curtas por natureza).
 
 ## 7. Recall híbrido e escopo de projeto
@@ -181,7 +181,7 @@ Sem tokio em lugar nenhum do workspace (I/O síncrono; o servidor MCP stdio é i
 | 4 | Modelo embarcado (MiniLM int8) | exigir API de embedding | "no API key" é a promessa local-first |
 | 5 | RRF para fusão híbrida | pesos aprendidos/calibrados | zero tuning, explicável, bom o suficiente |
 | 6 | Single-writer | MVCC | um agente/usuário por arquivo é o caso real |
-| 7 | Criptografia reservada no formato, não implementada | implementar já | formato não quebra depois; feature é premium |
+| 7 | Criptografia reservada no formato, não implementada | implementar já | formato não quebra depois; feature é futura (pós-90 dias) |
 | 8 | HNSW com endereçamento direto de páginas (sem tabela de localização) | tabela node_id→página na meta (encadeada) | meta O(1) para sempre; insert O(M); sem teto de nós |
 | 9 | MCP stdio JSON-RPC direto, sem SDK | `rmcp` (SDK oficial) | evita tokio/async; superfície usada é minúscula; casca continua substituível |
 | 11 | Full-text: índice invertido próprio nas páginas (BM25) | tantivy embutido | "um arquivo" + WAL único; tantivy traz storage/commit próprios (duas verdades → meio-estado após crash) |

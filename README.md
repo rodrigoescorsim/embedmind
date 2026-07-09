@@ -106,23 +106,6 @@ entries and the embedding model. Memories live in `~/.embedmind/memory.mind` by 
 
 Bindings (Python, TypeScript) are planned once the engine API stabilizes — see [ROADMAP.md](ROADMAP.md).
 
-## Free vs. Pro
-
-The core is and will remain **MIT**. Paid tiers target teams and regulated environments:
-
-| | Free (MIT) | Pro / Team / Enterprise |
-|---|---|---|
-| Engine, MCP server, CLI | ✅ Full | ✅ |
-| Vector search, single crash-safe file, WAL | ✅ v0.1 | ✅ |
-| Full-text + metadata filters (M2), graph layer (M3) | ✅ on the roadmap | ✅ |
-| Basic provenance (which agent/session wrote what) | ✅ | ✅ |
-| **History** — time-travel, memory timeline | — | ✅ |
-| **Compliance** — encryption at rest, RBAC, audit trail, air-gap support | — | ✅ |
-| **Traceability** — full per-memory provenance and attestation | — | ✅ |
-| **Integrations** — team sync, shared memory, connectors | — | ✅ |
-
-Interested in Pro/Team or embedding EmbedMind in your product (commercial license)? Watch the repo — a sign-up page is coming.
-
 ## Benchmarks
 
 In embedded infrastructure, trust is the product — so we show real numbers, including
@@ -195,4 +178,4 @@ vector table alone doesn't give you.
 
 ## License
 
-Core: [MIT](LICENSE). Premium modules: commercial license. Contributions to this repo are MIT — see [CONTRIBUTING.md](CONTRIBUTING.md) for the open-core boundary.
+[MIT](LICENSE). Contributions are MIT too — see [CONTRIBUTING.md](CONTRIBUTING.md).

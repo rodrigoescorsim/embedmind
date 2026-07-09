@@ -43,8 +43,9 @@ Windows/Linux/macOS; não commite o que não passaria na matriz.
    (`embedmind-core`) — "nada sai da máquina" é auditável e é parte do produto.
 2. **Nunca** quebrar o formato `.mind` sem bump de `format_version` + caminho de
    migração documentado em FORMAT.md (migração é sempre por cópia, nunca in-place).
-3. **Nunca** implementar feature premium no núcleo MIT (fronteira no CLAUDE.md
-   decisão 3 e no plano §8): time-travel, criptografia, RBAC, auditoria, sync.
+3. **Nunca** implementar features fora do escopo do núcleo (fronteira no CLAUDE.md
+   decisão 3 e no plano §8): time-travel, criptografia, RBAC, auditoria, sync —
+   nenhuma entra sem decisão explícita do founder.
 4. **Nunca** introduzir tokio/async no workspace (ADR 0009) nem serde no formato
    binário (todo (de)serialize é explícito e fuzzável).
 5. **Nunca** deixar lógica de domínio nas cascas (`embedmind-mcp`, `embedmind-cli`) —

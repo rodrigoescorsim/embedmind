@@ -25,4 +25,4 @@ arquivo; misturar modelos no mesmo arquivo é erro, e a troca exige `embedmind r
 
 - Instalação zero-dependência preservada; `ort` + `tokenizers` são as duas maiores deps, isoladas atrás do trait.
 - Qualidade multilíngue (pt-BR) é risco monitorado no dogfooding — **[ABERTO]** no DESIGN §12: avaliar `bge-small`/modelo multilíngue; a troca não quebra arquitetura.
-- `reembed` já nasce como caminho de upgrade de modelo (e semente da feature premium de reprocessamento/histórico).
+- `reembed` já nasce como caminho de upgrade de modelo.

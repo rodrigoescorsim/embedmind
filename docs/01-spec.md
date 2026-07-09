@@ -104,8 +104,8 @@ irrecuperável — mesmo com `kill -9` ou queda de energia no meio da escrita.
   página/record/WAL, **então** recebo erro tipado — nunca panic, nunca alocação
   desmedida (todo length-prefix é validado antes de alocar).
 - **Dado** `format_version` maior que o suportado, **então** recusa com mensagem clara
-  (política G4); flag `encrypted` ligada → recusa tipada (criptografia é premium
-  futuro).
+  (política G4); flag `encrypted` ligada → recusa tipada (criptografia é feature
+  futura, reservada no formato).
 - **Dado** um arquivo gravado com outro modelo de embedding (model_id/dims diferentes
   no header), **quando** abro, **então** recusa tipada — misturar embeddings é erro;
   o caminho é `embedmind reembed` (futuro).
@@ -212,7 +212,7 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
 
 - **Dado** memórias gravadas por agentes distintos, **quando** consulto (`recall` já
   devolve `provenance`; `stats`/filtros por agente no M3), **então** vejo qual
-  agente/sessão gravou o quê — grátis, semente da rastreabilidade premium.
+  agente/sessão gravou o quê.
 - **Verificação:** teste de round-trip de proveniência via MCP e CLI.
 
 ### S15. Não-regressão de performance [contínua]

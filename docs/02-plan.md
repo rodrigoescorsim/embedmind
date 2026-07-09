@@ -56,7 +56,7 @@ Crates futuros: `bindings/` — Python primeiro (PyO3/maturin, M2), TypeScript d
 (4 KiB, checksum xxh3 por página) + WAL sidecar transitório (`.mind-wal`, absorvido no
 checkpoint — modelo SQLite). Header (página 0): magic `MINDFMT1`, `format_version`,
 `page_size`, ponteiros (B-tree raiz, freelist, HNSW meta), metadados de embedding
-(dims, model_id, quantização), flag + salt/KDF **reservados** para criptografia premium.
+(dims, model_id, quantização), flag + salt/KDF **reservados** para criptografia futura.
 Little-endian fixo; todo (de)serialize explícito e fuzzável — nunca `repr(C)` cru.
 
 **Record de memória:**
@@ -88,7 +88,7 @@ de bytes comprovadamente seguro, cadeias de overflow para records > ~usable/4 (t
 | 0004 | Modelo embarcado (MiniLM-L6-v2 int8, ~23 MB, 384 dims) | exigir API de embedding | "no API key" é a promessa local-first |
 | 0005 | RRF (k=60) para fusão híbrida | pesos aprendidos/calibrados | zero tuning, explicável |
 | 0006 | Single-writer / multi-reader, sem MVCC | MVCC | um agente por arquivo é o caso real; lock de arquivo entre processos |
-| 0007 | Criptografia reservada no formato, não implementada | implementar já | formato não quebra depois; feature é premium |
+| 0007 | Criptografia reservada no formato, não implementada | implementar já | formato não quebra depois; feature é futura (pós-90 dias) |
 | 0008 | HNSW com endereçamento direto de páginas | tabela node_id→página | meta page O(1) para sempre; insert toca O(M) páginas; sem teto de nós |
 | 0009 | MCP stdio JSON-RPC direto, sem SDK | `rmcp` (SDK oficial) | evita tokio; superfície usada é minúscula (`initialize`, `ping`, `tools/list`, `tools/call`) |
 
@@ -174,10 +174,10 @@ CI (GitHub Actions): `cargo fmt --all --check` → `cargo clippy --workspace
 --all-targets -- -D warnings` → `cargo test --workspace` em matriz Windows/Linux/macOS
 + job de fuzz Linux.
 
-## 8. Fronteira open-core (não cruzar no código MIT)
+## 8. Fronteira de escopo do núcleo (não cruzar sem decisão do founder)
 
-Núcleo MIT: engine completa, MCP, CLI, vetor+texto+grafo, proveniência básica.
-Premium (NUNCA implementar no núcleo): time-travel/timeline, criptografia at-rest
-(formato já reservado), RBAC, trilha de auditoria, atestação de proveniência, sync de
-equipe/conectores. Na dúvida sobre uma feature: se serve ao dev solo local, é núcleo;
-se serve a time/compliance, é premium.
+Núcleo: engine completa, MCP, CLI, vetor+texto+grafo, proveniência básica.
+Fora do escopo (NUNCA implementar sem decisão explícita do founder): time-travel/
+timeline, criptografia at-rest (formato já reservado), RBAC, trilha de auditoria,
+atestação de proveniência, sync de equipe/conectores. Na dúvida sobre uma feature:
+se serve ao dev solo local, é núcleo; se serve a time/compliance, fica fora por ora.

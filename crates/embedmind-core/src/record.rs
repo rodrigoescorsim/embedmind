@@ -127,8 +127,8 @@ impl Filter {
     }
 }
 
-/// Who wrote a memory, and when. Basic provenance is free (the seed of the
-/// premium traceability tier — CLAUDE.md decision 3).
+/// Who wrote a memory, and when. Basic provenance is part of the core
+/// (CLAUDE.md decision 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provenance {
     /// Writing agent (`"claude-code"`, `"cli"`, …); empty = unknown.

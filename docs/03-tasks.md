@@ -191,7 +191,7 @@ técnico com diagramas se solicitado — publicação é do founder.
 
 ---
 
-## Fase C — M3: profundidade + funil premium — semanas 9–12
+## Fase C — M3: profundidade — semanas 9–12
 
 ### C1. Camada de grafo simples (item 3.1)
 
@@ -207,22 +207,13 @@ vs. "só vetor" que nenhum embarcado tem completo.
 ### C2. Proveniência básica exposta (item 3.2)
 
 Filtro por agente no `recall` (`filters` já existente da B3) + breakdown por agente no
-`stats`; documentar como semente da rastreabilidade premium (fronteira: atestação e
-histórico completo são pagos).
+`stats`. Atestação e histórico completo ficam fora do escopo (decisão do founder,
+pós-tração).
 
 - **DoD:** story S14 verde via MCP e CLI.
 - **Verificação:** teste round-trip de proveniência.
 
-### C3. Página "Pro/Team — coming soon" (item 3.3, parte dev)
-
-Página estática (no repo ou site simples) com a lista premium (histórico, compliance,
-rastreabilidade, integrações) + captura de e-mail funcionando — **o instrumento de
-validação de receita** do go/no-go.
-
-- **DoD:** página publicada, captura testada, link no README.
-- **Verificação:** submeter e-mail de teste e confirmar registro.
-
-### C4. [MANUAL — founder] 3º post + go/no-go do dia 90 (itens 3.4, 3.5)
+### C4. [MANUAL — founder] 3º post + go/no-go do dia 90 (itens 3.3, 3.4)
 
 Caso de uso real com números do dogfooding; avaliação contra a tabela de métricas do
 [00-prd.md](00-prd.md) §4 com as regras de decisão pré-comprometidas.
@@ -233,29 +224,24 @@ Caso de uso real com números do dogfooding; avaliação contra a tabela de mét
 
 > Nenhuma task desta fase entra em execução antes do GO registrado pelo founder.
 
-### D1. 1º módulo premium — o mais pedido na lista Pro
+### D1. Extensões além do núcleo — decisão do founder pós-tração
 
-Provavelmente criptografia at-rest (formato já reservado — ADR 0007: AES-256-GCM por
-página, nonce page_no+epoch, KDF no header) ou sync/equipe. Se houver demanda regulada:
-tier Enterprise (RBAC, air-gap, auditoria, compliance LGPD/BACEN). **Fora do núcleo
-MIT** — crate/repo separado conforme fronteira open-core do plano §8.
+Candidatas (guiadas pelas issues mais pedidas): criptografia at-rest (formato já
+reservado — ADR 0007: AES-256-GCM por página, nonce page_no+epoch, KDF no header),
+sync/equipe, time-travel/histórico, RBAC/auditoria. **Nenhuma entra sem decisão
+explícita do founder** — se/como empacotá-las é discussão externa a este repo.
 
-- **DoD:** definido junto com a escolha do módulo (novo ciclo de spec).
+- **DoD:** definido junto com a escolha da extensão (novo ciclo de spec).
 - **Verificação:** suite própria + crash tests estendidos se tocar o formato.
 
 ### D2. Vitrine da engine
 
 App pequeno de notas/memória por voz 100% local — demonstra a engine a público
-não-dev, testa 2ª fonte de receita.
+não-dev.
 
 ### D3. Bindings TypeScript (e Swift/C conforme demanda)
 
 Mesmo padrão da B5; napi-rs ou WASM a decidir por ADR na hora.
-
-### D4. [MANUAL — founder] Licença comercial de embarque
-
-Modelo SQLite/Realm (US$ 2–20k/ano por produto embarcante) — exige a engine graduada
-como crate/lib independente (consequência natural da B5/D3).
 
 ---
 
@@ -266,5 +252,5 @@ como crate/lib independente (consequência natural da B5/D3).
 | **M1 fecha** | v0.1 fim a fim: binários de release + benchmark publicado + README final; `cargo test --workspace` verde nas 3 plataformas | pré-dia 35 |
 | **Launch (M2)** | repo público + post + release v0.1.0 no ar | ≈ 11/ago/2026 (hard stop; dia 45 ainda privado = lançar o que existir) |
 | **M2 fecha** | full-text + filtros + vacuum + bindings Python released | ≈ semana 8 |
-| **M3 fecha / go-no-go** | grafo + proveniência + página Pro no ar; decisão pela tabela do PRD §4 | ≈ 05/out/2026 |
+| **M3 fecha / go-no-go** | grafo + proveniência no ar; decisão pela tabela do PRD §4 | ≈ 05/out/2026 |
 | **M4+** | somente com GO explícito | pós-90 dias |

@@ -45,5 +45,4 @@ Pre-v0.1, under active development.
 
 ## License
 
-MIT (core). Premium modules: commercial license. See the
-[repository](https://github.com/rodrigoescorsim/embedmind).
+MIT. See the [repository](https://github.com/rodrigoescorsim/embedmind).

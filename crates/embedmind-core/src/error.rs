@@ -39,8 +39,8 @@ pub enum Error {
         supported: u32,
     },
 
-    /// The `encrypted` header flag is set. Encryption is a premium module and
-    /// is not supported by this build (see docs/adr/0007).
+    /// The `encrypted` header flag is set. Encryption is reserved in the format
+    /// but not implemented yet, so no build supports it (see docs/adr/0007).
     #[error("file is encrypted; this build does not support encrypted files")]
     Encrypted,
 

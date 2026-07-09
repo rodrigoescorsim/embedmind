@@ -31,9 +31,9 @@ arquivo único, vetor + texto + grafo juntos, criptografável, do desktop ao mob
    via GitHub. É quem dá estrela, abre issue e valida.
 2. **Times de agentes custom** (LangChain e afins, destravados pelos bindings Python
    no M2) — multiplicador de audiência.
-3. **Ambientes regulados** (banco/fintech — tese ex-CodeVault): o dev descobre e usa
-   grátis; o compliance da empresa exige o tier pago (criptografia, RBAC, auditoria,
-   air-gap). Self-service, **zero venda B2B ativa**.
+3. **Ambientes regulados** (banco/fintech): descobrem via GitHub; exigem criptografia,
+   RBAC, auditoria e air-gap — direção futura (fora do escopo v0.1, criptografia
+   reservada no formato desde o dia 1).
 
 ## 3. Proposta de valor e diferencial
 
@@ -66,10 +66,9 @@ Métricas do go/no-go (~7 semanas pós-launch):
 | Issues/discussões de terceiros | < 10 | 10–40 | > 40 | **uso real** |
 | PRs externos aceitos | 0 | 1–5 | > 5 | comunidade nascendo |
 | Downloads recorrentes/semana | < 100 | 100–1.000 | > 1.000 | retenção |
-| E-mails lista Pro + perguntas comerciais | 0–2 | 3–15 | > 15 | **intenção de receita** |
 
-**Regras de decisão (compromisso prévio):** 2+ colunas 🟢 (sendo uma *issues* ou *lista
-Pro*) → GO para o 1º módulo premium (M4). Maioria 🟡 → mais 90 dias no núcleo OSS com um
+**Regras de decisão (compromisso prévio):** 2+ colunas 🟢 (sendo uma *issues*) → GO
+para M4–M6. Maioria 🟡 → mais 90 dias no núcleo OSS com um
 reposicionamento. Maioria 🔴 com launch bem executado → reempacotar a mesma engine com
 outra porta de entrada; só após 2 empacotamentos fracos a tese se considera refutada.
 
@@ -87,34 +86,18 @@ testes de crash-recovery + fuzzing no CI.
 |---|---|
 | Full-text + filtros de metadados | M2 — vetor sozinho já entrega o "aha"; full-text sem usuários é polimento prematuro |
 | Camada de grafo | M3 — é o diferencial de profundidade, não de entrada |
-| Criptografia/RBAC/auditoria | premium pós-90 dias — mas **reservados no formato** desde o dia 1 (não quebrar formato depois) |
-| Sync/equipe | premium — sem demanda comprovada ainda |
+| Criptografia/RBAC/auditoria | pós-90 dias — mas **reservados no formato** desde o dia 1 (não quebrar formato depois) |
+| Sync/equipe | pós-90 dias — sem demanda comprovada ainda |
 | Vacuum online / compactação | `forget` é soft-delete; vacuum offline chega na v0.2 |
 | Multi-processo escritor / MVCC | single-writer cobre o caso real (um agente por arquivo) |
 | Bindings Python/TS | M2/M4 — exigem API estável primeiro |
 
-## 6. Modelo de negócio (open-core)
-
-Núcleo **MIT completo e genuinamente útil** — engine, MCP server, CLI, vetor + texto +
-grafo, proveniência básica (qual agente/sessão gravou; semente da rastreabilidade paga).
-
-Premium em 4 classes: **histórico** (time-travel, timeline de memória) ·
-**compliance** (criptografia at-rest, RBAC, trilha de auditoria, air-gap) ·
-**rastreabilidade** (proveniência plena com atestação) · **integrações** (sync de
-equipe, memória compartilhada, conectores). Mais **licença comercial de embarque**
-(modelo SQLite/Realm, US$ 2–20k/ano por produto embarcante) quando a engine graduar
-para crate independente.
-
-Funil: página "Pro/Team — coming soon" com captura de e-mail instrumentada já no M3 —
-é o instrumento de validação de receita do go/no-go.
-
-## 7. Riscos de produto e mitigação
+## 6. Riscos de produto e mitigação
 
 | Risco | Mitigação |
 |---|---|
 | Commoditização (sqlite-vec/LanceDB/zvec com times pagos) | 4 semanas até usável; posicionamento "memória para agentes", não "database" |
 | MCP perder relevância | engine em camadas; casca MCP substituível (~300 linhas) |
 | Bug de corrupção de dados (mata o moat) | WAL antes de features; fuzzing + crash tests no CI; postmortem público em caso de incidente |
-| Estrelas sem receita | página Pro instrumentada no M3; decisão do dia 90 é forçada por regra prévia |
 | Burnout OSS (founder solo) | SLA "best effort" público; releases em ritmo fixo quinzenal; feature grande só com 2+ pedidos |
 | Launch de primeira vez (sem satélite de calibração) | material de launch (post, GIF, FAQ) preparado dentro do M1, não na véspera do dia 35 |

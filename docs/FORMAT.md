@@ -83,7 +83,7 @@ Format-level guarantees:
 | 58 | 2 | `embedding_quant` (u16) | 0 = f32, 1 = i8 (reserved for M3) |
 | 60 | 4+n | `embedding_model_id` | length-prefixed UTF-8, max 64 bytes |
 | 128 | 4 | `flags` (u32) | bit 0 = `encrypted` (**reserved**, must be 0 in v1) |
-| 132 | 16 | `kdf_salt` | reserved for encryption (premium), zero in v1 |
+| 132 | 16 | `kdf_salt` | reserved for future encryption, zero in v1 |
 | 148 | 8 | `kdf_params` | reserved, zero in v1 |
 | 156 | 8 | `fts_root_page` (u64) | full-text index meta page; 0 = none (§11). Added in `format_version` 2 (ADR 0011); this offset was reserved-and-zero in v1, so a v1 file reads back with 0 = no full-text index |
 | 164 | 8 | `graph_root_page` (u64) | graph meta page; 0 = none (§12). Added in `format_version` 3 (ADR 0012); this offset was reserved-and-zero in v1/v2, so an older file reads back with 0 = no graph |
@@ -95,8 +95,8 @@ refuse to open read-write. It MAY open read-only if the major layout (this table
 unchanged. Migrations are always copy-based (`embedmind migrate` writes a new file),
 never destructive in-place.
 
-**Encryption reservation:** the `encrypted` flag, `kdf_salt`, and `kdf_params` exist so the
-premium encryption module (AES-256-GCM per page, nonce = `page_no` + epoch) can ship
+**Encryption reservation:** the `encrypted` flag, `kdf_salt`, and `kdf_params` exist so a
+future encryption module (AES-256-GCM per page, nonce = `page_no` + epoch) can ship
 without a format break. v1 writers zero them; v1 readers MUST refuse files with bit 0 set.
 
 ## 5. Memory records (BTREE_LEAF)

@@ -31,5 +31,4 @@ public contract (see [`docs/FORMAT.md`](https://github.com/rodrigoescorsim/embed
 
 ## License
 
-MIT. See the [repository](https://github.com/rodrigoescorsim/embedmind) for the
-open-core boundary.
+MIT. See the [repository](https://github.com/rodrigoescorsim/embedmind).

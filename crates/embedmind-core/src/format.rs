@@ -53,7 +53,7 @@ pub const WAL_HEADER_LEN: usize = 32;
 /// followed by one full page image.
 pub const WAL_FRAME_HEADER_LEN: usize = 32;
 
-/// Header `flags` bit 0: file is encrypted (premium; reserved, must be 0 in v1).
+/// Header `flags` bit 0: file is encrypted (reserved for the future, must be 0 in v1).
 pub const FLAG_ENCRYPTED: u32 = 1;
 
 /// Page types (`docs/FORMAT.md` §3.1).

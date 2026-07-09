@@ -6,8 +6,8 @@ Plano técnico derivado do plano de construção open-core de jul/2026 (`plano_c
 
 ```
 Semana 0        M1 (sem. 1–4)      M2 (sem. 5–8)       M3 (sem. 9–12)      Pós-90 dias
-README battle → núcleo mínimo   → lançamento público → grafo + funil Pro → M4–M6 (se GO)
-(gate: decisão)  (repo privado)    (dia 35, hard stop)  (go/no-go dia 90)   premium + vitrine
+README battle → núcleo mínimo   → lançamento público → grafo + proveniência → M4–M6 (se GO)
+(gate: decisão)  (repo privado)    (dia 35, hard stop)  (go/no-go dia 90)   extensões + vitrine
 ```
 
 > **Nota (atualizada em 07/jul/2026):** o satélite de calibração **AgentLock foi removido do caminho** por decisão do founder — o M1 começa imediatamente após a semana 0, e o lançamento do EmbedMind é a estreia da máquina de lançamento. Consequência assumida: os erros de primeira vez (post, Show HN, cadência de resposta) serão queimados no próprio EmbedMind; mitigação: preparar o material de launch (post, GIF, FAQ) com antecedência dentro do M1, não na véspera do dia 35.
@@ -18,7 +18,7 @@ README battle → núcleo mínimo   → lançamento público → grafo + funil P
 
 ## Semana 0 — Gate de decisão (README-driven development)
 
-- [x] Escrever o README impecável do EmbedMind (este repo) — pitch, GIF imaginado, tabela free/premium.
+- [x] Escrever o README impecável do EmbedMind (este repo) — pitch, GIF imaginado.
 - [x] Compará-lo com o README do Enclave (desafiante, mesma barreira técnica de sistemas).
 - [x] **Decisão da aposta principal ao fim da semana 0.** Critério de desempate: *qual você usaria todo dia*.
 - [ ] Agendar no calendário: data-limite de launch público (dia 35 do M1 ≈ 11/ago/2026), revisão de go/no-go (dia 90 ≈ 05/out/2026).
@@ -62,17 +62,16 @@ Repo **privado** até o fim do marco. Prioridade absoluta: crash-safety antes de
 
 ---
 
-## M3 — Semanas 9–12: aprofundar o núcleo + instrumentar o funil premium
+## M3 — Semanas 9–12: aprofundar o núcleo
 
 | # | Entrega | Depende de |
 |---|---|---|
 | 3.1 | **Camada de grafo simples** (entidades + relações entre memórias) — o diferencial vs. "só vetor" que nenhum embarcado tem completo | 2.3, 2.4 |
-| 3.2 | **Proveniência básica** por memória (qual agente/sessão gravou) — grátis, semente da rastreabilidade premium | 1.4 |
-| 3.3 | Página **"Pro/Team — coming soon"** com lista premium (histórico, compliance, rastreabilidade, integrações) + captura de e-mail — *o instrumento de validação de receita* | 2.1 |
-| 3.4 | 3º post: caso de uso real com números ("30 dias usando memória persistente no meu fluxo com agentes") | dogfooding contínuo |
-| 3.5 | **Avaliação go/no-go do dia 90** | 3.3 + métricas abaixo |
+| 3.2 | **Proveniência básica** por memória (qual agente/sessão gravou) | 1.4 |
+| 3.3 | 3º post: caso de uso real com números ("30 dias usando memória persistente no meu fluxo com agentes") | dogfooding contínuo |
+| 3.4 | **Avaliação go/no-go do dia 90** | métricas abaixo |
 
-**🎯 Milestone:** núcleo diferenciado (vetor + texto + grafo), funil premium instrumentado, dados para a decisão de 90 dias.
+**🎯 Milestone:** núcleo diferenciado (vetor + texto + grafo), dados para a decisão de 90 dias.
 
 ### Métricas do go/no-go (dia 90, ~7 semanas pós-launch)
 
@@ -82,10 +81,9 @@ Repo **privado** até o fim do marco. Prioridade absoluta: crash-safety antes de
 | Issues/discussões de terceiros | < 10 | 10–40 | > 40 | **Uso real** |
 | PRs externos aceitos | 0 | 1–5 | > 5 | Comunidade nascendo |
 | Downloads recorrentes/semana | < 100 | 100–1.000 | > 1.000 | Retenção |
-| E-mails lista Pro + perguntas comerciais | 0–2 | 3–15 | > 15 | **Intenção de receita** |
 
 **Regras de decisão (compromisso prévio):**
-- **2+ colunas 🟢** (sendo uma delas *issues* ou *lista Pro*) → **GO**: iniciar o 1º módulo premium (M4).
+- **2+ colunas 🟢** (sendo uma delas *issues*) → **GO**: seguir para M4–M6.
 - **Maioria 🟡** → mais 90 dias no núcleo OSS com *um* reposicionamento de mensagem.
 - **Maioria 🔴** com launch bem executado → **reempacotar** (mesma engine, outra porta de entrada). Só após 2 empacotamentos fracos a tese se considera refutada.
 - **Cláusula anti-armadilha-do-construtor:** repo ainda privado no dia 45 = alarme vermelho; lançar o que existir.
@@ -96,10 +94,9 @@ Repo **privado** até o fim do marco. Prioridade absoluta: crash-safety antes de
 
 | Frente | Conteúdo | Depende de |
 |---|---|---|
-| **1º módulo premium** | O mais pedido na lista Pro — provavelmente sync/equipe ou criptografia; se houver demanda regulada: tier **Enterprise ex-CodeVault** (RBAC, air-gap, auditoria, compliance LGPD/BACEN) | 3.3 (sinal da lista), 3.2 |
-| **Vitrine da engine** | App pequeno de notas/memória por voz 100% local (Chefe de Gabinete em miniatura) — demonstra a engine ao público não-dev, testa 2ª fonte de receita | Engine estável, 3.1 |
+| **Vitrine da engine** | App pequeno de notas/memória por voz 100% local (Chefe de Gabinete em miniatura) — demonstra a engine ao público não-dev | Engine estável, 3.1 |
 | **Bindings adicionais** | TypeScript; Swift/C conforme demanda | 2.5 |
-| **Licença comercial de embarque** | Modelo SQLite/Realm: US$ 2–20k/ano por produto embarcante | Engine como crate/lib independente |
+| **Extensões além do núcleo** | Time-travel/histórico, criptografia at-rest, RBAC/auditoria, sync de equipe — o que priorizar (e como empacotar) é decisão do founder pós-tração, guiada pelas issues mais pedidas | GO confirmado |
 | **Segunda aposta** | Avaliar tirar o **Paperjet** do banco | GO confirmado + apetite |
 | **Ingestão de código como fonte de memória** | Indexar localmente (Tree-sitter, sem LLM externo) código/docs do projeto como memórias além das gravadas via `remember` — mesma promessa "nada sai da máquina", mas cobrindo conhecimento *já existente*, não só o acumulado em sessão. Avaliar após GO; risco de virar concorrência direta de players como o Graphify (YC, tração grande) em vez de nicho adjacente | Engine estável, 3.1 (grafo) |
 
@@ -116,9 +113,8 @@ WAL/arquivo único (1.1)
  │    └── Full-text (2.3)    ├── MCP remember/recall/forget (1.4)
  │         └── Filtros (2.4) ┘    ├── Contexto de projeto (1.5)
  │              └── Grafo (3.1)   └── Proveniência básica (3.2)
- │                                      └── Rastreabilidade premium (M4+)
  ├── Fuzzing/crash tests (1.8) — contínuo
- └── Criptografia at-rest (M4+) ── RBAC/auditoria/air-gap (Enterprise)
+ └── Criptografia at-rest (reservada no formato; M4+, se GO)
 API estável ── Bindings Python (2.5) ── Bindings TS/Swift (M4+)
 ```
 
@@ -127,5 +123,4 @@ API estável ── Bindings Python (2.5) ── Bindings TS/Swift (M4+)
 - **Commoditização** (sqlite-vec/LanceDB/zvec com times pagos) → por isso M1 = 4 semanas até usável, e o posicionamento é "memória para agentes", não "database para RAG".
 - **MCP perder relevância** → engine em camadas; a casca MCP é substituível.
 - **Corrupção de dados** (mata o moat de confiabilidade) → WAL antes de features, fuzzing no CI, honestidade brutal no changelog.
-- **Estrelas sem receita** → página Pro instrumentada já no M3; a decisão do dia 90 é forçada.
 - **Burnout OSS** → SLA "best effort" público, releases em ritmo fixo, feature grande só com 2+ pedidos.
