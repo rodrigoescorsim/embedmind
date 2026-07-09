@@ -143,3 +143,95 @@ jobs:
         with:
           files: dist/${{ matrix.asset }}
           fail_on_unmatched_files: true
+
+  # Python bindings (B5, roadmap 2.5): build an abi3 wheel per first-class
+  # platform (one wheel covers CPython 3.9+ on that OS). Gated on the same
+  # `test` job as the binaries — we never ship a wheel the suite would fail.
+  # Publishing to PyPI stays MANUAL (founder), like crates.io: this job builds
+  # and attaches the wheels, it does not upload them anywhere.
+  wheels:
+    name: wheels (${{ matrix.target }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python
+      - name: Cache ONNX Runtime download (ort pulls this outside target/)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
+          key: ort-dylib-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      # Build the abi3 wheel. The bindings crate is its own workspace
+      # (bindings/python), so maturin runs against that manifest directly.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --manifest-path bindings/python/Cargo.toml
+          # Linux wheels build in a manylinux container by default; the ort
+          # ONNX Runtime download works there, but pin the image explicitly so
+          # the glibc floor is predictable.
+          manylinux: ${{ matrix.os == 'ubuntu-latest' && '2_28' || 'auto' }}
+
+      # Prove the freshly built wheel installs and its full remember → recall →
+      # forget → stats → vacuum cycle works — the pytest E2E suite (the Python
+      # half of scripts/smoke_install.sh's Rust cycle). The Rust↔Python
+      # round-trip tests skip here (no CLI binary in this job); they run in the
+      # `test` job's `cargo test` on every platform.
+      - name: Install wheel and run pytest
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pip install --find-links dist --no-index embedmind
+          python -m pytest bindings/python/tests -v
+
+      - name: Verify wheel size (< 40 MB, model embedded)
+        shell: bash
+        run: |
+          wheel=$(ls dist/*.whl | head -n1)
+          size=$(wc -c < "$wheel")
+          human=$(( size / 1024 / 1024 ))
+          echo "Wheel $(basename "$wheel"): ${size} bytes (~${human} MiB), ceiling ${MAX_ARTIFACT_BYTES} bytes"
+          if [ "$size" -gt "$MAX_ARTIFACT_BYTES" ]; then
+            echo "::error::Wheel ${size} bytes exceeds the ${MAX_ARTIFACT_BYTES}-byte ceiling (docs/01-spec.md S8 NFR)."
+            exit 1
+          fi
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: Attach wheels to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          fail_on_unmatched_files: true
