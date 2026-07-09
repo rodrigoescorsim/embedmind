@@ -75,46 +75,79 @@ cargo publish --dry-run -p embedmind-core
 **depois** que o `embedmind-core` (e, para o CLI, o `embedmind-mcp`) estiverem
 realmente no crates.io — ver seção da ordem acima.
 
-## ⚠️ Limite de tamanho do crates.io (bloqueia `embedmind-core`)
+## Limite de tamanho do crates.io (`embedmind-core`) — resolvido por `build.rs`
 
 O crates.io impõe um teto de **10 MiB por crate** (pacote comprimido). O
-`embedmind-core` embarca o modelo ONNX quantizado + tokenizer via
-`include_bytes!` (ADR [0004](adr/0004-modelo-de-embedding-embarcado.md)), então o
-pacote fica em **~16 MiB comprimido**:
+modelo ONNX quantizado (`model_quantized.onnx`, ~22 MB não-comprimido) sozinho
+estoura esse teto: com ele embarcado no pacote fonte, o `embedmind-core`
+empacotava em **~16 MiB comprimido** e o `cargo publish` real seria **rejeitado**
+(`crate too large`). O `--dry-run` não pegava isso, pois o teto é aplicado **no
+servidor**, no upload — o dry-run não sobe nada.
+
+**Resolução (implementada, sem passo manual no crates.io):** o modelo ONNX **não
+vai** dentro do pacote fonte publicado; é **re-baixado e verificado por checksum
+em tempo de build** por `crates/embedmind-core/build.rs`, no mesmo espírito que o
+`ort` já usa com `download-binaries` para a lib do ONNX Runtime. O
+**comportamento observável não muda**: o binário final continua embarcando o
+modelo via `include_bytes!` (ADR [0004](adr/0004-modelo-de-embedding-embarcado.md)),
+então `cargo install embedmind` roda sem rede em runtime e "nada sai da máquina".
+O que muda é apenas o que vai **dentro** do `.crate` publicado.
+
+Como o `build.rs` resolve o modelo (nunca embarca bytes não-verificados):
+
+1. **Checkout de dev / CI** — o asset está na árvore
+   (`assets/all-MiniLM-L6-v2/onnx/model_quantized.onnx`). Usa direto, sem rede.
+2. **Build a partir do crate publicado** — o asset foi `exclude`do do pacote,
+   então baixa-o **uma vez** de um export content-addressed do Hugging Face
+   (`Xenova/all-MiniLM-L6-v2`) para um cache local (`$CARGO_HOME/embedmind/models/`,
+   com fallback para `OUT_DIR`), keyed pelo checksum.
+
+Nos dois caminhos os bytes são conferidos contra um **SHA-256 fixado**
+(`afdb6f1a…`, 22_972_370 bytes) antes de qualquer `include_bytes!` — um download
+truncado, um mirror trocado ou um cache adulterado falham o build em vez de
+serem linkados. O artefato do Hugging Face foi verificado **byte a byte**
+idêntico ao asset in-tree, então checkout e download produzem o **mesmo binário**.
+O tokenizer/vocab (bem abaixo de 1 MB) continuam embarcados no crate como antes.
+
+Escape hatch offline/air-gapped e vendoring: apontar
+`EMBEDMIND_MODEL_ONNX=/caminho/model_quantized.onnx` para uma cópia pré-baixada
+(ainda checksum-verificada — sem bypass de integridade).
+
+Tamanho do pacote depois da mudança:
 
 ```
 Packaging embedmind-core ...
-Packaged 30 files, 23.1MiB (16.2MiB compressed)
+Packaged 36 files, 1.4MiB (452KiB compressed)      # era 16.2 MiB comprimido
 ```
 
-O `--dry-run` **passa** localmente porque o teto é aplicado **no servidor**, no
-upload real — o dry-run não sobe nada. O `cargo publish` real do `embedmind-core`
-será **rejeitado** (`crate too large`) enquanto o teto padrão valer.
+O `.crate` comprimido (**~452 KiB**) é o que o crates.io compara com o teto de
+10 MiB — folga de sobra, sem pedido manual de aumento de limite.
 
-**Resolução (`[MANUAL — founder]`, antes de publicar o core):** solicitar
-aumento de limite ao crates.io. É o procedimento padrão para crates que embarcam
-modelos ML; preserva o ADR 0004 (modelo embarcado → `cargo install embedmind`
-funciona sem rede, sem passo extra) e a promessa de instalação em um comando.
+Verificação de que o build a partir do pacote publicado ainda funciona (compila
+o `.crate` extraído num diretório isolado, onde o modelo não existe → força o
+download + checksum do `build.rs`):
 
-- Pedir via o formulário/e-mail do crates.io (help@crates.io), citando o crate
-  `embedmind-core`, o tamanho (~16 MiB) e a razão (modelo de embedding embarcado,
-  local-first, sem download em runtime).
-- Só publicar o core **depois** de o aumento ser concedido.
+```bash
+cargo package -p embedmind-core     # empacota E compila a partir do extraído; deve terminar sem erro
+```
 
-Alternativas **rejeitadas** para caber nos 10 MiB (não fazer sem decisão do
-founder — todas contrariam decisões vigentes):
+Alternativas **rejeitadas** (contrariam decisões vigentes):
 
-- **Baixar o modelo em build/runtime** — reintroduz rede/dependência externa;
-  contraria ADR 0004 e a promessa "nada sai da máquina" / air-gap.
-- **`exclude` dos assets + fetch em runtime** — mesmo problema; quebra o
-  `cargo install` out-of-the-box.
+- **Pedir aumento de limite ao crates.io e manter o modelo embarcado no pacote**
+  — funciona, mas depende de um passo manual/aprovação externa a cada bump de
+  formato; a estratégia de `build.rs` remove essa dependência sem custo de UX.
+- **Fetch do modelo em *runtime*** — reintroduz rede no núcleo em runtime;
+  contraria ADR 0004 e "nada sai da máquina" / air-gap. (O download aqui é em
+  *build time* e o binário resultante é auto-contido — a promessa de runtime
+  fica intacta.)
 - **Modelo menor só para caber no teto** — decisão de qualidade (recall/pt-BR),
   fora de escopo aqui; já rastreada como aberta (DESIGN §12, ADR 0004/0010).
 
 > Nota: o teto de **40 MB** do artefato de release (ADR
 > [0010](adr/0010-teto-de-tamanho-governa-artefato-comprimido.md),
 > `release.yml`) é um NFR **diferente** — governa o binário comprimido que o
-> usuário baixa das Releases, não o pacote do crates.io.
+> usuário baixa das Releases (modelo embarcado, ~inalterado por esta mudança),
+> não o pacote do crates.io.
 
 ## Smoke test de instalação (binário pré-compilado)
 
@@ -199,10 +232,13 @@ residual só apareceria após um crash e seria reincorporado na próxima abertur
 
 ## Passos de publicação (dia do launch — `[MANUAL — founder]`)
 
-Pré-requisitos: aumento de limite do crates.io concedido para `embedmind-core`;
-`cargo login` feito; versão final definida (hoje `0.1.0-dev` em
+Pré-requisitos: `cargo login` feito; versão final definida (hoje `0.1.0-dev` em
 `[workspace.package]` — trocar para a versão de release, ex. `0.1.0`, antes de
-publicar).
+publicar). O limite de 10 MiB do crates.io **não** é mais bloqueio: o
+`embedmind-core` empacota em ~452 KiB (o modelo ONNX é baixado+verificado por
+`build.rs`, não vai no pacote — ver seção acima). O upload do core precisa de
+rede na máquina do publicador *e* de rede em quem for buildar a partir do crate
+publicado (para o download do modelo em build time).
 
 ```bash
 cargo publish -p embedmind-core     # 1 — esperar aparecer no índice
