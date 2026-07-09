@@ -214,22 +214,52 @@ impl Store {
     /// whole, each chunk becomes one more index entry pointing at it, and
     /// `recall` returns the memory once (deduped by id) if *any* chunk
     /// matches. The record's `vec_ref` points at the first chunk's vector.
+    ///
+    /// Explicit graph data ([`MemoryDraft::entity`]/[`MemoryDraft::relation`],
+    /// S13, `docs/adr/0012`) is written in the same transaction: the memory
+    /// enters with its entities and relations complete, or not at all. A
+    /// relation whose target does not exist (or was already forgotten) is a
+    /// typed error — dangling edges are never born, they can only *become*
+    /// dangling via a later [`Store::forget`].
     pub fn remember(&mut self, draft: MemoryDraft) -> Result<Memory> {
+        let MemoryDraft {
+            content,
+            project,
+            metadata,
+            agent,
+            session_id,
+            entities,
+            relations,
+        } = draft;
         let mut record = MemoryRecord {
             id: Ulid::new(),
             tombstone: false,
-            content: draft.content,
+            content,
             vec_ref: None,
-            project: draft.project,
+            project,
             provenance: Provenance {
-                agent: draft.agent,
-                session_id: draft.session_id,
+                agent,
+                session_id,
                 created_at_micros: now_micros(),
             },
-            metadata: draft.metadata,
+            metadata,
         };
 
         let mut txn = self.pager.begin()?;
+        // Relation targets must exist and be live *now* (ADR 0012). Checked
+        // inside the txn, before any write buffers up, so a failure rolls
+        // back to exactly nothing.
+        for (_, target) in &relations {
+            let live = match btree::get(&txn, txn.root_btree_page(), &target.to_bytes())? {
+                Some(bytes) => !MemoryRecord::decode(&bytes)?.tombstone,
+                None => false,
+            };
+            if !live {
+                return Err(Error::InvalidArgument(
+                    "relation target does not exist or was forgotten",
+                ));
+            }
+        }
         if let Some(embedder) = &self.embedder {
             for mut vector in embedder.embed_chunks(&record.content)? {
                 index::normalize(&mut vector);
@@ -244,6 +274,7 @@ impl Store {
         // not stored at all — no torn state to recover into. Runs whether or
         // not an embedder is present: full-text is independent of vectors.
         index::fts::index_document(&mut txn, record.id, &record.content)?;
+        index::graph::add_memory(&mut txn, record.id, &entities, &relations)?;
         let bytes = record.encode()?;
         btree::insert(&mut txn, record.id.to_bytes(), &bytes)?;
         txn.commit()?;
@@ -391,6 +422,40 @@ impl Store {
                 });
             }
         }
+
+        // --- Optional 1-hop graph expansion (S13, `docs/adr/0012`) --------
+        // Each direct hit's relation edges (both directions) pull connected
+        // context: neighbors not already in the result, passing the same
+        // `keep` (live + in-scope + filters) as the ranked halves, appended
+        // *after* the direct hits with score 0.0 — they are connected
+        // context, not ranked matches, and never displace one. One hop only:
+        // neighbors of neighbors are not followed.
+        if query.expand_related {
+            let graph_root = self.pager.header().graph_root_page;
+            let mut seen: std::collections::BTreeSet<Ulid> =
+                hits.iter().map(|h| h.memory.id).collect();
+            let direct: Vec<Ulid> = hits.iter().map(|h| h.memory.id).collect();
+            for id in direct {
+                let Some(adj) = index::graph::memory_graph(&self.pager, graph_root, id)? else {
+                    continue;
+                };
+                for edge in adj.edges {
+                    if seen.insert(edge.other)
+                        && keep(edge.other)
+                        && let Some(rec) = load(edge.other)?
+                    {
+                        hits.push(Recalled {
+                            memory: Memory::from_record(rec),
+                            score: 0.0,
+                        });
+                    }
+                }
+            }
+            if let Some(e) = filter_error.borrow_mut().take() {
+                return Err(e);
+            }
+        }
+
         Ok(RecallOutcome {
             hits,
             degraded_to_vector_only,
@@ -587,6 +652,54 @@ impl Store {
         Ok(true)
     }
 
+    /// Memories related to `id` through explicit relation edges, both
+    /// directions (S13, `docs/adr/0012`). Each hit carries the relation kind
+    /// and whether the edge points out of `id` or into it. Tombstoned
+    /// neighbors are re-checked at query time and never returned — a relation
+    /// to a forgotten memory disappears with the tombstone. Empty when `id`
+    /// has no graph data or the file predates the graph layer
+    /// (`graph_root_page == 0`) — older files degrade, never error.
+    pub fn related(&self, id: Ulid) -> Result<Vec<RelatedMemory>> {
+        let graph_root = self.pager.header().graph_root_page;
+        let Some(adj) = index::graph::memory_graph(&self.pager, graph_root, id)? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for edge in adj.edges {
+            if let Some(memory) = self.get(edge.other)? {
+                out.push(RelatedMemory {
+                    memory,
+                    kind: edge.kind,
+                    outgoing: edge.outgoing,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Live memories tagged with `entity`, in id (time) order — the
+    /// `related(entity)` navigation of S13. Same liveness re-check and
+    /// old-file degradation as [`Store::related`].
+    pub fn entity_members(&self, entity: &str) -> Result<Vec<Memory>> {
+        let graph_root = self.pager.header().graph_root_page;
+        let mut out = Vec::new();
+        for id in index::graph::entity_members(&self.pager, graph_root, entity)? {
+            if let Some(memory) = self.get(id)? {
+                out.push(memory);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The entity tags stored for one memory, sorted ascending. Empty when
+    /// the memory has none (or the file has no graph layer).
+    pub fn entities_of(&self, id: Ulid) -> Result<Vec<String>> {
+        let graph_root = self.pager.header().graph_root_page;
+        Ok(index::graph::memory_graph(&self.pager, graph_root, id)?
+            .map(|g| g.entities)
+            .unwrap_or_default())
+    }
+
     /// Reclaims the space held by forgotten memories and rebuilds the indexes
     /// (`docs/adr/0003`, story S11). `forget` only tombstones — the record, its
     /// vector slots and its full-text postings all stay on disk, filtered out
@@ -694,8 +807,27 @@ impl Store {
             embedder: self.embedder.clone(),
         };
         let mut dst = Store::create_with(Arc::clone(&self.vfs), dest, opts)?;
+        let graph_root = self.pager.header().graph_root_page;
         for memory in self.iter() {
             let memory = memory?;
+            // Graph data survives the rebuild filtered to the living (ADR
+            // 0012): dead memories' entities never come over, and an edge is
+            // kept only when *both* ends are live. Only the outgoing half is
+            // re-inserted — `add_memory` mirrors the incoming half at the
+            // target, so each surviving relation is written exactly once.
+            let (entities, relations) =
+                match index::graph::memory_graph(&self.pager, graph_root, memory.id)? {
+                    Some(g) => {
+                        let mut relations = Vec::new();
+                        for edge in g.edges {
+                            if edge.outgoing && self.get(edge.other)?.is_some() {
+                                relations.push((edge.kind, edge.other));
+                            }
+                        }
+                        (g.entities, relations)
+                    }
+                    None => (Vec::new(), Vec::new()),
+                };
             // Reconstruct the on-disk record; `iter` already filtered tombstones.
             let record = MemoryRecord {
                 id: memory.id,
@@ -706,16 +838,23 @@ impl Store {
                 provenance: memory.provenance,
                 metadata: memory.metadata,
             };
-            dst.insert_record(record)?;
+            dst.insert_record(record, &entities, &relations)?;
         }
         dst.close()
     }
 
     /// Inserts a fully-formed [`MemoryRecord`] verbatim (id, provenance and
-    /// metadata preserved), re-deriving its vector and full-text index entries
-    /// — the write half of [`Store::vacuum`]'s rebuild. Unlike [`Store::remember`]
-    /// it neither mints a new id nor a timestamp; the record is stored as given.
-    fn insert_record(&mut self, mut record: MemoryRecord) -> Result<Memory> {
+    /// metadata preserved), re-deriving its vector, full-text and graph index
+    /// entries — the write half of [`Store::vacuum`]'s rebuild. Unlike
+    /// [`Store::remember`] it neither mints a new id nor a timestamp, and it
+    /// does **not** re-validate relation targets: the caller pre-filtered
+    /// them to live memories, which may simply not be re-inserted yet.
+    fn insert_record(
+        &mut self,
+        mut record: MemoryRecord,
+        entities: &[String],
+        relations: &[(String, Ulid)],
+    ) -> Result<Memory> {
         let mut txn = self.pager.begin()?;
         if let Some(embedder) = &self.embedder {
             for mut vector in embedder.embed_chunks(&record.content)? {
@@ -727,6 +866,7 @@ impl Store {
             }
         }
         index::fts::index_document(&mut txn, record.id, &record.content)?;
+        index::graph::add_memory(&mut txn, record.id, entities, relations)?;
         let bytes = record.encode()?;
         btree::insert(&mut txn, record.id.to_bytes(), &bytes)?;
         txn.commit()?;
@@ -766,11 +906,15 @@ impl Store {
             }
         }
         let header = self.pager.header();
+        let (graph_entities, graph_relations) =
+            index::graph::stats(&self.pager, header.graph_root_page)?;
         Ok(StoreStats {
             live_memories,
             forgotten_memories,
             index_entries: index::node_count(&self.pager, header.hnsw_meta_page)?,
             fts_documents: index::fts::indexed_documents(&self.pager, header.fts_root_page)?,
+            graph_entities,
+            graph_relations,
             page_size: header.page_size,
             page_count: header.page_count,
             file_bytes: u64::from(header.page_size) * header.page_count,
@@ -853,6 +997,8 @@ pub struct MemoryDraft {
     metadata: BTreeMap<String, Scalar>,
     agent: String,
     session_id: Option<String>,
+    entities: Vec<String>,
+    relations: Vec<(String, Ulid)>,
 }
 
 impl MemoryDraft {
@@ -865,6 +1011,8 @@ impl MemoryDraft {
             metadata: BTreeMap::new(),
             agent: String::new(),
             session_id: None,
+            entities: Vec::new(),
+            relations: Vec::new(),
         }
     }
 
@@ -889,6 +1037,40 @@ impl MemoryDraft {
     /// Attaches one typed metadata entry (last write per key wins).
     pub fn meta(mut self, key: impl Into<String>, value: Scalar) -> Self {
         self.metadata.insert(key.into(), value);
+        self
+    }
+
+    /// Tags the memory with one explicit entity ("postgres", "auth-service",
+    /// …; 1–128 bytes of UTF-8) — S13, `docs/adr/0012`. Entities are
+    /// caller-provided, never extracted automatically. Duplicates are
+    /// deduplicated at write time. Navigate back with
+    /// [`Store::entity_members`].
+    pub fn entity(mut self, name: impl Into<String>) -> Self {
+        self.entities.push(name.into());
+        self
+    }
+
+    /// Replaces the whole entity list at once — the seam the shells use
+    /// after parsing an `entities` argument.
+    pub fn entities(mut self, entities: Vec<String>) -> Self {
+        self.entities = entities;
+        self
+    }
+
+    /// Adds one typed relation (`kind`: 1–64 bytes, e.g. `"refines"`,
+    /// `"contradicts"`) from this memory to an **existing, live** memory —
+    /// S13, `docs/adr/0012`. [`Store::remember`] verifies the target and
+    /// fails with a typed error otherwise. Navigate back (either direction)
+    /// with [`Store::related`].
+    pub fn relation(mut self, kind: impl Into<String>, target: Ulid) -> Self {
+        self.relations.push((kind.into(), target));
+        self
+    }
+
+    /// Replaces the whole relation list at once — the seam the shells use
+    /// after parsing a `relations` argument.
+    pub fn relations(mut self, relations: Vec<(String, Ulid)>) -> Self {
+        self.relations = relations;
         self
     }
 }
@@ -929,6 +1111,9 @@ pub struct Query {
     /// HNSW candidate list size at layer 0 (`docs/adr/0002`): higher trades
     /// latency for recall.
     ef_search: u16,
+    /// Optional 1-hop graph expansion (S13): when set, each direct hit's
+    /// relation neighbors are appended to the results as connected context.
+    expand_related: bool,
 }
 
 impl Query {
@@ -941,6 +1126,7 @@ impl Query {
             scope: Scope::All,
             filters: BTreeMap::new(),
             ef_search: crate::format::HNSW_DEFAULT_EF_SEARCH,
+            expand_related: false,
         }
     }
 
@@ -984,6 +1170,17 @@ impl Query {
     /// parsing a `filters` argument into a map.
     pub fn filters(mut self, filters: BTreeMap<String, Filter>) -> Self {
         self.filters = filters;
+        self
+    }
+
+    /// Enables 1-hop graph expansion (S13, `docs/adr/0012`): after ranking,
+    /// each direct hit's relation neighbors (both directions) that pass the
+    /// same liveness/scope/filter checks are appended as connected context,
+    /// with score `0.0` (they matched the graph, not the query) and without
+    /// counting against [`Query::limit`]. One hop only. On a file with no
+    /// graph layer this is a silent no-op.
+    pub fn expand_related(mut self, expand: bool) -> Self {
+        self.expand_related = expand;
         self
     }
 
@@ -1044,6 +1241,12 @@ pub struct StoreStats {
     /// Documents in the full-text index (`docs/adr/0011`); one per live
     /// `remember`. 0 = no full-text index yet (e.g. a pre-M2 file).
     pub fts_documents: u64,
+    /// Distinct entities in the graph layer (S13, `docs/adr/0012`).
+    /// 0 = no graph data yet (e.g. a pre-M3 file, or one that never used it).
+    pub graph_entities: u64,
+    /// Stored relations in the graph layer (each counted once, not per end).
+    /// Tombstoned ends are still counted until `vacuum` rebuilds the graph.
+    pub graph_relations: u64,
     /// Page size recorded in the header.
     pub page_size: u32,
     /// Total pages in the main file.
@@ -1082,8 +1285,31 @@ pub struct Recalled {
     /// more relevant. It is a *rank* score, not a cosine similarity or a BM25
     /// score — those scales are deliberately discarded so there is nothing to
     /// calibrate. When recall degraded to vector-only, only the vector list
-    /// contributes.
+    /// contributes. Hits appended by 1-hop graph expansion
+    /// ([`Query::expand_related`]) carry exactly `0.0` — they are connected
+    /// context, not ranked matches.
     pub score: f32,
+}
+
+/// One graph neighbor of a memory, as returned by [`Store::related`] (S13).
+/// Derefs to [`Memory`], so `rel.content`, `rel.id`, … read naturally.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelatedMemory {
+    /// The memory at the other end of the edge (always live — tombstoned
+    /// neighbors are filtered at query time).
+    pub memory: Memory,
+    /// The relation kind ("refines", "contradicts", …).
+    pub kind: String,
+    /// `true` = the queried memory relates *to* this one; `false` = this one
+    /// relates to the queried memory.
+    pub outgoing: bool,
+}
+
+impl std::ops::Deref for RelatedMemory {
+    type Target = Memory;
+    fn deref(&self) -> &Memory {
+        &self.memory
+    }
 }
 
 impl std::ops::Deref for Recalled {
@@ -1606,6 +1832,198 @@ mod tests {
             degraded.hits.is_empty(),
             "empty store has nothing to recall"
         );
+    }
+
+    // --- S13 graph layer (entities + relations, docs/adr/0012) -------------
+
+    #[test]
+    fn graph_remember_then_navigate_by_id_and_by_entity() {
+        let (_, mut store) = store();
+        let a = store
+            .remember(MemoryDraft::new("postgres uses mvcc").entity("postgres"))
+            .unwrap();
+        let b = store
+            .remember(
+                MemoryDraft::new("the auth service tracks replica lag")
+                    .entity("postgres")
+                    .entity("auth-service")
+                    .relation("refines", a.id),
+            )
+            .unwrap();
+
+        // related(id): both directions, kind carried, Deref to Memory.
+        let from_b = store.related(b.id).unwrap();
+        assert_eq!(from_b.len(), 1);
+        assert_eq!(from_b[0].id, a.id);
+        assert_eq!(from_b[0].kind, "refines");
+        assert!(from_b[0].outgoing);
+        let from_a = store.related(a.id).unwrap();
+        assert_eq!(from_a.len(), 1);
+        assert_eq!(from_a[0].id, b.id);
+        assert!(!from_a[0].outgoing, "mirrored incoming edge at the target");
+
+        // related(entity): members in id order (sorted — same-ms ULIDs tie
+        // on randomness, so sort the expectation too).
+        let mut expected = vec![a.id, b.id];
+        expected.sort();
+        let members: Vec<Ulid> = store
+            .entity_members("postgres")
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(members, expected);
+        let auth: Vec<Ulid> = store
+            .entity_members("auth-service")
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(auth, vec![b.id]);
+        assert!(store.entity_members("unknown").unwrap().is_empty());
+        assert_eq!(
+            store.entities_of(b.id).unwrap(),
+            vec!["auth-service".to_owned(), "postgres".to_owned()]
+        );
+        assert!(store.entities_of(a.id).unwrap() == vec!["postgres".to_owned()]);
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.graph_entities, 2);
+        assert_eq!(stats.graph_relations, 1);
+    }
+
+    #[test]
+    fn relation_to_missing_or_forgotten_target_is_a_typed_error() {
+        let (_, mut store) = store();
+        let gone = store.remember(MemoryDraft::new("to forget")).unwrap();
+        store.forget(gone.id).unwrap();
+        for target in [Ulid::new(), gone.id] {
+            let err = store
+                .remember(MemoryDraft::new("dangling").relation("refines", target))
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+        }
+        // The failed remembers rolled back whole: only the tombstone remains.
+        let all: Vec<Memory> = store.iter_all().collect::<Result<_>>().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(store.stats().unwrap().graph_relations, 0);
+    }
+
+    #[test]
+    fn relation_to_forgotten_memory_disappears_with_the_tombstone() {
+        let (_, mut store) = store();
+        let a = store
+            .remember(MemoryDraft::new("target").entity("shared"))
+            .unwrap();
+        let b = store
+            .remember(
+                MemoryDraft::new("source")
+                    .entity("shared")
+                    .relation("refines", a.id),
+            )
+            .unwrap();
+        assert_eq!(store.related(b.id).unwrap().len(), 1);
+
+        store.forget(a.id).unwrap();
+
+        // The edge and the entity membership vanish with the tombstone —
+        // re-checked at query time, no graph rewrite needed (ADR 0012).
+        assert!(store.related(b.id).unwrap().is_empty());
+        let members: Vec<Ulid> = store
+            .entity_members("shared")
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(members, vec![b.id]);
+    }
+
+    #[test]
+    fn recall_expand_related_pulls_one_hop_of_connected_context() {
+        let mut store = store_with_embedder(&[&["carro"], &["gato"]]);
+        // The neighbor shares no token and no vector axis with the query —
+        // only the explicit relation connects it.
+        let neighbor = store.remember(MemoryDraft::new("o gato dorme")).unwrap();
+        let hit = store
+            .remember(MemoryDraft::new("comprei um carro").relation("context", neighbor.id))
+            .unwrap();
+
+        let plain = store.recall(Query::new("carro").limit(1)).unwrap();
+        assert_eq!(plain.len(), 1, "limit caps direct hits");
+        assert_eq!(plain[0].id, hit.id);
+
+        let expanded = store
+            .recall(Query::new("carro").limit(1).expand_related(true))
+            .unwrap();
+        assert_eq!(expanded.len(), 2, "expansion does not count against limit");
+        assert_eq!(expanded[0].id, hit.id);
+        assert!(expanded[0].score > 0.0);
+        assert_eq!(expanded[1].id, neighbor.id);
+        assert_eq!(
+            expanded[1].score, 0.0,
+            "expansion hits are context, not ranked matches"
+        );
+
+        // A forgotten neighbor never comes back through expansion.
+        store.forget(neighbor.id).unwrap();
+        let after = store
+            .recall(Query::new("carro").limit(1).expand_related(true))
+            .unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, hit.id);
+    }
+
+    #[test]
+    fn vacuum_rebuilds_graph_dropping_dead_entities_and_edges() {
+        let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+        let mut store = store_on(&vfs, "m.mind", &[&["rust"]]);
+        let a = store
+            .remember(MemoryDraft::new("rust a").entity("rust"))
+            .unwrap();
+        let doomed = store
+            .remember(MemoryDraft::new("rust doomed").entity("doomed-only"))
+            .unwrap();
+        let b = store
+            .remember(
+                MemoryDraft::new("rust b")
+                    .entity("rust")
+                    .relation("refines", a.id)
+                    .relation("mentions", doomed.id),
+            )
+            .unwrap();
+        store.forget(doomed.id).unwrap();
+        let before = store.stats().unwrap();
+        assert_eq!(before.graph_entities, 2);
+        assert_eq!(before.graph_relations, 2, "tombstoned end still counted");
+
+        store.vacuum().unwrap();
+
+        // Physically rebuilt: the dead memory's entity and the edge with a
+        // dead end are gone from the counters, not just filtered.
+        let after = store.stats().unwrap();
+        assert_eq!(after.graph_entities, 1);
+        assert_eq!(after.graph_relations, 1);
+
+        let rel_b = store.related(b.id).unwrap();
+        assert_eq!(rel_b.len(), 1);
+        assert_eq!(rel_b[0].id, a.id);
+        assert!(rel_b[0].outgoing);
+        // The mirrored incoming half was regenerated at the live target.
+        let rel_a = store.related(a.id).unwrap();
+        assert_eq!(rel_a.len(), 1);
+        assert_eq!(rel_a[0].id, b.id);
+        assert!(!rel_a[0].outgoing);
+
+        let mut expected = vec![a.id, b.id];
+        expected.sort();
+        let members: Vec<Ulid> = store
+            .entity_members("rust")
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(members, expected);
+        assert!(store.entity_members("doomed-only").unwrap().is_empty());
     }
 
     #[test]
