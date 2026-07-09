@@ -45,6 +45,8 @@ echo ">> EmbedMind benchmark suite"
 echo ">> date=${BENCH_DATE}  datasets=${DATASETS[*]:-agent-mem-10k (default)}  features='${COMPARE}'"
 
 # --release is mandatory: LTO/opt matters for honest latency numbers, and the
-# 100k embedding pass is impractically slow in debug.
+# 100k embedding pass is impractically slow in debug. The `+"${..}"` guard makes
+# an empty dataset array safe under `set -u` (run_all then uses its own default).
 # shellcheck disable=SC2086
-cargo run -p embedmind-bench --release ${COMPARE} --bin run_all -- "${DATASETS[@]}"
+cargo run -p embedmind-bench --release ${COMPARE} --bin run_all -- \
+  "${DATASETS[@]+"${DATASETS[@]}"}"

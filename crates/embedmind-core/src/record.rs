@@ -499,8 +499,16 @@ mod tests {
                 .unwrap(),
             "same type, different value ⇒ no match"
         );
-        assert!(Filter::Eq(Scalar::I64(3)).matches(Some(&Scalar::I64(3))).unwrap());
-        assert!(Filter::Eq(Scalar::Bool(true)).matches(Some(&Scalar::Bool(true))).unwrap());
+        assert!(
+            Filter::Eq(Scalar::I64(3))
+                .matches(Some(&Scalar::I64(3)))
+                .unwrap()
+        );
+        assert!(
+            Filter::Eq(Scalar::Bool(true))
+                .matches(Some(&Scalar::Bool(true)))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -533,17 +541,49 @@ mod tests {
     fn filter_range_over_numeric_types_and_bounds() {
         let range = |min, max| Filter::Range { min, max };
         // Closed window over an i64.
-        assert!(range(Some(4.0), Some(10.0)).matches(Some(&Scalar::I64(5))).unwrap());
-        assert!(!range(Some(4.0), Some(10.0)).matches(Some(&Scalar::I64(1))).unwrap());
+        assert!(
+            range(Some(4.0), Some(10.0))
+                .matches(Some(&Scalar::I64(5)))
+                .unwrap()
+        );
+        assert!(
+            !range(Some(4.0), Some(10.0))
+                .matches(Some(&Scalar::I64(1)))
+                .unwrap()
+        );
         // Inclusive bounds.
-        assert!(range(Some(4.0), Some(10.0)).matches(Some(&Scalar::I64(4))).unwrap());
-        assert!(range(Some(4.0), Some(10.0)).matches(Some(&Scalar::I64(10))).unwrap());
+        assert!(
+            range(Some(4.0), Some(10.0))
+                .matches(Some(&Scalar::I64(4)))
+                .unwrap()
+        );
+        assert!(
+            range(Some(4.0), Some(10.0))
+                .matches(Some(&Scalar::I64(10)))
+                .unwrap()
+        );
         // Open-ended.
-        assert!(range(Some(0.5), None).matches(Some(&Scalar::F64(0.9))).unwrap());
-        assert!(!range(Some(0.5), None).matches(Some(&Scalar::F64(0.2))).unwrap());
-        assert!(range(None, Some(0.5)).matches(Some(&Scalar::F64(0.2))).unwrap());
+        assert!(
+            range(Some(0.5), None)
+                .matches(Some(&Scalar::F64(0.9)))
+                .unwrap()
+        );
+        assert!(
+            !range(Some(0.5), None)
+                .matches(Some(&Scalar::F64(0.2)))
+                .unwrap()
+        );
+        assert!(
+            range(None, Some(0.5))
+                .matches(Some(&Scalar::F64(0.2)))
+                .unwrap()
+        );
         // Numeric filters cross the i64/f64 line: an f64 window over an i64.
-        assert!(range(Some(2.5), Some(3.5)).matches(Some(&Scalar::I64(3))).unwrap());
+        assert!(
+            range(Some(2.5), Some(3.5))
+                .matches(Some(&Scalar::I64(3)))
+                .unwrap()
+        );
     }
 
     #[test]

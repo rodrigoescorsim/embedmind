@@ -58,7 +58,8 @@ fn filter_by_exact_scalar_value_keeps_only_matches() {
         .unwrap();
     assert!(!hits.is_empty(), "the ops memory must survive the filter");
     assert!(
-        hits.iter().all(|h| h.metadata.get("topic") == Some(&Scalar::Str("ops".into()))),
+        hits.iter()
+            .all(|h| h.metadata.get("topic") == Some(&Scalar::Str("ops".into()))),
         "only topic=ops memories may pass"
     );
     assert!(hits.iter().any(|h| h.id == ops.id));
@@ -78,25 +79,27 @@ fn range_filter_selects_a_numeric_window() {
 
     // priority in [4, 10]: excludes the low (1), keeps mid (5) and high (9).
     let hits = store
-        .recall(
-            Query::new("task priority").limit(10).filter(
-                "priority",
-                Filter::Range {
-                    min: Some(4.0),
-                    max: Some(10.0),
-                },
-            ),
-        )
+        .recall(Query::new("task priority").limit(10).filter(
+            "priority",
+            Filter::Range {
+                min: Some(4.0),
+                max: Some(10.0),
+            },
+        ))
         .unwrap();
     assert!(!hits.is_empty());
     for hit in &hits {
         let Some(Scalar::I64(p)) = hit.metadata.get("priority") else {
             panic!("every hit carries an i64 priority");
         };
-        assert!((4..=10).contains(p), "priority {p} out of the filtered window");
+        assert!(
+            (4..=10).contains(p),
+            "priority {p} out of the filtered window"
+        );
     }
     assert!(
-        hits.iter().any(|h| h.metadata.get("priority") == Some(&Scalar::I64(5))),
+        hits.iter()
+            .any(|h| h.metadata.get("priority") == Some(&Scalar::I64(5))),
         "mid-priority must be present"
     );
 }
@@ -114,15 +117,13 @@ fn range_filter_is_open_ended_when_a_bound_is_none() {
     }
     // score >= 0.5, no upper bound.
     let hits = store
-        .recall(
-            Query::new("checkpoint score").limit(10).filter(
-                "score",
-                Filter::Range {
-                    min: Some(0.5),
-                    max: None,
-                },
-            ),
-        )
+        .recall(Query::new("checkpoint score").limit(10).filter(
+            "score",
+            Filter::Range {
+                min: Some(0.5),
+                max: None,
+            },
+        ))
         .unwrap();
     for hit in &hits {
         let Some(Scalar::F64(s)) = hit.metadata.get("score") else {
@@ -130,8 +131,15 @@ fn range_filter_is_open_ended_when_a_bound_is_none() {
         };
         assert!(*s >= 0.5, "score {s} below the open lower bound");
     }
-    assert!(hits.iter().any(|h| h.metadata.get("score") == Some(&Scalar::F64(0.95))));
-    assert!(!hits.iter().any(|h| h.metadata.get("score") == Some(&Scalar::F64(0.2))));
+    assert!(
+        hits.iter()
+            .any(|h| h.metadata.get("score") == Some(&Scalar::F64(0.95)))
+    );
+    assert!(
+        !hits
+            .iter()
+            .any(|h| h.metadata.get("score") == Some(&Scalar::F64(0.2)))
+    );
 }
 
 #[test]
@@ -175,7 +183,11 @@ fn multiple_filters_are_anded() {
                 ),
         )
         .unwrap();
-    assert_eq!(hits.len(), 1, "only the memory satisfying BOTH filters passes");
+    assert_eq!(
+        hits.len(),
+        1,
+        "only the memory satisfying BOTH filters passes"
+    );
     assert_eq!(hits[0].id, both.id);
 }
 
@@ -234,8 +246,7 @@ fn filter_on_absent_key_yields_zero_hits_not_an_error() {
         .unwrap();
     store
         .remember(
-            MemoryDraft::new("another memory, still no such key")
-                .meta("other", Scalar::I64(1)),
+            MemoryDraft::new("another memory, still no such key").meta("other", Scalar::I64(1)),
         )
         .unwrap();
 
@@ -277,15 +288,13 @@ fn type_incompatible_filter_is_a_typed_error() {
 
     // Range over a stored non-numeric value: same typed error.
     let err = store
-        .recall(
-            Query::new("topic").limit(10).filter(
-                "topic",
-                Filter::Range {
-                    min: Some(0.0),
-                    max: Some(10.0),
-                },
-            ),
-        )
+        .recall(Query::new("topic").limit(10).filter(
+            "topic",
+            Filter::Range {
+                min: Some(0.0),
+                max: Some(10.0),
+            },
+        ))
         .unwrap_err();
     assert!(
         matches!(err, embedmind_core::Error::InvalidArgument(_)),

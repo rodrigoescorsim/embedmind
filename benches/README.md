@@ -4,10 +4,11 @@ The benchmark harness for `embedmind-core`, implementing the methodology in
 [`docs/BENCHMARKS.md`](../docs/BENCHMARKS.md). Not published to crates.io — it
 holds no product logic, only measurement.
 
-This is **Part 1** (M1 item 1.7): the reproducible foundation. Part 2 adds the
-remaining metrics (latency p50/p99, ingest throughput, file size, RSS,
-cold-open), the sqlite-vec / zvec comparisons, the results-table renderer, and
-the CI regression guard.
+Both parts of M1 item 1.7 are now here: Part 1 is the reproducible foundation
+(committed dataset specs, brute-force baseline, recall@10); Part 2 adds the full
+metric suite (latency p50/p99 warm + cold-open, ingest throughput, file size,
+peak RSS), the pinned sqlite-vec / zvec comparison, the results-table renderer,
+and the CI regression guard.
 
 ## What's here
 
@@ -17,6 +18,11 @@ the CI regression guard.
 | `dataset` | The committed dataset **specs** (`agent-mem-10k`, `agent-mem-100k`) and their materialization into vectors + a `.mind` store through the shipped ONNX model. |
 | `baseline` | Brute-force exact top-k: the recall ceiling and latency floor everything else is graded against. |
 | `recall` | recall@k of the HNSW index vs. the brute-force baseline (set overlap, since HNSW is approximate). |
+| `metrics` | Latency percentiles (nearest-rank p50/p99) and throughput. |
+| `sysmem` | Peak-RSS sampling across a measured phase (pinned `sysinfo`, no `unsafe`). |
+| `harness` | `run_suite`: the full metric suite over one dataset. |
+| `competitors` | Pinned+recorded sqlite-vec/zvec registry and feature-gated adapters; honest "not measured" when a toolchain is absent. |
+| `report` | Spec-NFR validation + README-ready markdown / results JSON renderers. |
 
 ## Why datasets are "committed" without committing gigabytes
 
@@ -44,7 +50,22 @@ cargo run -p embedmind-bench --release --bin gen_dataset -- agent-mem-10k
 
 # Brute-force recall@10 reference over it (--generate materializes first):
 cargo run -p embedmind-bench --release --bin baseline -- agent-mem-10k --generate
+
+# Full suite (all metrics + competitor comparison + markdown table + NFRs):
+./benches/run_all.sh            # fast: the 10k set
+./benches/run_all.sh --full     # both 10k and 100k (minutes of CPU)
+
+# Equivalent direct invocation (--release is mandatory for honest numbers):
+cargo run -p embedmind-bench --release --bin run_all -- agent-mem-10k agent-mem-100k
+
+# With a competitor toolchain present, enable its adapter feature:
+COMPARE="--features compare-sqlite-vec" ./benches/run_all.sh
 ```
+
+`run_all` writes `benches/results/<version>.json` and `benches/results/latest.md`
+(git-ignored dev output; a per-version JSON is force-added only when a release is
+cut, BENCHMARKS.md §4 rule 3) and exits non-zero if any **applicable** NFR was
+missed — so it doubles as the CI performance guard.
 
 The fast end-to-end smoke test (small in-memory run, real model + real index)
 lives in `tests/harness.rs` and runs under `cargo test --workspace`.

@@ -101,6 +101,7 @@ Repo **privado** até o fim do marco. Prioridade absoluta: crash-safety antes de
 | **Bindings adicionais** | TypeScript; Swift/C conforme demanda | 2.5 |
 | **Licença comercial de embarque** | Modelo SQLite/Realm: US$ 2–20k/ano por produto embarcante | Engine como crate/lib independente |
 | **Segunda aposta** | Avaliar tirar o **Paperjet** do banco | GO confirmado + apetite |
+| **Ingestão de código como fonte de memória** | Indexar localmente (Tree-sitter, sem LLM externo) código/docs do projeto como memórias além das gravadas via `remember` — mesma promessa "nada sai da máquina", mas cobrindo conhecimento *já existente*, não só o acumulado em sessão. Avaliar após GO; risco de virar concorrência direta de players como o Graphify (YC, tração grande) em vez de nicho adjacente | Engine estável, 3.1 (grafo) |
 
 **Fallback de demanda** (se as apostas frustrarem): CLI de relatório de desperdício de tokens (fatia mínima da Torre de Controle) — valida em 1 semana.
 
