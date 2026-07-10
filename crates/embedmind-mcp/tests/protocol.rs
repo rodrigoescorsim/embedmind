@@ -113,7 +113,7 @@ fn tools_list_exposes_the_stable_tools() {
     );
     let tools = responses[0]["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["remember", "recall", "stats", "forget"]);
+    assert_eq!(names, ["remember", "recall", "related", "stats", "forget"]);
     for tool in tools {
         assert!(tool["inputSchema"]["type"] == "object");
         assert!(tool["description"].as_str().unwrap().len() > 10);
@@ -633,6 +633,250 @@ fn stats_tool_reports_provenance_breakdown() {
     assert_eq!(by_agent.len(), 1);
     assert_eq!(by_agent[0]["agent"], "cli");
     assert_eq!(by_agent[0]["live_memories"], 2);
+}
+
+/// S13 through the protocol: `remember` accepts explicit `entities` and
+/// `relations`, and the `related` tool navigates them — by id (both
+/// directions, with kind) and by entity. Forgetting a neighbor makes its
+/// relation disappear with the tombstone, per the story's edge case.
+#[test]
+fn graph_remember_related_and_tombstone_through_the_protocol() {
+    let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+    let store = Store::create_with(vfs, Path::new("m.mind"), StoreOptions::default()).unwrap();
+    let mut server = McpServer::new(store, None);
+
+    let feed = |server: &mut McpServer, reqs: &[Value]| -> Vec<Value> {
+        let input: String = reqs.iter().map(|r| format!("{r}\n")).collect();
+        let mut out = Vec::new();
+        server.serve(input.as_bytes(), &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+
+    // Memory A, then B refining A and tagged with an entity.
+    let r = feed(
+        &mut server,
+        &[call(
+            1,
+            "remember",
+            json!({ "content": "we chose postgres for storage" }),
+        )],
+    );
+    let a_id = r[0]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = feed(
+        &mut server,
+        &[call(
+            2,
+            "remember",
+            json!({
+                "content": "specifically postgres 16 with pgvector",
+                "entities": ["postgres"],
+                "relations": [{ "kind": "refines", "target": a_id }],
+            }),
+        )],
+    );
+    let structured = &r[0]["result"]["structuredContent"];
+    let b_id = structured["id"].as_str().unwrap().to_string();
+    assert_eq!(structured["entities"], json!(["postgres"]));
+    assert_eq!(structured["relations"][0]["kind"], "refines");
+    assert_eq!(structured["relations"][0]["target"], a_id);
+
+    // related(B): outgoing "refines" edge to A, plus B's entity tags.
+    let r = feed(&mut server, &[call(3, "related", json!({ "id": b_id }))]);
+    let by_id = &r[0]["result"]["structuredContent"];
+    assert_eq!(by_id["entities"], json!(["postgres"]));
+    let neighbors = by_id["related"].as_array().unwrap();
+    assert_eq!(neighbors.len(), 1);
+    assert_eq!(neighbors[0]["id"], a_id);
+    assert_eq!(neighbors[0]["kind"], "refines");
+    assert_eq!(neighbors[0]["outgoing"], true);
+
+    // related(A): the same edge, incoming.
+    let r = feed(&mut server, &[call(4, "related", json!({ "id": a_id }))]);
+    let neighbors = r[0]["result"]["structuredContent"]["related"]
+        .as_array()
+        .unwrap();
+    assert_eq!(neighbors.len(), 1);
+    assert_eq!(neighbors[0]["id"], b_id);
+    assert_eq!(neighbors[0]["outgoing"], false);
+
+    // related(entity): B is the only member of "postgres".
+    let r = feed(
+        &mut server,
+        &[call(5, "related", json!({ "entity": "postgres" }))],
+    );
+    let by_entity = &r[0]["result"]["structuredContent"];
+    assert_eq!(by_entity["entity"], "postgres");
+    let members = by_entity["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0]["id"], b_id);
+
+    // Forget A: the relation disappears with the tombstone, and related(A)
+    // itself becomes a tool error (no live memory).
+    feed(&mut server, &[call(6, "forget", json!({ "id": a_id }))]);
+    let r = feed(&mut server, &[call(7, "related", json!({ "id": b_id }))]);
+    assert!(
+        r[0]["result"]["structuredContent"]["related"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "relation to a forgotten memory must disappear with the tombstone"
+    );
+    let r = feed(&mut server, &[call(8, "related", json!({ "id": a_id }))]);
+    assert_eq!(r[0]["result"]["isError"], true);
+}
+
+/// S13 argument edges: a relation to a nonexistent target is an engine
+/// failure (tool error, nothing stored); malformed graph arguments and a
+/// `related` call with neither/both selectors are protocol errors.
+#[test]
+fn graph_argument_edges_through_the_protocol() {
+    let ghost = "01ARZ3NDEKTSV4RRFFQ69G5FAV"; // valid ULID, never stored
+    let responses = roundtrip(
+        kv_store(),
+        &[
+            call(
+                1,
+                "remember",
+                json!({
+                    "content": "points at a ghost",
+                    "relations": [{ "kind": "refines", "target": ghost }],
+                }),
+            ),
+            call(
+                2,
+                "remember",
+                json!({ "content": "bad relations", "relations": "not-an-array" }),
+            ),
+            call(
+                3,
+                "remember",
+                json!({ "content": "bad target", "relations": [{ "kind": "refines", "target": "not-a-ulid" }] }),
+            ),
+            call(
+                4,
+                "remember",
+                json!({ "content": "bad entities", "entities": [1, 2] }),
+            ),
+            call(5, "related", json!({})),
+            call(6, "related", json!({ "id": ghost, "entity": "postgres" })),
+            call(7, "related", json!({ "id": "not-a-ulid" })),
+            call(8, "related", json!({ "id": ghost })),
+            call(9, "related", json!({ "entity": "nobody-tagged-this" })),
+        ],
+    );
+    assert_eq!(
+        responses[0]["result"]["isError"], true,
+        "relation to a nonexistent target is a tool error"
+    );
+    assert_eq!(responses[1]["error"]["code"], -32602);
+    assert_eq!(responses[2]["error"]["code"], -32602);
+    assert_eq!(responses[3]["error"]["code"], -32602);
+    assert_eq!(
+        responses[4]["error"]["code"], -32602,
+        "neither id nor entity"
+    );
+    assert_eq!(responses[5]["error"]["code"], -32602, "both id and entity");
+    assert_eq!(responses[6]["error"]["code"], -32602, "malformed id");
+    assert_eq!(
+        responses[7]["result"]["isError"], true,
+        "unknown id is a tool error, not a crash"
+    );
+    // An entity nobody used is an empty member list, not an error.
+    let members = responses[8]["result"]["structuredContent"]["members"]
+        .as_array()
+        .unwrap();
+    assert!(members.is_empty());
+}
+
+/// S13: `recall` with `expand_related: true` appends each hit's related
+/// memories as connected context with score 0, after the ranked hits.
+#[test]
+fn recall_expand_related_pulls_connected_context() {
+    // Relating B to A needs A's id from an earlier response, so this test
+    // feeds the server in stages instead of one `roundtrip` batch.
+    let mut server = McpServer::new(embedding_store(), None);
+    let feed = |server: &mut McpServer, reqs: &[Value]| -> Vec<Value> {
+        let input: String = reqs.iter().map(|r| format!("{r}\n")).collect();
+        let mut out = Vec::new();
+        server.serve(input.as_bytes(), &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    let r = feed(
+        &mut server,
+        &[call(
+            1,
+            "remember",
+            json!({ "content": "the cat sat on the warm mat" }),
+        )],
+    );
+    let cat = r[0]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    feed(
+        &mut server,
+        &[call(
+            2,
+            "remember",
+            json!({
+                "content": "quarterly tax filing deadline is in april",
+                "relations": [{ "kind": "mentioned-with", "target": cat }],
+            }),
+        )],
+    );
+    let r = feed(
+        &mut server,
+        &[
+            call(
+                3,
+                "recall",
+                json!({ "query": "a feline resting", "limit": 1 }),
+            ),
+            call(
+                4,
+                "recall",
+                json!({ "query": "a feline resting", "limit": 1, "expand_related": true }),
+            ),
+        ],
+    );
+    let plain = r[0]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert_eq!(plain.len(), 1, "without expansion: only the ranked hit");
+    assert_eq!(plain[0]["id"], cat);
+
+    let expanded = r[1]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        expanded.len(),
+        2,
+        "expansion appends the related memory beyond the limit"
+    );
+    assert_eq!(expanded[0]["id"], cat, "ranked hit stays first");
+    assert!(
+        expanded[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("tax filing"),
+        "the graph neighbor comes along as context"
+    );
+    assert_eq!(
+        expanded[1]["score"].as_f64().unwrap(),
+        0.0,
+        "expanded hits carry score 0 — context, not a ranked match"
+    );
 }
 
 #[test]

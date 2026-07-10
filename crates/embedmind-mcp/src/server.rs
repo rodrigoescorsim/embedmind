@@ -134,6 +134,7 @@ impl McpServer {
         let outcome = match name {
             "remember" => self.tool_remember(&args)?,
             "recall" => self.tool_recall(&args)?,
+            "related" => self.tool_related(&args)?,
             "stats" => self.tool_stats(&args)?,
             "forget" => self.tool_forget(&args)?,
             _ => return Err((INVALID_PARAMS, format!("unknown tool: {name}"))),
@@ -153,9 +154,13 @@ impl McpServer {
         })
     }
 
-    /// `remember(content, project?, metadata?)` → `{id, project}` (DESIGN
-    /// §8). `project` omitted = the detected context (item 1.5); explicit
-    /// `null` = force a global memory; explicit string = that project.
+    /// `remember(content, project?, metadata?, entities?, relations?)` →
+    /// `{id, project, entities, relations}` (DESIGN §8). `project` omitted =
+    /// the detected context (item 1.5); explicit `null` = force a global
+    /// memory; explicit string = that project. `entities`/`relations` are the
+    /// explicit graph layer (S13, `docs/adr/0012`): caller-provided, never
+    /// extracted — a relation whose target does not exist (or was forgotten)
+    /// is a tool error from the engine, so nothing is stored.
     #[allow(clippy::type_complexity)]
     fn tool_remember(&mut self, args: &Value) -> Result<Result<Value, String>, (i64, String)> {
         let content = args.get("content").and_then(Value::as_str).ok_or((
@@ -190,8 +195,59 @@ impl McpServer {
                 draft = draft.meta(key.clone(), scalar);
             }
         }
+        // Explicit graph data (S13): entity tags and typed relations to
+        // existing memories. The shell only parses — target-liveness
+        // validation lives in the engine (`Store::remember`, ADR 0012).
+        let mut entities: Vec<String> = Vec::new();
+        if let Some(value) = args.get("entities") {
+            let list = value.as_array().ok_or((
+                INVALID_PARAMS,
+                "remember: 'entities' must be an array of strings".to_string(),
+            ))?;
+            for item in list {
+                let name = item.as_str().ok_or((
+                    INVALID_PARAMS,
+                    "remember: 'entities' must be an array of strings".to_string(),
+                ))?;
+                entities.push(name.to_string());
+            }
+            draft = draft.entities(entities.clone());
+        }
+        let mut relations: Vec<(String, Ulid)> = Vec::new();
+        if let Some(value) = args.get("relations") {
+            let list = value.as_array().ok_or((
+                INVALID_PARAMS,
+                "remember: 'relations' must be an array of {kind, target} objects".to_string(),
+            ))?;
+            for item in list {
+                let kind = item.get("kind").and_then(Value::as_str).ok_or((
+                    INVALID_PARAMS,
+                    "remember: each relation needs a 'kind' (string)".to_string(),
+                ))?;
+                let target = item.get("target").and_then(Value::as_str).ok_or((
+                    INVALID_PARAMS,
+                    "remember: each relation needs a 'target' (memory id string)".to_string(),
+                ))?;
+                let Ok(target) = Ulid::from_string(target) else {
+                    return Err((
+                        INVALID_PARAMS,
+                        "remember: a relation 'target' is not a valid ULID".to_string(),
+                    ));
+                };
+                relations.push((kind.to_string(), target));
+            }
+            draft = draft.relations(relations.clone());
+        }
         Ok(match self.store.remember(draft) {
-            Ok(memory) => Ok(json!({ "id": memory.id.to_string(), "project": project })),
+            Ok(memory) => Ok(json!({
+                "id": memory.id.to_string(),
+                "project": project,
+                "entities": entities,
+                "relations": relations
+                    .iter()
+                    .map(|(kind, target)| json!({ "kind": kind, "target": target.to_string() }))
+                    .collect::<Vec<Value>>(),
+            })),
             Err(e) => Err(e.to_string()),
         })
     }
@@ -235,6 +291,17 @@ impl McpServer {
                 parsed.insert(key.clone(), filter);
             }
             query = query.filters(parsed);
+        }
+
+        // Optional 1-hop graph expansion (S13): each direct hit's relation
+        // neighbors are appended as connected context with score 0.0 (they
+        // matched the graph, not the query). Absent = no expansion.
+        if let Some(expand) = args.get("expand_related") {
+            let expand = expand.as_bool().ok_or((
+                INVALID_PARAMS,
+                "recall: 'expand_related' must be a boolean".to_string(),
+            ))?;
+            query = query.expand_related(expand);
         }
 
         // Optional provenance filter by writing agent (S14): keep only memories
@@ -300,6 +367,97 @@ impl McpServer {
             }
             Err(e) => Err(e.to_string()),
         })
+    }
+
+    /// `related(id | entity)` — graph navigation (S13, `docs/adr/0012`).
+    /// Exactly one of the two arguments:
+    ///
+    /// - `id`: the memory's entity tags plus its relation neighbors, both
+    ///   directions, each carrying the relation kind and direction. An
+    ///   unknown or forgotten id is a tool error.
+    /// - `entity`: every live memory tagged with that entity, in time order.
+    ///
+    /// Tombstoned neighbors/members are never returned — a relation to a
+    /// forgotten memory disappears with the tombstone.
+    #[allow(clippy::type_complexity)]
+    fn tool_related(&mut self, args: &Value) -> Result<Result<Value, String>, (i64, String)> {
+        match (args.get("id"), args.get("entity")) {
+            (Some(_), Some(_)) | (None, None) => Err((
+                INVALID_PARAMS,
+                "related: exactly one of 'id' or 'entity' is required".to_string(),
+            )),
+            (Some(id), None) => {
+                let id = id
+                    .as_str()
+                    .ok_or((INVALID_PARAMS, "related: 'id' must be a string".to_string()))?;
+                let Ok(id) = Ulid::from_string(id) else {
+                    return Err((
+                        INVALID_PARAMS,
+                        "related: 'id' is not a valid ULID".to_string(),
+                    ));
+                };
+                Ok(self.related_by_id(id))
+            }
+            (None, Some(entity)) => {
+                let entity = entity.as_str().ok_or((
+                    INVALID_PARAMS,
+                    "related: 'entity' must be a string".to_string(),
+                ))?;
+                Ok(self.related_by_entity(entity))
+            }
+        }
+    }
+
+    /// The `related(id)` half: entity tags + relation neighbors of one memory.
+    fn related_by_id(&self, id: Ulid) -> Result<Value, String> {
+        if self.store.get(id).map_err(|e| e.to_string())?.is_none() {
+            return Err(format!("no live memory with id {id}"));
+        }
+        let entities = self.store.entities_of(id).map_err(|e| e.to_string())?;
+        let related: Vec<Value> = self
+            .store
+            .related(id)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|rel| {
+                json!({
+                    "id": rel.id.to_string(),
+                    "kind": rel.kind,
+                    "outgoing": rel.outgoing,
+                    "content": rel.content,
+                    "project": rel.project,
+                    "provenance": {
+                        "agent": rel.provenance.agent,
+                        "session_id": rel.provenance.session_id,
+                    },
+                    "created_at_micros": rel.provenance.created_at_micros,
+                })
+            })
+            .collect();
+        Ok(json!({ "id": id.to_string(), "entities": entities, "related": related }))
+    }
+
+    /// The `related(entity)` half: live memories tagged with the entity.
+    fn related_by_entity(&self, entity: &str) -> Result<Value, String> {
+        let members: Vec<Value> = self
+            .store
+            .entity_members(entity)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|memory| {
+                json!({
+                    "id": memory.id.to_string(),
+                    "content": memory.content,
+                    "project": memory.project,
+                    "provenance": {
+                        "agent": memory.provenance.agent,
+                        "session_id": memory.provenance.session_id,
+                    },
+                    "created_at_micros": memory.provenance.created_at_micros,
+                })
+            })
+            .collect();
+        Ok(json!({ "entity": entity, "members": members }))
     }
 
     /// `stats()` → live/forgotten counts plus a per-agent breakdown of live
@@ -411,7 +569,7 @@ fn json_to_filter(spec: &Value) -> Option<Filter> {
     }
 }
 
-/// The `tools/list` response: three stable schemas — they are public API
+/// The `tools/list` response: five stable schemas — they are public API
 /// (DESIGN §8) and must only change with versioning.
 fn tools_list() -> Value {
     json!({
@@ -421,7 +579,9 @@ fn tools_list() -> Value {
                 "description": "Store one memory persistently in the local memory file. \
                                 Returns the memory's id. Memories are scoped to the \
                                 current project automatically; pass project: null to \
-                                store a global memory.",
+                                store a global memory. Optionally tag entities and \
+                                relate the memory to existing ones; navigate the graph \
+                                later with the related tool.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -438,6 +598,37 @@ fn tools_list() -> Value {
                             "type": "object",
                             "description": "Optional metadata; values must be \
                                             string, number, boolean or null."
+                        },
+                        "entities": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional explicit entity tags (\"postgres\", \
+                                            \"auth-service\", ...). Never extracted \
+                                            automatically — tag what matters. Query \
+                                            back with related({entity})."
+                        },
+                        "relations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "description": "Relation type, e.g. \"refines\", \
+                                                        \"contradicts\", \"depends-on\"."
+                                    },
+                                    "target": {
+                                        "type": "string",
+                                        "description": "Id of an existing, live memory \
+                                                        this one relates to."
+                                    }
+                                },
+                                "required": ["kind", "target"]
+                            },
+                            "description": "Optional typed relations from this memory to \
+                                            existing ones. A target that does not exist \
+                                            (or was forgotten) fails the whole remember. \
+                                            Navigate back with related({id})."
                         }
                     },
                     "required": ["content"]
@@ -500,9 +691,39 @@ fn tools_list() -> Value {
                             "description": "Return only memories written by this agent \
                                             (basic provenance). See the stats tool for \
                                             the list of agents that have memories."
+                        },
+                        "expand_related": {
+                            "type": "boolean",
+                            "description": "When true, each hit's explicitly related \
+                                            memories (1 hop, both directions) are \
+                                            appended as connected context with score 0, \
+                                            after the ranked hits and without counting \
+                                            against limit.",
+                            "default": false
                         }
                     },
                     "required": ["query"]
+                }
+            },
+            {
+                "name": "related",
+                "description": "Navigate the explicit memory graph. Pass id to get one \
+                                memory's entity tags and its related memories (both \
+                                directions, with the relation kind); or pass entity to \
+                                list every memory tagged with that entity. Exactly one \
+                                of the two.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Memory id whose relations to list."
+                        },
+                        "entity": {
+                            "type": "string",
+                            "description": "Entity tag whose memories to list."
+                        }
+                    }
                 }
             },
             {
