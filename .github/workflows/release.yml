@@ -188,17 +188,20 @@ jobs:
             ~/AppData/Local/ort.pyke.io
           key: ort-dylib-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      # Pre-pull the manylinux image with retry, so a transient registry hiccup
+      # Pre-pull the manylinux image with retry, so a transient quay.io hiccup
       # doesn't fail the whole job — maturin-action reuses whatever is already
-      # in the local Docker cache instead of pulling again. Docker Hub mirror
-      # (not quay.io) to sidestep that specific registry's outages; same
-      # official PyPA image either way.
+      # in the local Docker cache instead of pulling again. NOTE: the PyPA
+      # manylinux images are published on quay.io ONLY — there is no
+      # docker.io/pypa mirror (verified via Docker Hub API: 404 on
+      # docker.io/pypa/manylinux_2_28_x86_64; 200 on the quay.io equivalent).
+      # An earlier attempt to "avoid quay.io" by pointing at docker.io/pypa
+      # was wrong and broke the job outright (image doesn't exist there).
       - name: Pre-pull manylinux image (with retry)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
           for i in 1 2 3; do
-            docker pull docker.io/pypa/manylinux_2_28_x86_64 && exit 0
+            docker pull quay.io/pypa/manylinux_2_28_x86_64 && exit 0
             echo "pull attempt $i failed, retrying in 10s..."
             sleep 10
           done
@@ -213,11 +216,10 @@ jobs:
           command: build
           args: --release --out dist --manifest-path bindings/python/Cargo.toml
           # Linux wheels build in a manylinux container by default; the ort
-          # ONNX Runtime download works there. Pin the full image reference
-          # (Docker Hub mirror, pre-pulled above with retry) instead of the
-          # bare "2_28" alias, which maturin-action resolves to quay.io —
-          # a registry that has shown transient pull failures here.
-          manylinux: ${{ matrix.os == 'ubuntu-latest' && 'docker.io/pypa/manylinux_2_28_x86_64' || 'auto' }}
+          # ONNX Runtime download works there, but pin the image explicitly
+          # (quay.io — see note above) so the glibc floor is predictable and
+          # maturin-action reuses the image pre-pulled with retry above.
+          manylinux: ${{ matrix.os == 'ubuntu-latest' && 'quay.io/pypa/manylinux_2_28_x86_64' || 'auto' }}
 
       # Prove the freshly built wheel installs and its full remember → recall →
       # forget → stats → vacuum cycle works — the pytest E2E suite (the Python
