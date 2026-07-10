@@ -126,29 +126,42 @@ all-MiniLM-L6-v2 int8 embeddings):
 |---|---:|
 | recall@10 (vs. brute-force exact) | 0.9953 |
 | recall@10, worst query | 0.9000 |
-| query p50 / p99 (warm) | 10.6 ms / 17.1 ms |
-| cold open (`Store::open`) + first query | 0.3 ms + 12.0 ms |
-| `remember` p50 / p99 (end-to-end, **incl. embedding**) | 6.7 ms / 16.7 ms |
-| ingest throughput (end-to-end, incl. embedding) | ~82 mem/s |
+| query p50 / p99 (warm) | 10.4 ms / 14.3 ms |
+| cold open (`Store::open`) + first query | 0.4 ms + 10.6 ms |
+| `remember` p50 / p99 (end-to-end, **incl. embedding**) | 7.5 ms / 22.3 ms |
+| ingest throughput (end-to-end, incl. embedding) | ~68 mem/s |
 | file size on disk | 82 MiB |
-| peak RSS (ingest / query) | ~112 MiB |
+| peak RSS (ingest / query) | ~118 MiB |
 
 Notes and honesty caveats:
 
 - **`remember` latency includes embedding on CPU.** That is the real cost your agent pays,
   so we report it — but it means our ingest number is *not* comparable to a vectors-only
-  store's ingest. Embedding, not indexing, dominates that ~82 mem/s.
-- **No head-to-head with sqlite-vec / zvec is published yet.** The harness pins their
-  versions (sqlite-vec 0.1.6, zvec 0.2.0) and can measure them behind
-  `--features compare-sqlite-vec,compare-zvec`, but those rows require the native
-  toolchains and are **not measured on the current run** — so we report no number rather
-  than a fabricated one (BENCHMARKS.md §4). When they are measured and win a metric, that
-  loss goes in the table automatically.
-- **The 100k targets are not in this run.** The spec NFRs stated at 100k — recall p99
-  < 50 ms and peak RAM < 300 MiB — need the `agent-mem-100k` dataset; see
-  [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the [CHANGELOG](CHANGELOG.md) for the
-  recorded result. The one NFR measurable at 10k, `remember` p99 < 200 ms end-to-end,
-  passes at 16.7 ms.
+  store's ingest. Embedding, not indexing, dominates that ~68 mem/s.
+- **The 100k targets pass.** The spec NFRs stated at 100k — recall p99 < 50 ms and peak
+  RAM < 300 MiB — are measured on the `agent-mem-100k` dataset and pass (15.5 ms, 281 MiB);
+  see [docs/BENCHMARKS.md](docs/BENCHMARKS.md), [`benches/results/latest.md`](benches/results/latest.md)
+  and the [CHANGELOG](CHANGELOG.md). `remember` p99 < 200 ms end-to-end passes at 22 ms @ 100k.
+
+### Head-to-head vs. sqlite-vec / zvec
+
+Same vectors, same 1k queries, same `k`, on `agent-mem-10k` (competitor versions pinned in
+`benches/src/competitors.rs`; run behind `--features compare-sqlite-vec,compare-zvec`):
+
+| System | Version | recall@10 | query p50 / p99 | ingest (vec-only) | on-disk size |
+|---|---|---:|---:|---:|---:|
+| **EmbedMind** | 0.1.0-dev | 0.9953 | 10.4 ms / 14.3 ms | — (embeds; see above) | 82 MiB |
+| sqlite-vec | 0.1.10-alpha.4 | 0.9984 | 9.8 ms / 13.2 ms | 196/s | 15.3 MiB |
+| zvec | 0.5.1 | 0.9912 | 1.1 ms / 1.5 ms | 70905/s | 17.4 MiB |
+
+**Where EmbedMind loses (honesty contract, BENCHMARKS.md §4):** on this 10k set both
+baselines are smaller on disk (they store bare vectors; EmbedMind keeps the memory text,
+metadata and provenance the product is built around), and both are faster on warm query
+p99 — zvec dramatically so, and sqlite-vec's brute-force scan edges out our recall too.
+Their ingest is vectors-only and not comparable to EmbedMind's embed-included `remember`
+(BENCHMARKS.md §1). These rows are rendered straight from `benches/results/`, never
+hand-picked — when a baseline wins a metric it lands in the table and the losses list
+automatically.
 
 ## When to use sqlite-vec instead
 

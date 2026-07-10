@@ -15,6 +15,22 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Real head-to-head benchmark numbers vs. sqlite-vec + zvec** — the comparison
+  columns the harness reserved are now filled with measured values (no more
+  "not measured on this run"). Ran `benches/run_all.sh` with
+  `--features compare-sqlite-vec,compare-zvec` on the founder's Windows box (MSVC
+  toolchain), same vectors/queries/`k`, on `agent-mem-10k`: sqlite-vec
+  **0.1.10-alpha.4** (recall@10 0.9984, query p99 13.2 ms, 15.3 MiB) and zvec
+  **0.5.1** (recall@10 0.9912, query p99 1.5 ms, 17.4 MiB). Both beat EmbedMind
+  on warm-query p99 and on-disk size (they store bare vectors; EmbedMind keeps
+  the memory text + metadata + provenance), and sqlite-vec edges out recall —
+  recorded in the losses list per the honesty contract (BENCHMARKS.md §4).
+  Competitor metrics now also land in `benches/results/<version>.json` so every
+  table cell traces to a field. A `COMPARE_DATASET` env var pins the (expensive)
+  comparison to the 10k set while the full EmbedMind 10k+100k table and its NFR
+  verdicts (all passing: recall p99 15.5 ms, peak RAM 281 MiB @ 100k) still run.
+  The zvec adapter's directory pre-creation bug (zvec rejects a pre-existing
+  collection path) was fixed.
 - **Python bindings** (S12 / task B5, roadmap 2.5) — the multiplier that
   unlocks LangChain and custom agents. New `bindings/python` crate (PyO3 +
   maturin, its own workspace like `fuzz`) exposes `Store` with
