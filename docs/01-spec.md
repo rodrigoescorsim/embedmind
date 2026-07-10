@@ -215,14 +215,16 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
   agente/sessão gravou o quê.
 - **Verificação:** teste de round-trip de proveniência via MCP e CLI.
 
-### S15. Não-regressão de performance [contínua]
+### S15. Não-regressão de performance [✅ guard no CI; contínua]
 
 - **Dado** qualquer mudança na engine, **quando** o CI roda o harness de benchmark,
   **então** recall@10, latências p50/p99 (incl. cold-open), throughput de ingest,
   tamanho de arquivo e RSS de pico não regridem além do limiar; números publicados
   seguem [BENCHMARKS.md](BENCHMARKS.md) — incluindo onde perdemos para
   sqlite-vec/zvec.
-- **Verificação:** `cargo bench` / `benches/run_all.sh`.
+- **Verificação:** `benches/run_all.sh` (com `BASELINE=<results.json>` para o guard
+  §5) e o workflow `.github/workflows/bench.yml`, que roda em todo PR/push que toca
+  engine ou harness e falha o job quando um limiar do §5 é cruzado.
 
 ---
 

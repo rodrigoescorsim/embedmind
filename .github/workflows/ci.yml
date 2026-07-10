@@ -125,5 +125,6 @@ jobs:
           python -m pip install --find-links dist --no-index embedmind
           EMBEDMIND_BIN="target/release/embedmind" python -m pytest bindings/python/tests -v
 
-  # Remaining placeholder for M1 item 1.8/1.7:
-  #   - benchmark regression guard (see docs/BENCHMARKS.md §5)
+  # The benchmark regression guard (docs/BENCHMARKS.md §5, spec S15) lives in
+  # its own workflow, .github/workflows/bench.yml — path-filtered to engine/
+  # harness changes because a full harness run costs minutes of CPU.

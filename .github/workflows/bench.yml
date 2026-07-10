@@ -1,0 +1,150 @@
+# Performance regression guard (spec S15, docs/BENCHMARKS.md §5).
+#
+# Runs the benchmark harness (10k suite — the §5 per-PR workload) on PRs that
+# touch the engine or the harness, and on every matching push to main. Fails
+# when any applicable NFR is missed, or when a metric regressed beyond the §5
+# thresholds vs the baseline.
+#
+# Baseline strategy (see benches/src/regression.rs):
+#   1. Rolling same-runner baseline: the results of the last guard-passing run
+#      on main, kept in the actions cache. Same os/arch, so ALL checks
+#      (recall@10, file size, query/remember p99, peak RSS) are enforced.
+#   2. Fallback: the committed release baseline (newest
+#      benches/results/<version>.json). It may come from another platform
+#      (e.g. the founder's Windows box), in which case the machine-dependent
+#      latency/RSS checks degrade to warnings and only the deterministic
+#      recall@10 + file-size checks are enforced.
+# The rolling baseline only advances when the guard passes, so a regression on
+# main cannot ratchet itself into the baseline.
+#
+# Datasets are ALWAYS materialized fresh (benches/data is deliberately not
+# cached): the .mind store is built by the code under test, so a cached store
+# built by older code would mask file-format size regressions.
+#
+# The report (bench table + regression verdicts) lands in the job's step
+# summary and in the `bench-results` artifact.
+
+name: Bench
+
+on:
+  pull_request:
+    paths:
+      - "crates/embedmind-core/**"
+      - "benches/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/bench.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/embedmind-core/**"
+      - "benches/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Run the full suite (10k + 100k — much slower)"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  regression-guard:
+    name: perf regression guard (BENCHMARKS.md §5)
+    runs-on: ubuntu-latest
+    # Materializing 10k memories (ONNX embedding, CPU-only) + the suite itself
+    # is minutes on a shared runner; bound it well below the 6h default.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache ONNX Runtime download (ort pulls this outside target/)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-dylib-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Restore rolling baseline (last guard-passing run on main)
+        uses: actions/cache/restore@v4
+        with:
+          path: .bench-baseline/latest.json
+          # The save key below is unique per run; restore always goes through
+          # the prefix and picks the most recent entry.
+          key: bench-baseline-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            bench-baseline-${{ runner.os }}-
+
+      - name: Pick baseline
+        shell: bash
+        # Copied OUT of benches/results before the harness runs: run_all
+        # rewrites results/<version>.json + latest.json, and the guard must
+        # never end up comparing the run against itself.
+        run: |
+          if [ -f .bench-baseline/latest.json ]; then
+            echo "baseline: rolling same-runner baseline (last passing main run)"
+            cp .bench-baseline/latest.json /tmp/bench-baseline.json
+          else
+            committed="$(ls benches/results/*.json | sort -V | tail -n 1)"
+            echo "baseline: no rolling baseline cached — committed release baseline ${committed}"
+            echo "(if it came from another platform, latency/RSS checks degrade to warnings)"
+            cp "${committed}" /tmp/bench-baseline.json
+          fi
+
+      - name: Run benchmark harness
+        shell: bash
+        # Fails on any applicable-NFR miss (absolute ceilings from the spec).
+        run: |
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full }}" = "true" ]; then
+            ./benches/run_all.sh --full
+          else
+            ./benches/run_all.sh
+          fi
+
+      - name: Publish bench table to step summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f benches/results/latest.md ]; then
+            cat benches/results/latest.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Regression guard vs baseline
+        shell: bash
+        # Fails on any §5 threshold crossed vs the baseline (relative check;
+        # the markdown verdict table goes to the step summary either way).
+        run: |
+          cargo run -p embedmind-bench --release --bin compare_baseline -- \
+            /tmp/bench-baseline.json benches/results/latest.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: benches/results/
+          if-no-files-found: ignore
+
+      # Rolling baseline only advances on main, and only when everything above
+      # passed — a regressing run can never become the next baseline.
+      - name: Stage rolling baseline
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          mkdir -p .bench-baseline
+          cp benches/results/latest.json .bench-baseline/latest.json
+
+      - name: Save rolling baseline
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: .bench-baseline/latest.json
+          key: bench-baseline-${{ runner.os }}-${{ github.run_id }}

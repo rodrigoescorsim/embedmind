@@ -63,3 +63,13 @@ baseline: `recall@10` drops > 1 pt · p99 query latency regresses > 15% · file 
 > 10% · peak RSS grows > 15%. Nightly runs the 100k suite and plots trends. Thresholds
 are deliberately loose (shared-runner noise); the reference machine confirms before a
 release is cut.
+
+Implementation: `.github/workflows/bench.yml` (path-filtered to engine/harness changes)
+runs the harness and then `compare_baseline` (`benches/src/regression.rs`) against a
+baseline. The baseline is *rolling*: the results of the last guard-passing run on
+`main`, kept in the CI cache so it comes from the same runner and every check is
+enforced; when no rolling baseline exists yet, it falls back to the committed
+`benches/results/<version>.json` release baseline — which may come from another
+platform, in which case the machine-dependent latency/RSS checks degrade to loud
+warnings and only the deterministic recall@10 + file-size checks fail the job.
+Locally, `BASELINE=<results.json> ./benches/run_all.sh` runs the same comparison.
