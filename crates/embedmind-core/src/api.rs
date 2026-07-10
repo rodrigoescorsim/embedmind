@@ -221,6 +221,16 @@ impl Store {
     /// relation whose target does not exist (or was already forgotten) is a
     /// typed error — dangling edges are never born, they can only *become*
     /// dangling via a later [`Store::forget`].
+    ///
+    /// Versioned knowledge ([`MemoryDraft::supersede`], S19, `docs/adr/0013`):
+    /// each supersedes target gets its `superseded` flag set and a
+    /// `"supersedes"` graph edge from the new memory, all in this same
+    /// transaction. From then on the target is excluded from every
+    /// recall/search (re-checked against its record at query time, like a
+    /// tombstone) but stays readable via [`Store::get`]/[`Store::related`] as
+    /// the previous version. A target that does not exist or was forgotten is
+    /// a typed error; so is a target scoped to a *different* project —
+    /// superseding never crosses project boundaries.
     pub fn remember(&mut self, draft: MemoryDraft) -> Result<Memory> {
         let MemoryDraft {
             content,
@@ -230,10 +240,12 @@ impl Store {
             session_id,
             entities,
             relations,
+            supersedes,
         } = draft;
         let mut record = MemoryRecord {
             id: Ulid::new(),
             tombstone: false,
+            superseded: false,
             content,
             vec_ref: None,
             project,
@@ -260,6 +272,36 @@ impl Store {
                 ));
             }
         }
+        // Supersedes targets (S19, ADR 0013): same validate-before-any-write
+        // discipline as relations — every target checked (exists, live, same
+        // project) before the first flag is set, so a bad target in the list
+        // rolls the whole remember back to exactly nothing. Duplicates are
+        // deduplicated so one target never gets two "supersedes" edges.
+        let mut supersedes_targets: Vec<(Ulid, MemoryRecord)> = Vec::new();
+        for target in supersedes {
+            if supersedes_targets.iter().any(|(id, _)| *id == target) {
+                continue;
+            }
+            let target_rec = match btree::get(&txn, txn.root_btree_page(), &target.to_bytes())? {
+                Some(bytes) => MemoryRecord::decode(&bytes)?,
+                None => {
+                    return Err(Error::InvalidArgument(
+                        "supersedes target does not exist or was forgotten",
+                    ));
+                }
+            };
+            if target_rec.tombstone {
+                return Err(Error::InvalidArgument(
+                    "supersedes target does not exist or was forgotten",
+                ));
+            }
+            if target_rec.project != record.project {
+                return Err(Error::InvalidArgument(
+                    "supersedes target belongs to a different project",
+                ));
+            }
+            supersedes_targets.push((target, target_rec));
+        }
         if let Some(embedder) = &self.embedder {
             for mut vector in embedder.embed_chunks(&record.content)? {
                 index::normalize(&mut vector);
@@ -274,7 +316,22 @@ impl Store {
         // not stored at all — no torn state to recover into. Runs whether or
         // not an embedder is present: full-text is independent of vectors.
         index::fts::index_document(&mut txn, record.id, &record.content)?;
-        index::graph::add_memory(&mut txn, record.id, &entities, &relations)?;
+        // The graph gets the caller's relations plus one "supersedes" edge per
+        // target (S19), so the version chain is navigable via `related` in
+        // both directions. Exclusion is never derived from these edges — the
+        // flag on the target's record is the authority (ADR 0013).
+        let mut graph_relations = relations;
+        for (target, _) in &supersedes_targets {
+            graph_relations.push((SUPERSEDES_RELATION.to_owned(), *target));
+        }
+        index::graph::add_memory(&mut txn, record.id, &entities, &graph_relations)?;
+        // Flag each superseded target in this same transaction: the new
+        // version and the exclusion of the old one land atomically, or
+        // neither does.
+        for (target, mut target_rec) in supersedes_targets {
+            target_rec.superseded = true;
+            btree::insert(&mut txn, target.to_bytes(), &target_rec.encode()?)?;
+        }
         let bytes = record.encode()?;
         btree::insert(&mut txn, record.id.to_bytes(), &bytes)?;
         txn.commit()?;
@@ -621,7 +678,9 @@ impl Store {
     }
 
     /// Fetches one memory by id. Tombstoned (forgotten) memories return
-    /// `None`, exactly like absent ones.
+    /// `None`, exactly like absent ones. Superseded memories (S19) **are**
+    /// returned — they are history, hidden from recall but not from a direct
+    /// read; check [`Memory::superseded`] to tell.
     pub fn get(&self, id: Ulid) -> Result<Option<Memory>> {
         let root = self.pager.header().root_btree_page;
         match btree::get(&self.pager, root, &id.to_bytes())? {
@@ -656,9 +715,11 @@ impl Store {
     /// directions (S13, `docs/adr/0012`). Each hit carries the relation kind
     /// and whether the edge points out of `id` or into it. Tombstoned
     /// neighbors are re-checked at query time and never returned — a relation
-    /// to a forgotten memory disappears with the tombstone. Empty when `id`
-    /// has no graph data or the file predates the graph layer
-    /// (`graph_root_page == 0`) — older files degrade, never error.
+    /// to a forgotten memory disappears with the tombstone. Superseded
+    /// neighbors (S19) **are** returned: the [`SUPERSEDES_RELATION`] edge is
+    /// how the version history stays navigable. Empty when `id` has no graph
+    /// data or the file predates the graph layer (`graph_root_page == 0`) —
+    /// older files degrade, never error.
     pub fn related(&self, id: Ulid) -> Result<Vec<RelatedMemory>> {
         let graph_root = self.pager.header().graph_root_page;
         let Some(adj) = index::graph::memory_graph(&self.pager, graph_root, id)? else {
@@ -828,10 +889,14 @@ impl Store {
                     }
                     None => (Vec::new(), Vec::new()),
                 };
-            // Reconstruct the on-disk record; `iter` already filtered tombstones.
+            // Reconstruct the on-disk record; `iter` already filtered
+            // tombstones. The superseded flag comes over verbatim — superseded
+            // memories are history, not garbage, and vacuum preserves them
+            // (S19, ADR 0013).
             let record = MemoryRecord {
                 id: memory.id,
                 tombstone: false,
+                superseded: memory.superseded,
                 content: memory.content,
                 vec_ref: None,
                 project: memory.project,
@@ -950,12 +1015,16 @@ impl Store {
     }
 }
 
-/// Whether a record is live, within `query`'s project scope, and written by
-/// the queried agent (when an agent filter is set, S14) — the shared
-/// liveness/scope half of every `recall`/`search_text` `keep` predicate.
-/// Metadata filters ([`Query::record_passes_filters`]) compose on top of this.
+/// Whether a record is live, not superseded, within `query`'s project scope,
+/// and written by the queried agent (when an agent filter is set, S14) — the
+/// shared liveness/scope half of every `recall`/`search_text` `keep`
+/// predicate. Superseded memories (S19, `docs/adr/0013`) are excluded here,
+/// re-checked against the record at query time exactly like tombstones —
+/// exclusion is never trusted to an index or to the graph. Metadata filters
+/// ([`Query::record_passes_filters`]) compose on top of this.
 fn in_scope(query: &Query, rec: &MemoryRecord) -> bool {
     !rec.tombstone
+        && !rec.superseded
         && match &query.scope {
             Scope::All => true,
             Scope::Project(p) => rec.project.as_deref() == Some(p.as_str()),
@@ -1016,6 +1085,7 @@ pub struct MemoryDraft {
     session_id: Option<String>,
     entities: Vec<String>,
     relations: Vec<(String, Ulid)>,
+    supersedes: Vec<Ulid>,
 }
 
 impl MemoryDraft {
@@ -1030,6 +1100,7 @@ impl MemoryDraft {
             session_id: None,
             entities: Vec::new(),
             relations: Vec::new(),
+            supersedes: Vec::new(),
         }
     }
 
@@ -1090,6 +1161,25 @@ impl MemoryDraft {
         self.relations = relations;
         self
     }
+
+    /// Marks this memory as the new version of an **existing, live** memory
+    /// (S19, `docs/adr/0013`): [`Store::remember`] sets the target's
+    /// `superseded` flag and writes a [`SUPERSEDES_RELATION`] edge in the same
+    /// transaction. The target disappears from every subsequent
+    /// recall/search but stays readable via [`Store::get`]/[`Store::related`]
+    /// as history — and `vacuum` preserves it. A missing, forgotten, or
+    /// different-project target is a typed error and nothing is stored.
+    pub fn supersede(mut self, target: Ulid) -> Self {
+        self.supersedes.push(target);
+        self
+    }
+
+    /// Replaces the whole supersedes list at once — the seam the shells use
+    /// after parsing a `supersedes` argument.
+    pub fn supersedes(mut self, targets: Vec<Ulid>) -> Self {
+        self.supersedes = targets;
+        self
+    }
 }
 
 /// How far a [`Store::recall`] looks. Defaults to [`Scope::All`]; the MCP
@@ -1107,6 +1197,13 @@ pub enum Scope {
 /// Default number of hits [`Store::recall`] returns when the caller does not
 /// set [`Query::limit`] (DESIGN.md §8).
 pub const DEFAULT_RECALL_LIMIT: usize = 8;
+
+/// Relation kind of the graph edge [`Store::remember`] writes from a new
+/// memory to each of its [`MemoryDraft::supersede`] targets (S19,
+/// `docs/adr/0013`). The edge makes the version chain navigable via
+/// [`Store::related`]; the *exclusion* comes from the target record's own
+/// `superseded` flag, never from this edge.
+pub const SUPERSEDES_RELATION: &str = "supersedes";
 
 /// A nearest-neighbor recall request. Build with [`Query::new`] plus the
 /// chainable setters; the defaults (limit 8, all projects, the index's
@@ -1248,6 +1345,10 @@ pub struct Memory {
     pub provenance: Provenance,
     /// `true` only when yielded by [`Store::iter_all`] after a `forget`.
     pub tombstone: bool,
+    /// `true` when a newer memory superseded this one (S19, `docs/adr/0013`):
+    /// excluded from every recall/search, but still readable here and
+    /// navigable via [`Store::related`] as the previous version.
+    pub superseded: bool,
 }
 
 impl Memory {
@@ -1259,6 +1360,7 @@ impl Memory {
             metadata: record.metadata,
             provenance: record.provenance,
             tombstone: record.tombstone,
+            superseded: record.superseded,
         }
     }
 }
@@ -2164,6 +2266,192 @@ mod tests {
             .collect();
         assert_eq!(members, expected);
         assert!(store.entity_members("doomed-only").unwrap().is_empty());
+    }
+
+    // --- S19 supersedes: versioned knowledge (docs/adr/0013) ----------------
+
+    #[test]
+    fn supersede_hides_target_from_recall_but_get_and_related_keep_it() {
+        let mut store = store_with_embedder(&[&["rust"], &["python"]]);
+        let a = store
+            .remember(MemoryDraft::new("rust fact, first version"))
+            .unwrap();
+        let b = store
+            .remember(MemoryDraft::new("rust fact, corrected version").supersede(a.id))
+            .unwrap();
+
+        // A is out of every search path: hybrid recall, pure keyword, pure
+        // vector — the status is re-read from the record each time (S2 rule).
+        for hits in [
+            store.recall(Query::new("rust fact")).unwrap(),
+            store.search_text(Query::new("rust fact")).unwrap(),
+            store.recall_vector(Query::new("rust fact")).unwrap(),
+        ] {
+            let ids: Vec<Ulid> = hits.iter().map(|h| h.id).collect();
+            assert!(ids.contains(&b.id), "the new version must surface");
+            assert!(!ids.contains(&a.id), "the superseded version must not");
+        }
+
+        // …but A is still readable as history.
+        let got = store.get(a.id).unwrap().unwrap();
+        assert_eq!(got.content, "rust fact, first version");
+        assert!(got.superseded);
+        assert!(!store.get(b.id).unwrap().unwrap().superseded);
+
+        // The chain is navigable in both directions via the graph edge.
+        let from_b = store.related(b.id).unwrap();
+        assert_eq!(from_b.len(), 1);
+        assert_eq!(from_b[0].id, a.id);
+        assert_eq!(from_b[0].kind, SUPERSEDES_RELATION);
+        assert!(from_b[0].outgoing);
+        let from_a = store.related(a.id).unwrap();
+        assert_eq!(from_a.len(), 1);
+        assert_eq!(from_a[0].id, b.id);
+        assert!(!from_a[0].outgoing);
+
+        // 1-hop expansion is part of recall: it must not reintroduce A.
+        let expanded = store
+            .recall(Query::new("rust fact").expand_related(true))
+            .unwrap();
+        assert!(expanded.iter().all(|h| h.id != a.id));
+    }
+
+    #[test]
+    fn supersede_chain_only_the_head_recalls_and_is_navigable_stepwise() {
+        let mut store = store_with_embedder(&[&["rust"]]);
+        let a = store.remember(MemoryDraft::new("rust fact v1")).unwrap();
+        let b = store
+            .remember(MemoryDraft::new("rust fact v2").supersede(a.id))
+            .unwrap();
+        let c = store
+            .remember(MemoryDraft::new("rust fact v3").supersede(b.id))
+            .unwrap();
+
+        let hits = store.recall(Query::new("rust fact")).unwrap();
+        let ids: Vec<Ulid> = hits.iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec![c.id], "only the head of the chain recalls");
+
+        // Walk the chain step by step: C → B → A.
+        let step1 = store.related(c.id).unwrap();
+        assert_eq!(step1.len(), 1);
+        assert_eq!(step1[0].id, b.id);
+        assert_eq!(step1[0].kind, SUPERSEDES_RELATION);
+        let from_b = store.related(b.id).unwrap();
+        let down: Vec<Ulid> = from_b.iter().filter(|r| r.outgoing).map(|r| r.id).collect();
+        let up: Vec<Ulid> = from_b.iter().filter(|r| !r.outgoing).map(|r| r.id).collect();
+        assert_eq!(down, vec![a.id]);
+        assert_eq!(up, vec![c.id]);
+    }
+
+    #[test]
+    fn supersede_missing_forgotten_or_cross_project_target_is_typed_error() {
+        let (_, mut store) = store();
+        let gone = store.remember(MemoryDraft::new("to forget")).unwrap();
+        store.forget(gone.id).unwrap();
+        for target in [Ulid::new(), gone.id] {
+            let err = store
+                .remember(MemoryDraft::new("new version").supersede(target))
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+        }
+
+        // Cross-project (including global vs. project): never crosses scope.
+        let in_x = store
+            .remember(MemoryDraft::new("scoped fact").project("x"))
+            .unwrap();
+        let global = store.remember(MemoryDraft::new("global fact")).unwrap();
+        for (content, project, target) in [
+            ("wrong project", Some("y"), in_x.id),
+            ("global cannot supersede scoped", None, in_x.id),
+            ("scoped cannot supersede global", Some("x"), global.id),
+        ] {
+            let mut draft = MemoryDraft::new(content).supersede(target);
+            if let Some(p) = project {
+                draft = draft.project(p);
+            }
+            let err = store.remember(draft).unwrap_err();
+            assert!(matches!(err, Error::InvalidArgument(_)), "{content}: {err}");
+        }
+
+        // Every failed remember rolled back whole: no record, no flag set,
+        // no dangling supersedes edge.
+        assert!(!store.get(in_x.id).unwrap().unwrap().superseded);
+        assert!(!store.get(global.id).unwrap().unwrap().superseded);
+        assert_eq!(store.stats().unwrap().graph_relations, 0);
+        assert_eq!(store.stats().unwrap().live_memories, 2);
+    }
+
+    #[test]
+    fn forget_of_the_superseder_does_not_resurrect_the_superseded() {
+        let mut store = store_with_embedder(&[&["rust"]]);
+        let a = store.remember(MemoryDraft::new("rust fact v1")).unwrap();
+        let b = store
+            .remember(MemoryDraft::new("rust fact v2").supersede(a.id))
+            .unwrap();
+
+        store.forget(b.id).unwrap();
+
+        // Exclusion is state on A's own record, not derived from B or from
+        // the graph (ADR 0013): with B gone, A stays hidden.
+        let hits = store.recall(Query::new("rust fact")).unwrap();
+        assert!(hits.is_empty(), "neither version recalls: {hits:?}");
+        assert!(store.get(a.id).unwrap().unwrap().superseded);
+
+        // …and the superseded memory itself can still be forgotten.
+        assert!(store.forget(a.id).unwrap());
+        assert_eq!(store.get(a.id).unwrap(), None);
+    }
+
+    #[test]
+    fn vacuum_preserves_superseded_memories_and_the_chain() {
+        let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+        let mut store = store_on(&vfs, "m.mind", &[&["rust"]]);
+        let a = store.remember(MemoryDraft::new("rust fact v1")).unwrap();
+        let b = store
+            .remember(MemoryDraft::new("rust fact v2").supersede(a.id))
+            .unwrap();
+        let doomed = store.remember(MemoryDraft::new("rust doomed")).unwrap();
+        store.forget(doomed.id).unwrap();
+
+        store.vacuum().unwrap();
+
+        // Tombstones reclaimed; superseded history preserved, flag intact.
+        assert_eq!(store.get(doomed.id).unwrap(), None);
+        let a_after = store.get(a.id).unwrap().unwrap();
+        assert!(a_after.superseded, "vacuum must keep the superseded flag");
+        assert_eq!(a_after.content, "rust fact v1");
+
+        // The supersedes edge survived the rebuild, both directions.
+        let from_b = store.related(b.id).unwrap();
+        assert_eq!(from_b.len(), 1);
+        assert_eq!(from_b[0].id, a.id);
+        assert_eq!(from_b[0].kind, SUPERSEDES_RELATION);
+
+        // And recall still excludes A after the rebuild.
+        let hits = store.recall(Query::new("rust fact")).unwrap();
+        let ids: Vec<Ulid> = hits.iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec![b.id]);
+    }
+
+    #[test]
+    fn supersede_deduplicates_targets_and_accepts_multiple() {
+        let (_, mut store) = store();
+        let a = store.remember(MemoryDraft::new("fact a")).unwrap();
+        let b = store.remember(MemoryDraft::new("fact b")).unwrap();
+        let merged = store
+            .remember(
+                MemoryDraft::new("merged fact")
+                    .supersede(a.id)
+                    .supersede(b.id)
+                    .supersede(a.id), // duplicate: must not double the edge
+            )
+            .unwrap();
+        assert!(store.get(a.id).unwrap().unwrap().superseded);
+        assert!(store.get(b.id).unwrap().unwrap().superseded);
+        let edges = store.related(merged.id).unwrap();
+        assert_eq!(edges.len(), 2, "one edge per distinct target: {edges:?}");
+        assert!(edges.iter().all(|e| e.kind == SUPERSEDES_RELATION));
+        assert_eq!(store.stats().unwrap().graph_relations, 2);
     }
 
     #[test]

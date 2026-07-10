@@ -32,7 +32,7 @@ pub mod fuzz;
 
 pub use api::{
     AgentStats, Memory, MemoryDraft, Query, RecallOutcome, Recalled, RelatedMemory, Scope, Store,
-    StoreOptions, StoreStats,
+    StoreOptions, StoreStats, SUPERSEDES_RELATION,
 };
 pub use error::{Error, Result};
 pub use record::{Filter, Scalar};
