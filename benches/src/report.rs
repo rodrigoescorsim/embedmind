@@ -253,19 +253,20 @@ fn render_competitor_table(
     );
     let _ = writeln!(
         out,
-        "| System | Version | recall@10 | query p50 | query p99 | ingest (vec-only) |"
+        "| System | Version | recall@10 | query p50 | query p99 | ingest (vec-only) | on-disk size |"
     );
-    let _ = writeln!(out, "|---|---|---:|---:|---:|---:|");
+    let _ = writeln!(out, "|---|---|---:|---:|---:|---:|---:|");
 
     // EmbedMind's own row on the biggest dataset, for side-by-side reading.
     if let Some(r) = biggest {
         let _ = writeln!(
             out,
-            "| **EmbedMind** | {} | {:.4} | {:.2} ms | {:.2} ms | — (embeds; see note) |",
+            "| **EmbedMind** | {} | {:.4} | {:.2} ms | {:.2} ms | — (embeds; see note) | {} |",
             env!("CARGO_PKG_VERSION"),
             r.recall.recall_at_k,
             r.query_p50_ms,
             r.query_p99_ms,
+            human_bytes(r.file_bytes),
         );
     }
 
@@ -274,22 +275,23 @@ fn render_competitor_table(
             CompetitorOutcome::Measured(m) => {
                 let _ = writeln!(
                     out,
-                    "| {} | {} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | {} | {} | {} | {} |",
                     c.name,
                     c.version,
                     opt_f4(m.recall_at_10),
                     opt_ms(m.query_p50_ms),
                     opt_ms(m.query_p99_ms),
                     opt_per_sec(m.ingest_vecs_per_sec),
+                    m.file_bytes.map(human_bytes).unwrap_or_else(|| "—".into()),
                 );
             }
             CompetitorOutcome::NotMeasured { reason } => {
                 let _ = writeln!(
                     out,
-                    "| {} | {} (target) | _not measured_ | _not measured_ | _not measured_ | _not measured_ |",
+                    "| {} | {} (target) | _not measured_ | _not measured_ | _not measured_ | _not measured_ | _not measured_ |",
                     c.name, c.version
                 );
-                let _ = writeln!(out, "|   ↳ | | | | | _{reason}_ |");
+                let _ = writeln!(out, "|   ↳ | | | | | | _{reason}_ |");
             }
         }
     }
@@ -329,6 +331,19 @@ fn render_losses(
                         out,
                         "- **query p99**: {} {:.2} ms beats EmbedMind {:.2} ms on `{}`.",
                         c.name, cp, r.query_p99_ms, r.dataset
+                    );
+                    any = true;
+                }
+                if let Some(cb) = m.file_bytes
+                    && cb < r.file_bytes
+                {
+                    let _ = writeln!(
+                        out,
+                        "- **on-disk size**: {} {} beats EmbedMind {} on `{}`.",
+                        c.name,
+                        human_bytes(cb),
+                        human_bytes(r.file_bytes),
+                        r.dataset
                     );
                     any = true;
                 }
@@ -628,7 +643,7 @@ mod tests {
         assert!(md.contains("NFR verdict"));
         // Pinned competitor versions must appear even when not measured.
         assert!(md.contains("sqlite-vec"));
-        assert!(md.contains("0.1.6"));
+        assert!(md.contains("0.1.10-alpha.4"));
         assert!(md.contains("_not measured_"));
     }
 

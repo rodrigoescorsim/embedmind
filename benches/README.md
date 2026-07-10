@@ -21,7 +21,7 @@ and the CI regression guard.
 | `metrics` | Latency percentiles (nearest-rank p50/p99) and throughput. |
 | `sysmem` | Peak-RSS sampling across a measured phase (pinned `sysinfo`, no `unsafe`). |
 | `harness` | `run_suite`: the full metric suite over one dataset. |
-| `competitors` | Pinned+recorded sqlite-vec/zvec registry and feature-gated adapters; honest "not measured" when a toolchain is absent. |
+| `competitors` | Pinned+recorded sqlite-vec/zvec registry and feature-gated **real adapters** (statically-compiled `vec0` via rusqlite; official `zvec-rust` binding); honest "not measured" when a feature is off. |
 | `report` | Spec-NFR validation + README-ready markdown / results JSON renderers. |
 
 ## Why datasets are "committed" without committing gigabytes
@@ -58,9 +58,15 @@ cargo run -p embedmind-bench --release --bin baseline -- agent-mem-10k --generat
 # Equivalent direct invocation (--release is mandatory for honest numbers):
 cargo run -p embedmind-bench --release --bin run_all -- agent-mem-10k agent-mem-100k
 
-# With a competitor toolchain present, enable its adapter feature:
-COMPARE="--features compare-sqlite-vec" ./benches/run_all.sh
+# With the competitor adapters enabled (fills the comparison rows for real):
+COMPARE="--features compare-sqlite-vec,compare-zvec" ./benches/run_all.sh
 ```
+
+The `compare-*` features are **off by default** and their build scripts are the
+only place the harness touches the network (fetching the pinned, SHA-256-verified
+`sqlite-vec.c` and zvec's prebuilt native library, respectively — see
+`benches/build.rs` and `Cargo.toml`). The engine itself stays network-free; these
+are bench-only, opt-in build steps, never runtime calls.
 
 `run_all` writes `benches/results/<version>.json` and `benches/results/latest.md`
 (git-ignored dev output; a per-version JSON is force-added only when a release is

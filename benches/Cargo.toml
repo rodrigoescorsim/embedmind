@@ -18,17 +18,67 @@ ulid = { workspace = true }
 # forbid` stands even though we read OS memory counters.
 sysinfo = "=0.31.4"
 
+# --- competitor adapters, both optional (docs/BENCHMARKS.md §1) ---
+#
+# sqlite-vec: the `sqlite-vec` crate on crates.io (0.1.10-alpha.4, the only
+# version published) ships a `sqlite-vec.c` that `#include`s sibling files
+# (`sqlite-vec-diskann.c`, `sqlite-vec-rescore.c`, …) the published package
+# does not contain — its own `cargo build` fails on every platform, not just
+# Windows. So this harness never compiles that crate's build script; instead
+# `build.rs` fetches the upstream `sqlite-vec.c` directly (pinned commit,
+# SHA-256 verified, same download-and-verify pattern as
+# `crates/embedmind-core/build.rs` for the ONNX model) and compiles the vec0
+# extension itself, with the DiskANN/rescore experimental sub-modules turned
+# off (`SQLITE_VEC_ENABLE_DISKANN=0`, `SQLITE_VEC_ENABLE_RESCORE=0`) since
+# they are the pieces with the missing includes and we only need the default
+# brute-force `vec0` table anyway (the pinned note in `competitors.rs` already
+# says "brute-force KNN"). `libsqlite3-sys` is a *direct* dependency (not just
+# transitive through `rusqlite`) so its `links = "sqlite3"` build script
+# exports `DEP_SQLITE3_INCLUDE`, which `build.rs` uses to find `sqlite3.h`
+# without hardcoding a registry path.
+rusqlite = { version = "=0.32.1", features = ["bundled"], optional = true }
+libsqlite3-sys = { version = "=0.30.1", features = ["bundled"], optional = true }
+
+# zvec: the official Rust binding for github.com/alibaba/zvec (the "zvec"
+# BENCHMARKS.md §1 names as the closest new embedded vector store).
+# `zvec-rust-sys`'s build.rs downloads a prebuilt `libzvec_c_api` for the
+# host target from a GitHub Release when no local toolchain/checkout is found
+# — a network call in *this bench-only, unpublished crate's* build, not the
+# engine. Kept strictly behind `compare-zvec` so the default harness (and the
+# CI regression guard, BENCHMARKS.md §5) never touches the network.
+zvec-rust = { version = "=0.5.1", optional = true }
+
+[build-dependencies]
+# Compiles the downloaded sqlite-vec.c into the harness when
+# compare-sqlite-vec is enabled (see `build.rs`).
+cc = { version = "1.0", optional = true }
+
 [features]
 default = []
 # Competitor comparison adapters (docs/BENCHMARKS.md §1). Off by default so the
 # harness builds everywhere (the CI regression guard runs EmbedMind-only
 # metrics); a release box with the native toolchains enables them to fill the
 # comparison columns. See `src/competitors.rs`.
-compare-sqlite-vec = []
-compare-zvec = []
+compare-sqlite-vec = ["dep:rusqlite", "dep:libsqlite3-sys", "dep:cc"]
+compare-zvec = ["dep:zvec-rust"]
 
-[lints]
-workspace = true
+# Cargo forbids mixing `lints.workspace = true` with a local `[lints.rust]`
+# override in the same manifest, so the workspace's clippy lints are repeated
+# here verbatim (docs/BENCHMARKS.md §1) with one deliberate difference:
+# registering the statically-linked sqlite-vec extension is only possible
+# through `sqlite3_auto_extension`, an inherently `unsafe` FFI call — the
+# crate exposes no safe wrapper. That call is isolated behind
+# `compare-sqlite-vec` only (see `src/competitors.rs`), so the default harness
+# build (and the CI regression guard) never needs it; the same targeted-
+# exception shape `bindings/python/Cargo.toml` already uses for PyO3's
+# generated glue.
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
 
 # One binary per harness entry point (docs/BENCHMARKS.md §2/§3). `gen_dataset`
 # materializes a committed dataset spec into vectors + a `.mind` store;

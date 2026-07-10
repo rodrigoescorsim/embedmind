@@ -28,6 +28,8 @@
 //! de-tuning), and it fills a [`CompetitorMetrics`] measured identically.
 
 use crate::dataset::VectorSet;
+#[cfg(any(feature = "compare-sqlite-vec", feature = "compare-zvec"))]
+use crate::metrics::{self, Latencies};
 
 /// A benchmarked competitor and the exact version this harness targets. The
 /// version string is what lands in the results table's "version" cell — it is
@@ -54,19 +56,23 @@ pub struct Competitor {
 pub const COMPETITORS: &[Competitor] = &[
     Competitor {
         name: "sqlite-vec",
-        // The incumbent "embedded vector search in one file". Pinned to the
-        // release the v0.1 comparison was run against; recorded here so the
-        // table's version cell is reproducible.
-        version: "0.1.6",
+        // The incumbent "embedded vector search in one file". This is the
+        // version `benches/build.rs` actually compiles (pinned upstream commit,
+        // SHA-256-verified — the source the crates.io 0.1.10-alpha.4 package
+        // was built from); recorded here so the table's version cell always
+        // matches the binary that produced the numbers.
+        version: "0.1.10-alpha.4",
         feature: "compare-sqlite-vec",
         note: "SQLite extension, default page size, vec0 virtual table, brute-force KNN (its recommended small-scale path).",
     },
     Competitor {
         name: "zvec",
-        // The closest new embedded vector store.
-        version: "0.2.0",
+        // The closest new embedded vector store (alibaba/zvec), driven through
+        // its official `zvec-rust` binding pinned to the same version in
+        // Cargo.toml (`zvec-rust = "=0.5.1"`).
+        version: "0.5.1",
         feature: "compare-zvec",
-        note: "Zig embedded vector store, default HNSW settings.",
+        note: "Embedded vector store (alibaba/zvec) via the official zvec-rust binding, default HNSW settings (M=16, ef_construction=200, cosine).",
     },
 ];
 
@@ -161,36 +167,306 @@ fn run_zvec(
     }
 }
 
-// The real adapters are compiled only when their feature is on. They are
-// intentionally left as a wired stub returning NotMeasured until the native
-// toolchain is available on the release box: the point of Part 2 is that the
-// *harness shape* is complete and the pins are recorded, so flipping the
-// feature and dropping in the native calls is a localized change, not a
-// re-architecture. The methodology (same vectors/queries/k) is enforced by the
-// signature these must satisfy.
+// The real adapters, compiled only when their feature is on. Both obey the
+// same rules the EmbedMind path does: same normalized vectors, same queries,
+// same k, default/recommended settings (no de-tuning), fresh on-disk file per
+// run so `file_bytes` is a real "after ingest" number.
+
+/// sqlite-vec adapter: the `vec0` virtual table, ingested one row at a time
+/// (the fair comparison to EmbedMind's one-at-a-time `remember`), queried with
+/// its default brute-force KNN (`ORDER BY distance LIMIT k`, its documented
+/// small-scale path — no de-tuning).
+///
+/// Registering `vec0` is only possible through the C entrypoint
+/// (`sqlite3_auto_extension`, `rusqlite`'s own documented pattern for
+/// statically-linked extensions), which is inherently `unsafe` — the crate
+/// does not expose a safe wrapper. That one call is isolated here and behind
+/// `compare-sqlite-vec` only, the same targeted-exception shape
+/// `bindings/python` already uses for PyO3's generated glue; the rest of the
+/// workspace (and the rest of this crate) keeps `unsafe_code = "forbid"`.
 #[cfg(feature = "compare-sqlite-vec")]
+#[allow(unsafe_code)]
 fn run_sqlite_vec(
-    _c: &Competitor,
-    _set: &VectorSet,
-    _queries: &[Vec<f32>],
-    _k: usize,
+    c: &Competitor,
+    set: &VectorSet,
+    queries: &[Vec<f32>],
+    k: usize,
 ) -> CompetitorOutcome {
-    CompetitorOutcome::NotMeasured {
-        reason: "compare-sqlite-vec enabled but native adapter not yet wired on this box"
-            .to_string(),
+    use rusqlite::Connection;
+    use rusqlite::ffi::sqlite3_auto_extension;
+
+    // The real `sqlite3_vec_init(sqlite3*, char**, const sqlite3_api_routines*)
+    // -> c_int` signature (`sqlite-vec.h`, reproduced in `build.rs`) — matches
+    // `sqlite3_auto_extension`'s expected entry-point type exactly, so no
+    // transmute is needed (unlike the upstream crate's own binding, which
+    // deliberately mis-declares the signature and transmutes it back).
+    unsafe extern "C" {
+        fn sqlite3_vec_init(
+            db: *mut rusqlite::ffi::sqlite3,
+            pz_err_msg: *mut *mut std::os::raw::c_char,
+            p_api: *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+    }
+
+    // Registered once per process is enough, but `sqlite3_auto_extension` is
+    // idempotent about duplicate registrations, so calling it per run is safe
+    // and keeps this adapter self-contained (no shared init state to manage).
+    // SAFETY: `sqlite3_vec_init` is the vec0 extension entry point compiled by
+    // `build.rs` from the pinned, checksum-verified upstream source; its
+    // signature is declared to match what `sqlite3_auto_extension` requires.
+    unsafe {
+        sqlite3_auto_extension(Some(sqlite3_vec_init));
+    }
+
+    let db_path = std::env::temp_dir().join(format!("embedmind-bench-sqlite-vec-{k}.sqlite3"));
+    let _ = std::fs::remove_file(&db_path);
+
+    let run = || -> rusqlite::Result<CompetitorMetrics> {
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE items USING vec0(embedding float[{}])",
+            set.dims
+        ))?;
+
+        // --- ingest, one row at a time (fair comparison to `remember`) ---
+        let mut ingest_lat = Latencies::with_capacity(set.entries.len());
+        let ingest_started = std::time::Instant::now();
+        {
+            let mut stmt = conn.prepare("INSERT INTO items(rowid, embedding) VALUES (?, ?)")?;
+            for (i, e) in set.entries.iter().enumerate() {
+                let started = std::time::Instant::now();
+                stmt.execute(rusqlite::params![i as i64, vec_to_blob(&e.vector)])?;
+                ingest_lat.push(started.elapsed());
+            }
+        }
+        let ingest_per_sec = metrics::ops_per_sec(set.entries.len(), ingest_started.elapsed());
+
+        // --- recall@k against the shared brute-force baseline ---
+        let mut recall_sum = 0.0;
+        let mut recall_n = 0usize;
+        // --- warm query latency, same query set/k as EmbedMind's own run ---
+        let mut warm = Latencies::with_capacity(queries.len());
+        {
+            let mut stmt = conn.prepare(
+                "SELECT rowid, distance FROM items WHERE embedding MATCH ? \
+                 ORDER BY distance LIMIT ?",
+            )?;
+            for q in queries {
+                let started = std::time::Instant::now();
+                let rows: Vec<i64> = stmt
+                    .query_map(rusqlite::params![vec_to_blob(q), k as i64], |row| {
+                        row.get(0)
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                warm.push(started.elapsed());
+
+                let exact = crate::baseline::top_k(set, q, k, |_| true);
+                let exact_ids: std::collections::HashSet<i64> = exact
+                    .iter()
+                    .map(|hit| id_index(set, hit.record_id) as i64)
+                    .collect();
+                let hit_count = rows.iter().filter(|r| exact_ids.contains(r)).count();
+                if !exact_ids.is_empty() {
+                    recall_sum += hit_count as f64 / exact_ids.len() as f64;
+                    recall_n += 1;
+                }
+            }
+        }
+
+        let file_bytes = std::fs::metadata(&db_path).map(|m| m.len()).ok();
+
+        Ok(CompetitorMetrics {
+            recall_at_10: if recall_n > 0 {
+                Some(recall_sum / recall_n as f64)
+            } else {
+                None
+            },
+            query_p50_ms: warm.p50_ms(),
+            query_p99_ms: warm.p99_ms(),
+            cold_open_ms: None,
+            ingest_vecs_per_sec: Some(ingest_per_sec),
+            file_bytes,
+            peak_rss_mib: None,
+        })
+    };
+
+    let outcome = match run() {
+        Ok(m) => CompetitorOutcome::Measured(m),
+        Err(e) => CompetitorOutcome::NotMeasured {
+            reason: format!("sqlite-vec adapter failed: {e}"),
+        },
+    };
+    let _ = std::fs::remove_file(&db_path);
+    if matches!(outcome, CompetitorOutcome::Measured(_)) {
+        outcome
+    } else {
+        // Keep the pinned-version note even on failure, per module contract.
+        let CompetitorOutcome::NotMeasured { reason } = outcome else {
+            unreachable!()
+        };
+        CompetitorOutcome::NotMeasured {
+            reason: format!("{reason} (target {})", c.version),
+        }
     }
 }
 
-#[cfg(feature = "compare-zvec")]
-fn run_zvec(
-    _c: &Competitor,
-    _set: &VectorSet,
-    _queries: &[Vec<f32>],
-    _k: usize,
-) -> CompetitorOutcome {
-    CompetitorOutcome::NotMeasured {
-        reason: "compare-zvec enabled but native adapter not yet wired on this box".to_string(),
+/// Finds `id`'s position in `set.entries` — both adapters key their rows by
+/// that same position (sqlite-vec's `rowid`, zvec's string pk), so this maps
+/// an exact-baseline hit back to the id space each adapter's query returns,
+/// letting recall be computed as a plain set overlap.
+#[cfg(any(feature = "compare-sqlite-vec", feature = "compare-zvec"))]
+fn id_index(set: &VectorSet, id: ulid::Ulid) -> usize {
+    set.entries
+        .iter()
+        .position(|e| e.id == id)
+        .unwrap_or(usize::MAX)
+}
+
+/// Encodes a `f32` vector as the little-endian byte blob `vec0` expects for a
+/// `float[N]` column.
+#[cfg(feature = "compare-sqlite-vec")]
+fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(v.len() * 4);
+    for x in v {
+        buf.extend_from_slice(&x.to_le_bytes());
     }
+    buf
+}
+
+/// zvec adapter: an HNSW-indexed collection with its documented default
+/// parameters (`M=16`, `ef_construction=200`, cosine metric — the values the
+/// crate's own quick-start example uses), ingested one document at a time.
+#[cfg(feature = "compare-zvec")]
+fn run_zvec(c: &Competitor, set: &VectorSet, queries: &[Vec<f32>], k: usize) -> CompetitorOutcome {
+    use zvec_rust::{
+        Collection, CollectionSchema, DataType, Doc, FieldSchema, IndexParams, MetricType,
+        SearchQuery,
+    };
+
+    let dir = std::env::temp_dir().join(format!("embedmind-bench-zvec-{k}"));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let run = || -> zvec_rust::Result<CompetitorMetrics> {
+        zvec_rust::config::initialize(None).or_else(|e| {
+            // Re-running the suite in the same process re-initializes; zvec
+            // treats that as "already exists", which is fine to ignore.
+            if e.is_already_exists() {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
+
+        std::fs::create_dir_all(&dir).map_err(|e| zvec_rust::Error {
+            code: zvec_rust::ErrorCode::InternalError,
+            message: format!("cannot create {}: {e}", dir.display()),
+        })?;
+
+        let schema = CollectionSchema::builder("bench")
+            .add_field(FieldSchema::new("id", DataType::Int64, false, 0)?)
+            .add_vector_field(
+                "embedding",
+                DataType::VectorFp32,
+                set.dims as u32,
+                IndexParams::hnsw(MetricType::Cosine, 16, 200)?,
+            )
+            .build()?;
+
+        let collection = Collection::create_and_open(dir.to_str().unwrap_or("."), &schema, None)?;
+
+        // --- ingest, one document at a time ---
+        let mut ingest_lat = Latencies::with_capacity(set.entries.len());
+        let ingest_started = std::time::Instant::now();
+        for (i, e) in set.entries.iter().enumerate() {
+            let started = std::time::Instant::now();
+            let mut doc = Doc::new()?;
+            doc.set_pk(&i.to_string());
+            doc.add_i64("id", i as i64)?;
+            doc.add_vector_f32("embedding", &e.vector)?;
+            collection.insert(&[&doc])?;
+            ingest_lat.push(started.elapsed());
+        }
+        let ingest_per_sec = metrics::ops_per_sec(set.entries.len(), ingest_started.elapsed());
+        collection.flush()?;
+
+        // --- recall@k + warm query latency ---
+        let mut recall_sum = 0.0;
+        let mut recall_n = 0usize;
+        let mut warm = Latencies::with_capacity(queries.len());
+        for q in queries {
+            let started = std::time::Instant::now();
+            let query = SearchQuery::new("embedding", q, k as i32)?;
+            let results = collection.query(&query)?;
+            warm.push(started.elapsed());
+
+            let got: std::collections::HashSet<i64> = results
+                .iter()
+                .filter_map(|d| d.get_pk().and_then(|pk| pk.parse::<i64>().ok()))
+                .collect();
+
+            let exact = crate::baseline::top_k(set, q, k, |_| true);
+            let exact_ids: std::collections::HashSet<i64> = exact
+                .iter()
+                .map(|hit| id_index(set, hit.record_id) as i64)
+                .collect();
+            let hit_count = got.iter().filter(|r| exact_ids.contains(r)).count();
+            if !exact_ids.is_empty() {
+                recall_sum += hit_count as f64 / exact_ids.len() as f64;
+                recall_n += 1;
+            }
+        }
+
+        let file_bytes = dir_size(&dir);
+
+        collection.close()?;
+
+        Ok(CompetitorMetrics {
+            recall_at_10: if recall_n > 0 {
+                Some(recall_sum / recall_n as f64)
+            } else {
+                None
+            },
+            query_p50_ms: warm.p50_ms(),
+            query_p99_ms: warm.p99_ms(),
+            cold_open_ms: None,
+            ingest_vecs_per_sec: Some(ingest_per_sec),
+            file_bytes,
+            peak_rss_mib: None,
+        })
+    };
+
+    let outcome = match run() {
+        Ok(m) => CompetitorOutcome::Measured(m),
+        Err(e) => CompetitorOutcome::NotMeasured {
+            reason: format!("zvec adapter failed: {e} (target {})", c.version),
+        },
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome
+}
+
+/// Total on-disk size of everything zvec wrote for the collection — it stores
+/// a collection as a directory of segment files, not a single file, so
+/// `file_bytes` sums the directory recursively (best-effort: unreadable
+/// entries are skipped rather than failing the whole measurement).
+#[cfg(feature = "compare-zvec")]
+fn dir_size(dir: &std::path::Path) -> Option<u64> {
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    stack.push(path);
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    Some(total)
 }
 
 #[cfg(test)]
@@ -215,9 +491,18 @@ mod tests {
         };
         let outcomes = run_all(&set, &[], 10);
         assert_eq!(outcomes.len(), COMPETITORS.len());
-        // With no features enabled, all are honestly NotMeasured — never fake.
-        for (_, o) in &outcomes {
-            assert!(matches!(o, CompetitorOutcome::NotMeasured { .. }));
+        // A competitor whose feature is off is honestly NotMeasured — never
+        // fake. (With the feature on, the real adapter runs — even on this
+        // empty set — and reports whatever it actually measured.)
+        for (c, o) in &outcomes {
+            let enabled = match c.feature {
+                "compare-sqlite-vec" => cfg!(feature = "compare-sqlite-vec"),
+                "compare-zvec" => cfg!(feature = "compare-zvec"),
+                _ => false,
+            };
+            if !enabled {
+                assert!(matches!(o, CompetitorOutcome::NotMeasured { .. }));
+            }
         }
     }
 }

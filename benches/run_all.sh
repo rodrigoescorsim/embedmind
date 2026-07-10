@@ -44,6 +44,21 @@ done
 echo ">> EmbedMind benchmark suite"
 echo ">> date=${BENCH_DATE}  datasets=${DATASETS[*]:-agent-mem-10k (default)}  features='${COMPARE}'"
 
+# zvec links against a dynamic libzvec_c_api that its build script places in
+# the build's OUT_DIR. Linux/macOS embed an rpath to it; Windows has no rpath,
+# so the DLL's directory must be on PATH at run time. Locate the newest one and
+# prepend it — harmless on the other platforms and when the feature is off.
+if [[ "${COMPARE}" == *compare-zvec* ]]; then
+  ZVEC_DLL_DIR="$(ls -td target/release/build/zvec-rust-sys-*/out/zvec-prebuilt 2>/dev/null | head -1 || true)"
+  if [[ -n "${ZVEC_DLL_DIR}" ]]; then
+    ZVEC_DLL_DIR="$(cd "${ZVEC_DLL_DIR}" && pwd)"
+    export PATH="${ZVEC_DLL_DIR}:${PATH}"
+    export LD_LIBRARY_PATH="${ZVEC_DLL_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    export DYLD_LIBRARY_PATH="${ZVEC_DLL_DIR}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
+    echo ">> zvec native lib: ${ZVEC_DLL_DIR}"
+  fi
+fi
+
 # --release is mandatory: LTO/opt matters for honest latency numbers, and the
 # 100k embedding pass is impractically slow in debug. The `+"${..}"` guard makes
 # an empty dataset array safe under `set -u` (run_all then uses its own default).
