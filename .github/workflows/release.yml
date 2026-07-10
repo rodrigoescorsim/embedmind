@@ -13,6 +13,9 @@ on:
         description: "Existing tag to build a Release for (e.g. v0.1.0-rc1)"
         required: true
 
+permissions:
+  contents: write # softprops/action-gh-release precisa disto p/ criar/anexar ao Release
+
 env:
   CARGO_TERM_COLOR: always
   # Download/install-size ceiling for the distributed artifact, incl. the
