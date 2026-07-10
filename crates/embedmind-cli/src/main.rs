@@ -255,10 +255,20 @@ fn recall(
     if let Some(project) = &scope {
         query = query.project(project.clone());
     }
-    let hits = store
-        .recall(query)
+    let outcome = store
+        .recall_detailed(query)
         .map_err(|e| format!("recall failed: {e}"))?;
+    let hits = outcome.hits;
 
+    // S9 edge: a file written before the full-text index existed still
+    // recalls, vector-only — warn (stderr, like every status line here),
+    // never fail. `vacuum` rebuilds the file with the index.
+    if outcome.degraded_to_vector_only {
+        eprintln!(
+            "warning: this file has no full-text index (written by an older \
+             version); results are vector-only. Run `embedmind vacuum` to build it"
+        );
+    }
     match &scope {
         Some(name) => eprintln!("searching project: {name} (use --all for everything)"),
         None => eprintln!("searching all projects"),

@@ -109,6 +109,46 @@ fn quickstart_flow_remember_recall_forget_stats() {
     assert!(stdout.contains("forgotten:          1"), "{stdout}");
 }
 
+/// S9 edge: a `.mind` written before the full-text index existed (header's
+/// `fts_root_page == 0`) must still `recall` — vector-only hits, a warning on
+/// stderr, exit 0. Degradation is graceful, never an error.
+#[test]
+fn recall_on_legacy_file_without_fts_index_warns_and_succeeds() {
+    let scratch = Scratch::new("legacy-fts");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &["--file", file, "remember", "the kitten sleeps on the rug"],
+    );
+    assert!(ok, "remember failed: {stderr}");
+    let id = stdout.split_whitespace().next().unwrap().to_string();
+
+    // Rewind the header to the pre-M2 shape: drop the full-text root pointer,
+    // exactly what an old file presents on open.
+    {
+        use embedmind_core::storage::{Pager, PagerOptions, RealVfs};
+        use std::sync::Arc;
+        let mut pager = Pager::open(Arc::new(RealVfs), &store, PagerOptions::default()).unwrap();
+        let mut txn = pager.begin().unwrap();
+        txn.set_fts_root_page(0);
+        txn.commit().unwrap();
+        pager.close().unwrap();
+    }
+
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &["--file", file, "recall", "a small feline resting"],
+    );
+    assert!(ok, "recall on a legacy file must succeed: {stderr}");
+    assert!(stdout.contains(&id), "vector-only hit expected: {stdout}");
+    assert!(
+        stderr.contains("no full-text index"),
+        "stderr must carry the degradation warning: {stderr}"
+    );
+}
+
 #[test]
 fn project_detection_scopes_cli_remember_and_recall() {
     let scratch = Scratch::new("proj");
