@@ -66,7 +66,15 @@ Pre-v0.1 — under active development, repo private until M1 completes
   entities/relations are caller-provided. New fuzz target `fuzz_graph_page`
   (+ seed corpus); the record crash harness now writes and verifies graph
   pages at every injected kill point. Older (v2) files degrade to "no related
-  memories", never an error.
+  memories", never an error. The whole layer is exposed through the shells
+  (the product surface, CLAUDE.md decision 1): the MCP `remember` tool takes
+  `entities` (string array) and `relations` (`{kind, target}` array), `recall`
+  takes `expand_related: true`, and a new **`related` tool** navigates by
+  `id` **or** `entity` (exactly one); the CLI mirrors it with `remember
+  --entity NAME --relation KIND=ID`, `recall --expand-related` (connected
+  context printed with a `rel` marker instead of a score) and a `related
+  <ID> | --entity NAME` subcommand. Protocol and end-to-end CLI tests cover
+  the flow, including the tombstone edge through both shells.
 - `embedmind vacuum` reclaims forgotten space for real (S11 / task B4, roadmap
   2.x, **ADR 0003**), replacing the earlier explicit "not implemented" error.
   Rebuild **by copy, never in place**: a fresh `.mind` is built in a sibling temp

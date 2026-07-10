@@ -75,12 +75,13 @@ Add EmbedMind to your agent as an MCP server (example: Claude Code):
 claude mcp add embedmind -- embedmind serve --file ~/.embedmind/memory.mind
 ```
 
-Your agent now has three tools:
+Your agent now has these tools:
 
 | Tool | What it does |
 |---|---|
-| `remember` | Store a memory (text + metadata; embedded and indexed automatically, long text chunked transparently) |
-| `recall` | Semantic search over everything remembered, best match first with scores (full-text + filters join in M2) |
+| `remember` | Store a memory (text + metadata; embedded and indexed automatically, long text chunked transparently). Optionally tag explicit `entities` and typed `relations` to earlier memories |
+| `recall` | Semantic search over everything remembered, best match first with scores (full-text + filters join in M2); `expand_related: true` also pulls each hit's explicitly related memories as connected context |
+| `related` | Navigate the explicit memory graph: one memory's relations (both directions, with kind), or every memory tagged with an entity |
 | `forget` | Delete one memory by id (delete by query/age is planned) |
 
 Plus **automatic project-context memory**: EmbedMind detects the project from the agent's working directory (git root, or a `.embedmind.toml` with `project = "name"`), stamps it on every memory, and scopes `recall` to it by default — with `scope: "all"` as the explicit way out.
@@ -96,7 +97,10 @@ embedmind stats   # size, counts, index health
 `remember` prints the new memory's id; `recall` prints matches best-first with a cosine
 score and the owning project; `stats` reports file size, live/forgotten counts, index
 entries and the embedding model. Memories live in `~/.embedmind/memory.mind` by default
-(override with `--file`).
+(override with `--file`). The graph layer is there too: `remember --entity NAME
+--relation refines=ID` tags and links memories explicitly, `embedmind related ID`
+(or `--entity NAME`) navigates the links, and `recall --expand-related` pulls
+connected context along with the hits.
 
 ## Core dependencies
 

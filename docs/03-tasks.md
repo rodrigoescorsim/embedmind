@@ -216,8 +216,12 @@ WAL/crash tests): gravar relações explícitas no `remember`, navegar
 vs. "só vetor" que nenhum embarcado tem completo.
 
 - **DoD:** story S13 verde; formato das páginas de grafo especificado em FORMAT.md
-  (versionado); relações somem com tombstone do alvo; fuzz target do parser novo.
-- **Verificação:** `cargo test -p embedmind-core graph` + fuzz smoke.
+  (versionado); relações somem com tombstone do alvo; fuzz target do parser novo;
+  exposto nas cascas — MCP (`remember` com `entities`/`relations`, `recall` com
+  `expand_related`, novo tool `related(id | entity)`) e CLI (`remember --entity/
+  --relation`, `recall --expand-related`, subcomando `related`).
+- **Verificação:** `cargo test -p embedmind-core graph` + fuzz smoke; testes de
+  protocolo (`embedmind-mcp`) e end-to-end de CLI cobrindo o fluxo de grafo.
 
 ### C2. Proveniência básica exposta (item 3.2) [✅ ENTREGUE]
 
