@@ -83,8 +83,31 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let data_dir = default_data_dir();
     let embedder: Arc<dyn Embedder> = Arc::new(OnnxEmbedder::load()?);
 
+    // Which dataset the competitor comparison runs on. Competitors re-derive an
+    // exact brute-force top-k per query, and stores like zvec build a full HNSW
+    // index — so on the 100k set that is many minutes per competitor. The
+    // methodology only requires the comparison on one shared workload; default
+    // to the *largest* dataset in the run (the hardest workload we have), but
+    // let a caller pin a specific one via `COMPARE_DATASET` so the full
+    // EmbedMind table (10k + 100k, NFRs measured) can be produced while the
+    // competitor columns are filled on the cheaper 10k set.
+    let compare_dataset = std::env::var("COMPARE_DATASET")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let compare_count: Option<usize> = match &compare_dataset {
+        Some(name) => match DatasetSpec::by_name(name) {
+            Some(s) => Some(s.count),
+            None => {
+                eprintln!("unknown COMPARE_DATASET '{name}'; ignoring (using largest in run)");
+                None
+            }
+        },
+        None => None,
+    };
+
     let mut results: Vec<SuiteResult> = Vec::new();
     let mut competitor_outcomes = Vec::new();
+    let mut compared_on: Option<&'static str> = None;
 
     for spec in &specs {
         println!("=== {} ({} memories) ===", spec.name, spec.count);
@@ -115,20 +138,23 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             result.remember_p99_ms,
         );
 
-        // Competitors run on the biggest dataset (its query vectors), so the
-        // comparison table is against the hardest workload we have here.
-        if competitor_outcomes.is_empty()
-            || spec.count == specs.iter().map(|s| s.count).max().unwrap_or(0)
-        {
+        // Competitors run on exactly one dataset (its query vectors): the one
+        // pinned by COMPARE_DATASET if set, otherwise the largest in the run —
+        // so the comparison table is a single shared workload. `compared_on`
+        // records which dataset actually produced the numbers, for the header.
+        let target_count =
+            compare_count.unwrap_or_else(|| specs.iter().map(|s| s.count).max().unwrap_or(0));
+        if competitor_outcomes.is_empty() || spec.count == target_count {
             competitor_outcomes = competitors::run_all(&set, &result.query_vectors, harness::K);
+            compared_on = Some(spec.name);
         }
         results.push(result);
     }
 
     // --- render + persist ---
     let env = RunEnv::capture(run_date());
-    let markdown = report::render_markdown(&env, &results, &competitor_outcomes);
-    let json = report::render_json(&env, &results, &competitor_outcomes);
+    let markdown = report::render_markdown(&env, &results, &competitor_outcomes, compared_on);
+    let json = report::render_json(&env, &results, &competitor_outcomes, compared_on);
 
     let results_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("results");
     std::fs::create_dir_all(&results_dir)?;

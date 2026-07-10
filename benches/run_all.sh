@@ -18,6 +18,14 @@
 # the native toolchain, e.g.
 #   COMPARE="--features compare-sqlite-vec" ./benches/run_all.sh
 #
+# The competitor comparison runs on one shared dataset — by default the largest
+# in the run. Building a competitor index (e.g. zvec's HNSW) and re-deriving an
+# exact brute-force top-k per query is many minutes on the 100k set, so pin the
+# comparison to the cheaper 10k set while still producing the full EmbedMind
+# 10k+100k table (NFRs measured) with COMPARE_DATASET:
+#   COMPARE="--features compare-sqlite-vec,compare-zvec" \
+#     COMPARE_DATASET=agent-mem-10k ./benches/run_all.sh --full
+#
 # Exit code is non-zero if any applicable NFR was missed (so this doubles as the
 # CI performance guard, BENCHMARKS.md §5).
 

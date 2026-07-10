@@ -357,11 +357,11 @@ fn run_zvec(c: &Competitor, set: &VectorSet, queries: &[Vec<f32>], k: usize) -> 
             }
         })?;
 
-        std::fs::create_dir_all(&dir).map_err(|e| zvec_rust::Error {
-            code: zvec_rust::ErrorCode::InternalError,
-            message: format!("cannot create {}: {e}", dir.display()),
-        })?;
-
+        // zvec's `create_and_open` creates the collection directory itself and
+        // rejects a path that already exists ("path validate failed: … exists").
+        // So the adapter must only guarantee the path is *absent* (the
+        // `remove_dir_all` above), and hand zvec a clean, non-existent path —
+        // never pre-create it. The parent (the OS temp dir) already exists.
         let schema = CollectionSchema::builder("bench")
             .add_field(FieldSchema::new("id", DataType::Int64, false, 0)?)
             .add_vector_field(

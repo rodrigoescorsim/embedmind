@@ -154,6 +154,7 @@ pub fn render_markdown(
     env: &RunEnv,
     results: &[SuiteResult],
     competitors: &[(&'static Competitor, CompetitorOutcome)],
+    compared_on: Option<&str>,
 ) -> String {
     let mut out = String::new();
 
@@ -165,14 +166,22 @@ pub fn render_markdown(
         env.os, env.arch, env.cpus, env.embedmind_version, env.date_utc
     );
 
+    // The dataset the competitor comparison ran on: the pinned `compared_on` if
+    // given, else the largest in the run (matching run_all's default). Both the
+    // comparison table and the losses section are stated against this exact
+    // dataset so the head-to-head is apples-to-apples.
+    let compare_result = compared_on
+        .and_then(|name| results.iter().find(|r| r.dataset == name))
+        .or_else(|| results.iter().max_by_key(|r| r.count));
+
     // --- metric table (one column per dataset) ---
     render_metric_table(&mut out, results);
 
     // --- competitor comparison ---
-    render_competitor_table(&mut out, results, competitors);
+    render_competitor_table(&mut out, compare_result, competitors);
 
     // --- honesty: where EmbedMind loses ---
-    render_losses(&mut out, results, competitors);
+    render_losses(&mut out, compare_result, competitors);
 
     // --- NFR verdict ---
     render_nfr_table(&mut out, results);
@@ -238,14 +247,14 @@ fn render_metric_table(out: &mut String, results: &[SuiteResult]) {
 
 fn render_competitor_table(
     out: &mut String,
-    results: &[SuiteResult],
+    compare_result: Option<&SuiteResult>,
     competitors: &[(&'static Competitor, CompetitorOutcome)],
 ) {
     let _ = writeln!(
         out,
         "### vs. baselines (same vectors, same queries, same k)\n"
     );
-    let biggest = results.iter().max_by_key(|r| r.count);
+    let biggest = compare_result;
     let ds = biggest.map(|r| r.dataset).unwrap_or("—");
     let _ = writeln!(
         out,
@@ -304,11 +313,11 @@ fn render_competitor_table(
 
 fn render_losses(
     out: &mut String,
-    results: &[SuiteResult],
+    compare_result: Option<&SuiteResult>,
     competitors: &[(&'static Competitor, CompetitorOutcome)],
 ) {
     let _ = writeln!(out, "### Where EmbedMind loses (honesty contract)\n");
-    let biggest = results.iter().max_by_key(|r| r.count);
+    let biggest = compare_result;
     let mut any = false;
 
     if let Some(r) = biggest {
@@ -393,6 +402,7 @@ pub fn render_json(
     env: &RunEnv,
     results: &[SuiteResult],
     competitors: &[(&'static Competitor, CompetitorOutcome)],
+    compared_on: Option<&str>,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{{");
@@ -407,6 +417,14 @@ pub fn render_json(
     );
     let _ = writeln!(out, "    \"date_utc\": {}", jstr(&env.date_utc));
     let _ = writeln!(out, "  }},");
+
+    // Which dataset the competitor comparison ran on (BENCHMARKS.md §1: the
+    // comparison is a single shared workload; recorded so the table's "on X"
+    // header always traces back to a value in the results file).
+    let compare_ds = compared_on
+        .or_else(|| results.iter().max_by_key(|r| r.count).map(|r| r.dataset))
+        .unwrap_or("");
+    let _ = writeln!(out, "  \"compared_on\": {},", jstr(compare_ds));
 
     let _ = writeln!(out, "  \"datasets\": [");
     for (i, r) in results.iter().enumerate() {
@@ -451,15 +469,41 @@ pub fn render_json(
     let _ = writeln!(out, "  \"competitors\": [");
     for (i, (c, outcome)) in competitors.iter().enumerate() {
         let comma = if i + 1 < competitors.len() { "," } else { "" };
-        let (measured, reason) = match outcome {
-            CompetitorOutcome::Measured(_) => ("true", String::new()),
-            CompetitorOutcome::NotMeasured { reason } => ("false", reason.clone()),
-        };
         let _ = writeln!(out, "    {{");
         let _ = writeln!(out, "      \"name\": {},", jstr(c.name));
         let _ = writeln!(out, "      \"version\": {},", jstr(c.version));
-        let _ = writeln!(out, "      \"measured\": {measured},");
-        let _ = writeln!(out, "      \"reason\": {}", jstr(&reason));
+        match outcome {
+            CompetitorOutcome::Measured(m) => {
+                // Emit the measured numbers too, so `<version>.json` (the
+                // CI-generated source of truth, BENCHMARKS.md §4 rule 3) carries
+                // every competitor value that the rendered table shows — a
+                // claim in the table always traces back to a field here.
+                let _ = writeln!(out, "      \"measured\": true,");
+                let _ = writeln!(out, "      \"metrics\": {{");
+                let _ = writeln!(out, "        \"recall_at_10\": {},", jnum(m.recall_at_10));
+                let _ = writeln!(out, "        \"query_p50_ms\": {},", jnum(m.query_p50_ms));
+                let _ = writeln!(out, "        \"query_p99_ms\": {},", jnum(m.query_p99_ms));
+                let _ = writeln!(
+                    out,
+                    "        \"ingest_vecs_per_sec\": {},",
+                    jnum(m.ingest_vecs_per_sec)
+                );
+                let _ = writeln!(
+                    out,
+                    "        \"file_bytes\": {}",
+                    m.file_bytes
+                        .map(|b| b.to_string())
+                        .unwrap_or_else(|| "null".into())
+                );
+                let _ = writeln!(out, "      }},");
+                let _ = writeln!(out, "      \"reason\": {}", jstr(""));
+            }
+            CompetitorOutcome::NotMeasured { reason } => {
+                let _ = writeln!(out, "      \"measured\": false,");
+                let _ = writeln!(out, "      \"metrics\": null,");
+                let _ = writeln!(out, "      \"reason\": {}", jstr(reason));
+            }
+        }
         let _ = writeln!(out, "    }}{comma}");
     }
     let _ = writeln!(out, "  ],");
@@ -489,6 +533,13 @@ fn row(out: &mut String, label: &str, results: &[SuiteResult], f: impl Fn(&Suite
         let _ = write!(line, " {} |", f(r));
     }
     let _ = writeln!(out, "{line}");
+}
+
+/// Renders an optional number as a JSON value: the number itself, or `null`
+/// when absent (a competitor metric the adapter could not measure).
+fn jnum(v: Option<f64>) -> String {
+    v.map(|x| format!("{x:.6}"))
+        .unwrap_or_else(|| "null".into())
 }
 
 fn opt_f4(v: Option<f64>) -> String {
@@ -637,7 +688,7 @@ mod tests {
                 )
             })
             .collect();
-        let md = render_markdown(&env, &[r], &competitors);
+        let md = render_markdown(&env, &[r], &competitors, None);
         assert!(md.contains("## Benchmark results"));
         assert!(md.contains("Where EmbedMind loses"));
         assert!(md.contains("NFR verdict"));
@@ -655,9 +706,10 @@ mod tests {
             .iter()
             .map(|c| (c, CompetitorOutcome::NotMeasured { reason: "x".into() }))
             .collect();
-        let js = render_json(&env, &[r], &competitors);
+        let js = render_json(&env, &[r], &competitors, None);
         assert_eq!(js.matches('{').count(), js.matches('}').count());
         assert_eq!(js.matches('[').count(), js.matches(']').count());
         assert!(js.contains("\"embedmind_version\""));
+        assert!(js.contains("\"compared_on\""));
     }
 }

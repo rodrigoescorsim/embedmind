@@ -60,7 +60,17 @@ cargo run -p embedmind-bench --release --bin run_all -- agent-mem-10k agent-mem-
 
 # With the competitor adapters enabled (fills the comparison rows for real):
 COMPARE="--features compare-sqlite-vec,compare-zvec" ./benches/run_all.sh
+
+# Full EmbedMind table (10k+100k, NFRs) but pin the (expensive) competitor
+# comparison to the cheaper 10k set — building zvec's HNSW and re-deriving an
+# exact top-k per query is many minutes on 100k:
+COMPARE="--features compare-sqlite-vec,compare-zvec" \
+  COMPARE_DATASET=agent-mem-10k ./benches/run_all.sh --full
 ```
+
+On Windows the `compare-*` adapters compile native C/FFI, so run from a shell
+with the MSVC toolchain on `PATH` (a "x64 Native Tools" prompt, or after sourcing
+`vcvars64.bat`) — otherwise `cc`/the linker cannot find `cl.exe`.
 
 The `compare-*` features are **off by default** and their build scripts are the
 only place the harness touches the network (fetching the pinned, SHA-256-verified
