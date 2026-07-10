@@ -214,6 +214,18 @@ fn render_metric_table(out: &mut String, results: &[SuiteResult]) {
     row(out, "query p99 (warm)", results, |r| {
         format!("{:.2} ms", r.query_p99_ms)
     });
+    row(out, "↳ query embed p50 / p99", results, |r| {
+        format!(
+            "{:.2} / {:.2} ms",
+            r.query_embed_p50_ms, r.query_embed_p99_ms
+        )
+    });
+    row(out, "↳ query engine p50 / p99", results, |r| {
+        format!(
+            "{:.2} / {:.2} ms",
+            r.query_engine_p50_ms, r.query_engine_p99_ms
+        )
+    });
     row(out, "query first (cold-open)", results, |r| {
         format!("{:.2} ms", r.cold_first_query_ms)
     });
@@ -241,6 +253,10 @@ fn render_metric_table(out: &mut String, results: &[SuiteResult]) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
+        "_Warm query latency is end-to-end (the engine embeds the query text itself). The `↳` rows decompose it per query (S17): `embed` = embedding the query with the built-in ONNX model; `engine` = hybrid search + RRF fusion + record load with the vector ready — the number comparable to vector-in baselines. Percentiles are computed per component, so embed + engine need not equal the total percentile._\n"
+    );
+    let _ = writeln!(
+        out,
         "_`remember` latency is end-to-end and includes embedding — the baselines below don't embed, so their ingest is vectors-only and not comparable to this row (BENCHMARKS.md §1)._\n"
     );
 }
@@ -258,7 +274,7 @@ fn render_competitor_table(
     let ds = biggest.map(|r| r.dataset).unwrap_or("—");
     let _ = writeln!(
         out,
-        "_Comparison on `{ds}`. Competitor versions are pinned in `benches/src/competitors.rs` and recorded here (BENCHMARKS.md §1). Rows that could not run on this machine say so explicitly — never fabricated._\n"
+        "_Comparison on `{ds}`. Competitor versions are pinned in `benches/src/competitors.rs` and recorded here (BENCHMARKS.md §1). Rows that could not run on this machine say so explicitly — never fabricated. EmbedMind's query p50/p99 include embedding the query text; the baselines receive ready-made vectors, so the like-for-like numbers are the `query engine` rows in the table above (S17)._\n"
     );
     let _ = writeln!(
         out,
@@ -442,6 +458,26 @@ pub fn render_json(
         );
         let _ = writeln!(out, "      \"query_p50_ms\": {:.4},", r.query_p50_ms);
         let _ = writeln!(out, "      \"query_p99_ms\": {:.4},", r.query_p99_ms);
+        let _ = writeln!(
+            out,
+            "      \"query_embed_p50_ms\": {:.4},",
+            r.query_embed_p50_ms
+        );
+        let _ = writeln!(
+            out,
+            "      \"query_embed_p99_ms\": {:.4},",
+            r.query_embed_p99_ms
+        );
+        let _ = writeln!(
+            out,
+            "      \"query_engine_p50_ms\": {:.4},",
+            r.query_engine_p50_ms
+        );
+        let _ = writeln!(
+            out,
+            "      \"query_engine_p99_ms\": {:.4},",
+            r.query_engine_p99_ms
+        );
         let _ = writeln!(out, "      \"cold_open_ms\": {:.4},", r.cold_open_ms);
         let _ = writeln!(
             out,
@@ -618,6 +654,10 @@ mod tests {
             query_p99_ms: p99,
             query_mean_ms: 1.5,
             warm_queries: 200,
+            query_embed_p50_ms: 0.9,
+            query_embed_p99_ms: 1.8,
+            query_engine_p50_ms: 0.3,
+            query_engine_p99_ms: 0.7,
             cold_open_ms: 12.0,
             cold_first_query_ms: 30.0,
             remember_p50_ms: 40.0,
@@ -696,6 +736,28 @@ mod tests {
         assert!(md.contains("sqlite-vec"));
         assert!(md.contains("0.1.10-alpha.4"));
         assert!(md.contains("_not measured_"));
+    }
+
+    #[test]
+    fn markdown_and_json_carry_the_query_decomposition() {
+        // S17: the renderer must emit the embed/engine split, in both outputs.
+        let env = RunEnv::capture("2026-07-10");
+        let r = fake_result("agent-mem-10k", 10_000, 5.0, 100.0);
+        let md = render_markdown(&env, std::slice::from_ref(&r), &[], None);
+        assert!(md.contains("query embed p50 / p99"));
+        assert!(md.contains("query engine p50 / p99"));
+        assert!(md.contains("0.90 / 1.80 ms"), "embed values rendered");
+        assert!(md.contains("0.30 / 0.70 ms"), "engine values rendered");
+
+        let js = render_json(&env, &[r], &[], None);
+        assert!(js.contains("\"query_embed_p50_ms\": 0.9000"));
+        assert!(js.contains("\"query_embed_p99_ms\": 1.8000"));
+        assert!(js.contains("\"query_engine_p50_ms\": 0.3000"));
+        assert!(js.contains("\"query_engine_p99_ms\": 0.7000"));
+        // Still parseable by the regression guard (which ignores the new
+        // fields — older baselines without them must keep parsing too).
+        let parsed = crate::regression::parse_run_summary(&js).unwrap();
+        assert_eq!(parsed.datasets.len(), 1);
     }
 
     #[test]
