@@ -159,9 +159,14 @@ chains are cycle-proof by construction. Hard cap: one record ≤ **32 MiB**
 (`MAX_RECORD_LEN`) — a hostile `total_len` is a typed error before any allocation.
 
 **Updates and deletion.** Upsert rewrites the leaf in place (same page number; the WAL
-makes it atomic). Replacing a value that had an overflow chain **orphans the old chain**
-— that space, like tombstones, is reclaimed only by `embedmind vacuum`. There is no
-B-tree delete operation in v1.
+makes it atomic). Replacing a value that had an overflow chain **rewrites the old
+chain's pages in place**, allocating new pages only for growth — a writer that appended
+a fresh chain per rewrite would grow the file quadratically on hot keys (FTS postings
+rewrite a term's whole list per document). A *shrinking* rewrite orphans the old tail
+pages — that space, like tombstones, is reclaimed only by `embedmind vacuum`. Readers
+are unaffected either way: a chain is defined solely by `first_page`/`total_len`/
+`next_page`, never by which physical pages it occupies. There is no B-tree delete
+operation in v1.
 
 ## 6. Vector pages
 

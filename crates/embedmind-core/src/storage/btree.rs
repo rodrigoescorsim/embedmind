@@ -13,9 +13,11 @@
 //!   where `child` covers keys `<= key`, plus a rightmost child for keys
 //!   greater than every separator.
 //!
-//! There is no delete: `forget` is a tombstone update (`docs/adr/0003`), and
-//! space — including overflow chains orphaned by value updates — is
-//! reclaimed only by `embedmind vacuum` (M2+). All decoding is fully
+//! There is no delete: `forget` is a tombstone update (`docs/adr/0003`).
+//! Rewriting a value that had an overflow chain reuses the chain's pages in
+//! place (allocating only for growth); dead space — tombstones and the tail
+//! pages orphaned by shrinking rewrites — is reclaimed only by `embedmind
+//! vacuum` (M2+). All decoding is fully
 //! bounds-checked and panic-free: these parsers are fuzz targets
 //! (`fuzz_page`, `docs/TESTING.md` §3).
 
@@ -313,13 +315,20 @@ fn encode_inner(node: &InnerNode, page_size: u32) -> Option<Vec<u8>> {
 // Overflow chains
 // ---------------------------------------------------------------------------
 
-/// Writes `value` into a fresh overflow chain; returns the first page.
-fn write_overflow(txn: &mut Txn<'_>, value: &[u8]) -> Result<u64> {
+/// Writes `value` into an overflow chain and returns the first page. Pages
+/// in `reuse` (the chain a replacement is displacing, in order) are rewritten
+/// in place before any fresh page is allocated, so rewriting a value costs
+/// only its growth; leftover `reuse` pages (a shrinking rewrite) are orphaned
+/// until `vacuum`.
+fn write_overflow(txn: &mut Txn<'_>, value: &[u8], reuse: &[u64]) -> Result<u64> {
     let cap = overflow_capacity(txn.page_size());
     let chunks: Vec<&[u8]> = value.chunks(cap).collect();
     let mut pages = Vec::with_capacity(chunks.len());
-    for _ in &chunks {
-        pages.push(txn.allocate_page()?);
+    for i in 0..chunks.len() {
+        match reuse.get(i) {
+            Some(&page_no) => pages.push(page_no),
+            None => pages.push(txn.allocate_page()?),
+        }
     }
     let page_size = txn.page_size() as usize;
     for (i, chunk) in chunks.iter().enumerate() {
@@ -337,6 +346,30 @@ fn write_overflow(txn: &mut Txn<'_>, value: &[u8]) -> Result<u64> {
         .first()
         .copied()
         .ok_or(Error::Internal("empty overflow chain"))
+}
+
+/// Page numbers of an existing overflow chain, in order — the pages a
+/// replacement value may rewrite in place. Bounded by the page count
+/// `total_len` implies, so a corrupt `next_page` cycle cannot loop.
+fn chain_pages(txn: &Txn<'_>, first_page: u64, total_len: u32) -> Result<Vec<u64>> {
+    let cap = overflow_capacity(txn.page_size());
+    let expected = (total_len as usize).div_ceil(cap).max(1);
+    let mut pages = Vec::with_capacity(expected);
+    let mut page_no = first_page;
+    for _ in 0..expected {
+        let page = txn.read_page(page_no)?;
+        let header =
+            PageHeader::decode(&page).ok_or_else(|| malformed(page_no, "overflow header"))?;
+        if header.page_type != PageType::Overflow {
+            return Err(malformed(page_no, "not an overflow page"));
+        }
+        pages.push(page_no);
+        if header.next_page == 0 {
+            break;
+        }
+        page_no = header.next_page;
+    }
+    Ok(pages)
 }
 
 /// Reads an overflow chain back. Bounded: every hop consumes at least one
@@ -428,25 +461,32 @@ enum Ins {
     },
 }
 
+/// Builds the leaf [`Cell`] for a value, spilling to an overflow chain when
+/// it is too large to inline. `reuse` carries the replaced cell's old chain
+/// pages (empty on a fresh insert) for in-place rewriting.
+fn make_cell(txn: &mut Txn<'_>, value: &[u8], reuse: &[u64]) -> Result<Cell> {
+    if value.len() <= max_inline_value(txn.page_size()) {
+        Ok(Cell::Inline(value.to_vec()))
+    } else {
+        Ok(Cell::Overflow {
+            total_len: value.len() as u32,
+            first_page: write_overflow(txn, value, reuse)?,
+        })
+    }
+}
+
 /// Inserts or replaces `key → value` and updates the transaction's root
-/// pointer as needed. Replacing a value that had an overflow chain orphans
-/// the old chain until `vacuum` (documented leak, `docs/FORMAT.md` §5.1).
+/// pointer as needed. Replacing a value that had an overflow chain rewrites
+/// the old chain's pages in place (allocating only for growth); a shrinking
+/// rewrite orphans the tail until `vacuum` (`docs/FORMAT.md` §5.1).
 pub fn insert(txn: &mut Txn<'_>, key: Key, value: &[u8]) -> Result<()> {
     if value.len() > MAX_RECORD_LEN {
         return Err(Error::InvalidArgument("value exceeds MAX_RECORD_LEN"));
     }
     let page_size = txn.page_size();
-    let cell = if value.len() <= max_inline_value(page_size) {
-        Cell::Inline(value.to_vec())
-    } else {
-        Cell::Overflow {
-            total_len: value.len() as u32,
-            first_page: write_overflow(txn, value)?,
-        }
-    };
-
     let root = txn.root_btree_page();
     if root == 0 {
+        let cell = make_cell(txn, value, &[])?;
         let page_no = txn.allocate_page()?;
         let page = encode_leaf(&[LeafEntry { key, cell }], page_size)
             .ok_or(Error::Internal("fresh leaf does not fit"))?;
@@ -455,7 +495,7 @@ pub fn insert(txn: &mut Txn<'_>, key: Key, value: &[u8]) -> Result<()> {
         return Ok(());
     }
 
-    if let Ins::Split { sep, right } = insert_rec(txn, root, key, cell, 0)? {
+    if let Ins::Split { sep, right } = insert_rec(txn, root, key, value, 0)? {
         let new_root = txn.allocate_page()?;
         let node = InnerNode {
             entries: vec![(sep, root)],
@@ -469,7 +509,13 @@ pub fn insert(txn: &mut Txn<'_>, key: Key, value: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn insert_rec(txn: &mut Txn<'_>, page_no: u64, key: Key, cell: Cell, depth: usize) -> Result<Ins> {
+fn insert_rec(
+    txn: &mut Txn<'_>,
+    page_no: u64,
+    key: Key,
+    value: &[u8],
+    depth: usize,
+) -> Result<Ins> {
     if depth >= MAX_DEPTH {
         return Err(malformed(page_no, "b-tree deeper than MAX_DEPTH"));
     }
@@ -477,9 +523,24 @@ fn insert_rec(txn: &mut Txn<'_>, page_no: u64, key: Key, cell: Cell, depth: usiz
     let page = txn.read_page(page_no)?;
     match decode_node(&page, page_no)? {
         Node::Leaf(mut entries) => {
+            // The cell is built here at the leaf, not up in `insert`, so a
+            // replacement can hand the old cell's overflow chain to
+            // `make_cell` for in-place reuse.
             match entries.binary_search_by(|e| e.key.cmp(&key)) {
-                Ok(i) => entries[i].cell = cell,
-                Err(i) => entries.insert(i, LeafEntry { key, cell }),
+                Ok(i) => {
+                    let reuse = match &entries[i].cell {
+                        Cell::Overflow {
+                            total_len,
+                            first_page,
+                        } => chain_pages(txn, *first_page, *total_len)?,
+                        Cell::Inline(_) => Vec::new(),
+                    };
+                    entries[i].cell = make_cell(txn, value, &reuse)?;
+                }
+                Err(i) => {
+                    let cell = make_cell(txn, value, &[])?;
+                    entries.insert(i, LeafEntry { key, cell });
+                }
             }
             if let Some(encoded) = encode_leaf(&entries, page_size) {
                 txn.write_page(page_no, &encoded)?;
@@ -527,7 +588,7 @@ fn insert_rec(txn: &mut Txn<'_>, page_no: u64, key: Key, cell: Cell, depth: usiz
                 Some((_, c)) => *c,
                 None => node.rightmost,
             };
-            match insert_rec(txn, child, key, cell, depth + 1)? {
+            match insert_rec(txn, child, key, value, depth + 1)? {
                 Ins::Fit => Ok(Ins::Fit),
                 Ins::Split { sep, right } => {
                     // `child` kept keys <= sep; `right` now covers the upper
@@ -767,6 +828,48 @@ mod tests {
         // Committed state visible through the pager.
         let root = pager.header().root_btree_page;
         assert_eq!(get(&pager, root, &key(2)).unwrap().unwrap(), b"two");
+    }
+
+    #[test]
+    fn growing_rewrites_reuse_the_overflow_chain() {
+        // Rewriting one key with ever-larger overflowing values must grow the
+        // file linearly with the final value, not once per rewrite (the
+        // quadratic pattern fixed alongside the dict — see index::dict tests).
+        let mut pager = pager(SMALL);
+        let mut txn = pager.begin().unwrap();
+        let rounds = 100usize;
+        let step = 40usize;
+        for i in 1..=rounds {
+            insert(&mut txn, key(7), &vec![0xCD; i * step]).unwrap();
+        }
+        let final_value = vec![0xCD; rounds * step];
+        let root = txn.root_btree_page();
+        assert_eq!(get(&txn, root, &key(7)).unwrap().unwrap(), final_value);
+        let chain_len = final_value.len().div_ceil(overflow_capacity(SMALL)) as u64;
+        assert!(
+            txn.page_count() <= chain_len + 8,
+            "chain reuse regressed: {} pages allocated for a {}-page chain",
+            txn.page_count(),
+            chain_len
+        );
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn shrinking_rewrite_truncates_the_chain_and_reads_back() {
+        let mut pager = pager(SMALL);
+        let mut txn = pager.begin().unwrap();
+        insert(&mut txn, key(1), &vec![0xAB; 5000]).unwrap();
+        // Shorter but still overflowing: head of the chain reused in place.
+        let small = vec![0xEF; 1200];
+        insert(&mut txn, key(1), &small).unwrap();
+        let root = txn.root_btree_page();
+        assert_eq!(get(&txn, root, &key(1)).unwrap().unwrap(), small);
+        // Shrink to inline: whole chain orphaned, value still correct.
+        insert(&mut txn, key(1), b"tiny").unwrap();
+        let root = txn.root_btree_page();
+        assert_eq!(get(&txn, root, &key(1)).unwrap().unwrap(), b"tiny");
+        txn.commit().unwrap();
     }
 
     /// Random inserts + updates vs. a `BTreeMap` model at 512-byte pages:
