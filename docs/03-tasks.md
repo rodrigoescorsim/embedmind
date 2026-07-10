@@ -206,6 +206,74 @@ técnico com diagramas se solicitado — publicação é do founder.
 
 ---
 
+## Fase BQ — Qualidade de busca em escala + benchmarks honestos (pré-launch, alta prioridade)
+
+> Origem: análise dos resultados de 2026-07-09 (`benches/results/0.1.0-dev.json`).
+> Dois achados: (1) recall@10 a 100k caiu para 0,9313 na média e **0,20 na pior
+> query** — `ef_search` fixo em 64 não escala com o índice; (2) a tabela de
+> comparação é assimétrica — o cronômetro do EmbedMind inclui embeddar a query e
+> carregar registros completos, o dos concorrentes mede busca vetorial pura sobre
+> vetor pronto. Ambos ferem a credibilidade dos números que o README vai publicar
+> no launch — por isso esta fase precede o dia 35.
+
+### BQ1. `ef_search` proporcional ao tamanho do índice (story S16)
+
+Substituir o default fixo (`HNSW_DEFAULT_EF_SEARCH = 64` em `format.rs`) por um
+default que escala com o número de nós do índice — fórmula/patamares decididos por
+sweep no harness (ex: candidatos `max(64, k·ln N)` e degraus por faixa; escolher pelo
+dado, registrar em ADR). `Query::ef_search(n)` explícito segue soberano. Aproveitar a
+folga: p99 medido 15,5 ms @ 100k vs. teto de 50 ms — há ~3x de orçamento de latência
+para comprar recall.
+
+- **DoD:** story S16 verde — recall@10 @ 100k ≥ 0,95 média e ≥ 0,70 pior query com
+  p99 < 50 ms; sem regressão de latência no 10k além do limiar §5; ADR do
+  escalonamento escrito; harness reporta distribuição do recall por query
+  (mín/p10/p50).
+- **Verificação:** `benches/run_all.sh` nos dois datasets + `cargo test --workspace`.
+- **Atenção (interação com RAM):** a meta de RSS < 300 MiB @ 100k está com 6% de
+  folga (280,9 medido) — validar RSS na mesma rodada; se estourar, reportar e decidir
+  em ADR (não esconder).
+
+### BQ2. Latência decomposta + artefatos consistentes (story S17, metade EmbedMind)
+
+Harness passa a medir e reportar separadamente o custo de embeddar a query
+(`embed_ms`) e o custo do motor (busca híbrida + fusão + carga de registros) — o
+`SuiteResult` já carrega `query_vectors`, parte do encanamento existe. Na mesma task:
+`results/<versão>.json` e `latest.md` saem da mesma invocação (hoje divergem), e cada
+linha da tabela declara o escopo do sistema (devolve ids vs. conteúdo; persiste só
+vetores vs. texto+metadados+índices).
+
+- **DoD:** tabela emite `query = embed X ms + engine Y ms`; md/json consistentes por
+  construção; nota de escopo por sistema; teste do renderer cobrindo a decomposição.
+- **Verificação:** `benches/run_all.sh` e revisão da tabela gerada.
+
+### BQ3. Comparação texto→resultado simétrica (story S17, metade concorrentes)
+
+Nova seção da tabela onde sqlite-vec e zvec pagam o mesmo pedágio: a query é
+embeddada com o mesmo modelo/pipeline ONNX (fora deles, tempo medido e somado) e o
+resultado é comparado fim a fim com o `recall` do EmbedMind. A seção index-only
+existente continua — ela responde outra pergunta (qualidade do índice) e é onde o
+zvec vence hoje legitimamente.
+
+- **DoD:** tabela com as duas seções rotuladas (index-only e texto→resultado);
+  metodologia atualizada em BENCHMARKS.md; regras de honestidade do §4 preservadas.
+- **Verificação:** `benches/run_all.sh` com as features `compare-*` habilitadas.
+
+### BQ4. Concorrente da categoria de produto: Chroma local (story S18)
+
+Adaptador de comparação para o Chroma em modo local/embedded (versão pinada), medido
+na seção texto→resultado com o mesmo all-MiniLM-L6-v2 — a alternativa real que um dev
+de agente considera. Driver via subprocess/binding Python, gated por feature como os
+demais; sem toolchain, reporta "not measured".
+
+- **DoD:** linha do Chroma na tabela texto→resultado (recall@10, p50/p99, tamanho em
+  disco) ou "not measured" honesto; versões pinadas registradas.
+- **Verificação:** `benches/run_all.sh` num ambiente com Python + Chroma instalados.
+- **Dependência externa (founder):** Python 3.x disponível no ambiente de benchmark
+  com `pip install chromadb` (versão a pinar na task).
+
+---
+
 ## Fase C — M3: profundidade — semanas 9–12
 
 ### C1. Camada de grafo simples (item 3.1) [✅ ENTREGUE]

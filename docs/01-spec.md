@@ -226,6 +226,60 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
   §5) e o workflow `.github/workflows/bench.yml`, que roda em todo PR/push que toca
   engine ou harness e falha o job quando um limiar do §5 é cruzado.
 
+### S16. Recall estável em escala — `ef_search` proporcional ao índice [⬜ pendente]
+
+Contexto medido (run 2026-07-09, `agent-mem-100k`): recall@10 médio caiu de 0,9953
+(@10k) para 0,9313 e a pior query para **0,20** — causa raiz: `ef_search` default fixo
+em 64 (`format.rs`) não escala com o tamanho do índice, e a adaptação existente só
+dispara em sub-retorno por filtro, nunca por qualidade. Há folga de latência (p99
+15,5 ms medido vs. teto de 50 ms) para gastar em recall.
+
+- **Dado** um índice com 100k memórias, **quando** chamo `recall` com os defaults,
+  **então** o `ef_search` efetivo cresce com o tamanho do índice (fórmula/patamares a
+  decidir por sweep no harness e registrar em ADR — nunca outra constante fixa) e o
+  recall@10 vs. brute-force fica ≥ 0,95 na média e ≥ 0,70 na pior query, com query
+  p99 ainda < 50 ms (alvos propostos em 10/jul/2026 a partir do sweep; ajustar pelo
+  dado medido, registrando o porquê).
+- **Dado** um arquivo pequeno (ex: 1k memórias), **quando** chamo `recall`, **então**
+  a latência não regride além do limiar do §5 do BENCHMARKS.md (o escalonamento não
+  pode punir quem tem pouco dado).
+- **Borda:** `Query::ef_search(n)` explícito continua soberano — o escalonamento só
+  governa o default.
+- **Verificação:** `benches/run_all.sh` nos dois datasets; harness passa a reportar
+  também a distribuição do recall por query (mín/p10/p50), não só média e mínimo.
+
+### S17. Benchmark decomposto e simétrico [⬜ pendente]
+
+O cronômetro de query do EmbedMind mede embed da query + busca híbrida + carga dos
+registros; os concorrentes recebem vetor pronto e devolvem ids. A tabela publicada
+compara coisas diferentes sem rotular — corrigir a medição, não o marketing.
+
+- **Dado** um run do harness, **quando** a tabela é emitida, **então** a latência do
+  EmbedMind aparece decomposta (`embed` da query vs. `engine`: busca+fusão+carga), e
+  existe uma seção **texto→resultado** onde cada concorrente paga o mesmo custo de
+  embedding (mesmo modelo/pipeline ONNX, medido fora dele e somado) — simetria nos
+  dois sentidos: index-only compara índice com índice; texto→resultado compara
+  produto com produto.
+- **Dado** um run, **então** `results/<versão>.json` e `latest.md` saem da MESMA
+  invocação (hoje divergem: md diz "not measured", json tem números) e cada linha da
+  tabela declara o escopo do sistema (o que devolve: ids vs. conteúdo completo; o que
+  persiste: só vetores vs. texto+metadados+índices).
+- **Verificação:** `benches/run_all.sh` + revisão da tabela gerada; teste do renderer
+  cobrindo a decomposição.
+
+### S18. Comparação com concorrente da categoria de produto [⬜ pendente]
+
+sqlite-vec/zvec são baselines de camada de índice; a alternativa que um dev de agente
+realmente considera é um vector store local que também embeda (Chroma em modo
+local/embedded, com o mesmo all-MiniLM-L6-v2, é a briga justa).
+
+- **Dado** o harness com a feature de comparação habilitada, **quando** rodo a suite,
+  **então** o Chroma (modo local, versão pinada) aparece na seção texto→resultado com
+  recall@10, p50/p99 e tamanho em disco, sob as mesmas regras de honestidade (S15);
+  toolchain ausente reporta "not measured", nunca número inventado.
+- **Verificação:** `benches/run_all.sh` com a feature ligada num ambiente com Python
+  disponível (dependência externa do founder, como as toolchains de sqlite-vec/zvec).
+
 ---
 
 ## Requisitos não-funcionais consolidados
@@ -235,6 +289,7 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
 | Durabilidade | zero perda confirmada sob kill -9/queda de energia | crash harness (S4) |
 | Integridade | arquivo nunca irrecuperável; recovery automático | crash harness + fuzzing |
 | Latência `recall` | < 50 ms p99 @ 100k memórias, CPU-only | benchmark harness |
+| Recall@10 @ 100k | ≥ 0,95 média · ≥ 0,70 pior query (alvos propostos — S16) | benchmark harness |
 | Latência `remember` | < 200 ms p99 (dominada pelo embedding) | benchmark harness |
 | Artefato de release | < 40 MB comprimido, incluindo modelo (ADR 0010) | CI de release |
 | RAM | < 300 MB @ 100k memórias | benchmark harness (RSS) |

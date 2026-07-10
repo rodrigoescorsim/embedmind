@@ -9,9 +9,16 @@
 
 | Baseline | Why it's the fair comparison |
 |---|---|
-| `sqlite-vec` (latest release, inside SQLite) | the incumbent "embedded vector search in one file" |
-| `zvec` | the closest new embedded vector store |
+| `sqlite-vec` (latest release, inside SQLite) | the incumbent "embedded vector search in one file" — index-layer baseline |
+| `zvec` | the closest new embedded vector store — index-layer baseline |
+| Chroma (local/embedded mode, pinned version) | the product-category competitor: a local store that also embeds (same all-MiniLM-L6-v2) — the alternative an agent developer actually weighs |
 | Brute-force exact scan (our own, in-memory) | recall ceiling + sanity floor for latency claims |
+
+Two comparison planes, always labeled (S17): **index-only** — pre-computed vectors in,
+ids out; isolates index quality, the only plane where vector-only stores can appear —
+and **text→result** — text in, results out; the product workload, where every system
+pays the same embedding toll (measured with the same ONNX pipeline and added to the
+systems that don't embed themselves).
 
 Rules of engagement: pinned versions (recorded in results), default/recommended settings
 for each baseline (no de-tuning the competition), same hardware, same dataset, same
@@ -33,8 +40,8 @@ pinned hash) so anyone can re-run everything with `cargo bench` / `benches/run_a
 
 | Metric | How measured |
 |---|---|
-| `recall@10` | vs. brute-force exact top-10 (and vs. labels on the public set) |
-| query latency p50 / p99 | single-thread, 1k queries, warm cache; **and** cold-open first-query (file just opened — the "no server" scenario) |
+| `recall@10` | vs. brute-force exact top-10 (and vs. labels on the public set); mean **and** per-query distribution (min/p10/p50) — a good mean can hide a catastrophic tail (S16) |
+| query latency p50 / p99 | single-thread, 1k queries, warm cache; **and** cold-open first-query (file just opened — the "no server" scenario). Reported **decomposed**: `embed` (query embedding) vs. `engine` (search + fusion + record load) — our embed-inclusive total vs. a vector-only system's search time is exactly the asymmetry this decomposition prevents (S17) |
 | ingest throughput | memories/sec, batch and one-at-a-time (agent pattern), fsync `full` |
 | file size on disk | after ingest, and after `vacuum` |
 | peak RSS | during ingest and during query load |
@@ -51,10 +58,15 @@ versions, date.
    will likely beat us on raw ingest throughput in v0.1 — if so, that's in the README table.
 2. No cherry-picked dataset sizes: 10k and 100k always reported side by side.
 3. Numbers are regenerated per release by the harness, never hand-edited; the results
-   file is CI-generated (`benches/results/<version>.json` → rendered table).
+   file is CI-generated (`benches/results/<version>.json` → rendered table). The JSON
+   and the rendered `latest.md` come from the **same invocation** — two artifacts
+   disagreeing about what was measured is itself a violation of this section.
 4. If a baseline's result looks wrong, we open an issue on their repo asking for review
    *before* publishing, and link it.
 5. Claims in marketing copy must trace to a row in a published results table.
+6. Every comparison row states the system's **scope**: what it returns (ids vs. full
+   content + metadata) and what it persists (vectors only vs. text + metadata +
+   full-text + graph). A smaller on-disk file that stores less is not a win row.
 
 ## 5. CI regression guard
 
