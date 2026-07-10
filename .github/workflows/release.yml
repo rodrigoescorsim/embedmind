@@ -188,6 +188,23 @@ jobs:
             ~/AppData/Local/ort.pyke.io
           key: ort-dylib-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
+      # Pre-pull the manylinux image with retry, so a transient registry hiccup
+      # doesn't fail the whole job — maturin-action reuses whatever is already
+      # in the local Docker cache instead of pulling again. Docker Hub mirror
+      # (not quay.io) to sidestep that specific registry's outages; same
+      # official PyPA image either way.
+      - name: Pre-pull manylinux image (with retry)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          for i in 1 2 3; do
+            docker pull docker.io/pypa/manylinux_2_28_x86_64 && exit 0
+            echo "pull attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "manylinux image pull failed after 3 attempts" >&2
+          exit 1
+
       # Build the abi3 wheel. The bindings crate is its own workspace
       # (bindings/python), so maturin runs against that manifest directly.
       - name: Build wheel
@@ -196,9 +213,11 @@ jobs:
           command: build
           args: --release --out dist --manifest-path bindings/python/Cargo.toml
           # Linux wheels build in a manylinux container by default; the ort
-          # ONNX Runtime download works there, but pin the image explicitly so
-          # the glibc floor is predictable.
-          manylinux: ${{ matrix.os == 'ubuntu-latest' && '2_28' || 'auto' }}
+          # ONNX Runtime download works there. Pin the full image reference
+          # (Docker Hub mirror, pre-pulled above with retry) instead of the
+          # bare "2_28" alias, which maturin-action resolves to quay.io —
+          # a registry that has shown transient pull failures here.
+          manylinux: ${{ matrix.os == 'ubuntu-latest' && 'docker.io/pypa/manylinux_2_28_x86_64' || 'auto' }}
 
       # Prove the freshly built wheel installs and its full remember → recall →
       # forget → stats → vacuum cycle works — the pytest E2E suite (the Python
