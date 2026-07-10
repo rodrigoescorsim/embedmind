@@ -110,7 +110,7 @@ Record encoding (all fields explicit, in order):
 | field | encoding |
 |---|---|
 | `id` | 16 bytes (ULID, big-endian byte order as per ULID spec — the one deliberate exception, kept for sortability) |
-| `flags` | u8 — bit 0 = `tombstone` |
+| `flags` | u8 — bit 0 = `tombstone` · bit 1 = `superseded` (S19, [ADR 0013](adr/0013-supersedes-flag-no-record.md); previously reserved-and-zero, so any pre-S19 record decodes as not-superseded — no version bump, evolution rule 1 below). A reader that predates bit 1 ignores it and shows superseded memories in recall: documented degradation, never corruption |
 | `content` | length-prefixed UTF-8 |
 | `vec_ref` | `page_no: u64` + `slot: u16` into a VECTOR page; all-zero = no embedding. When the content was chunked (§7), this is the **first** chunk's vector |
 | `project` | length-prefixed UTF-8; length 0 = none |
@@ -123,6 +123,13 @@ Tagged scalar: 1 tag byte (`0` = null, `1` = bool(u8), `2` = i64, `3` = f64, `4`
 
 `forget` sets the tombstone bit (soft delete). Space and index entries are reclaimed only
 by `embedmind vacuum`, which rebuilds pages and the HNSW index (DESIGN decision #3).
+
+`remember(supersedes: [id])` sets the `superseded` bit on each target's record — same
+rewrite path as the tombstone, in the same transaction as the new record's insert and its
+`"supersedes"` graph edge (§12). A superseded record is excluded from every search
+(re-checked against this bit at query time, exactly like the tombstone) but stays
+readable by id and navigable through the graph as history; **vacuum preserves it**, and
+only an explicit later `forget` reclaims it (S19, ADR 0013).
 
 ### 5.1 B-tree page layout
 

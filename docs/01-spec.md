@@ -293,7 +293,7 @@ local/embedded, com o mesmo all-MiniLM-L6-v2, é a briga justa).
 > entra ANTES do launch de 11/ago — "conhecimento versionado" é diferencial de anúncio
 > que nenhum store embarcado tem.
 
-### S19. `supersedes` — conhecimento versionado de primeira classe [⬜ pendente]
+### S19. `supersedes` — conhecimento versionado de primeira classe [✅ implementada]
 
 Como agente, quero corrigir um fato gravado sem perder o histórico: a memória nova
 substitui a antiga no recall, mas a antiga continua navegável como versão anterior.
