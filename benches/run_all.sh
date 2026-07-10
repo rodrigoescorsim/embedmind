@@ -26,8 +26,15 @@
 #   COMPARE="--features compare-sqlite-vec,compare-zvec" \
 #     COMPARE_DATASET=agent-mem-10k ./benches/run_all.sh --full
 #
-# Exit code is non-zero if any applicable NFR was missed (so this doubles as the
-# CI performance guard, BENCHMARKS.md §5).
+# Regression guard (BENCHMARKS.md §5): point BASELINE at a previous results
+# JSON to also fail on any metric that regressed beyond the §5 thresholds:
+#   BASELINE=benches/results/0.1.0-dev.json ./benches/run_all.sh
+# (Latency/RSS checks degrade to warnings when the baseline came from another
+# platform; recall@10 and file size are enforced regardless.)
+#
+# Exit code is non-zero if any applicable NFR was missed, or if BASELINE was
+# given and a §5 threshold was crossed (so this doubles as the CI performance
+# guard — see .github/workflows/bench.yml).
 
 set -euo pipefail
 

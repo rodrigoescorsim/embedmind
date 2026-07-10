@@ -98,3 +98,10 @@ path = "src/bin/baseline.rs"
 [[bin]]
 name = "run_all"
 path = "src/bin/run_all.rs"
+
+# The CI regression guard's comparison-only entry point (docs/BENCHMARKS.md §5,
+# spec S15): diffs two results JSONs against the §5 thresholds without
+# re-running the suite. `run_all` embeds the same comparison via `BASELINE=`.
+[[bin]]
+name = "compare_baseline"
+path = "src/bin/compare_baseline.rs"

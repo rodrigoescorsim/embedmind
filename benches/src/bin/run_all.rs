@@ -16,8 +16,10 @@
 //! It materializes (or loads) each requested dataset, runs [`harness::run_suite`]
 //! over it, runs the pinned competitors ([`competitors::run_all`]) on the same
 //! vectors/queries, then renders the README-ready markdown table and a JSON
-//! results file into `benches/results/`. Exit code is non-zero if any
-//! **applicable** NFR was missed, so the same binary doubles as the CI guard.
+//! results file into `benches/results/` (versioned + `latest.json`). Exit code
+//! is non-zero if any **applicable** NFR was missed — and, when `BASELINE=`
+//! points at a previous results JSON, if any metric regressed beyond the
+//! BENCHMARKS.md §5 thresholds — so the same binary doubles as the CI guard.
 
 #![allow(clippy::print_stderr, clippy::print_stdout)]
 
@@ -28,7 +30,7 @@ use std::sync::Arc;
 use embedmind_bench::dataset::{self, DATASETS, DatasetSpec, VectorSet};
 use embedmind_bench::harness::SuiteResult;
 use embedmind_bench::report::{self, RunEnv};
-use embedmind_bench::{competitors, default_data_dir, harness};
+use embedmind_bench::{competitors, default_data_dir, harness, regression};
 use embedmind_core::api::{Store, StoreOptions};
 use embedmind_core::embed::{Embedder, OnnxEmbedder};
 use embedmind_core::storage::vfs::RealVfs;
@@ -156,16 +158,57 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let markdown = report::render_markdown(&env, &results, &competitor_outcomes, compared_on);
     let json = report::render_json(&env, &results, &competitor_outcomes, compared_on);
 
+    // Read the baseline (if any) BEFORE persisting this run: the natural
+    // baseline path is a previous file in `benches/results/` — possibly the
+    // very `<version>.json` we are about to overwrite. Reading it after the
+    // write would compare the run against itself and the guard would silently
+    // always pass. A baseline that is set but unreadable is a hard error —
+    // the guard must never silently skip itself.
+    let baseline = match std::env::var("BASELINE") {
+        Ok(path) if !path.is_empty() => {
+            let baseline_text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("reading BASELINE '{path}': {e}"))?;
+            Some(
+                regression::parse_run_summary(&baseline_text)
+                    .map_err(|e| format!("parsing BASELINE '{path}': {e}"))?,
+            )
+        }
+        _ => None,
+    };
+
     let results_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("results");
     std::fs::create_dir_all(&results_dir)?;
     let json_path = results_dir.join(format!("{}.json", env.embedmind_version));
+    // Stable-name copy of the current run, so the CI job (and any script) can
+    // find "this run's numbers" without knowing the crate version.
+    let latest_json_path = results_dir.join("latest.json");
     let md_path = results_dir.join("latest.md");
     std::fs::write(&json_path, &json)?;
+    std::fs::write(&latest_json_path, &json)?;
     std::fs::write(&md_path, &markdown)?;
 
     println!("\n{markdown}");
     println!("wrote {}", json_path.display());
+    println!("wrote {}", latest_json_path.display());
     println!("wrote {}", md_path.display());
+
+    // Regression guard vs a previous run (BENCHMARKS.md §5, spec S15): when
+    // `BASELINE` pointed at an earlier results JSON (read above, before the
+    // writes), compare this run against it and fail on any regression beyond
+    // the §5 thresholds.
+    let mut regressed = false;
+    if let Some(baseline) = &baseline {
+        let current = regression::parse_run_summary(&json)?;
+        let checks = regression::check_regressions(baseline, &current)?;
+        println!(
+            "{}",
+            regression::render_markdown(baseline, &current, &checks)
+        );
+        regressed = regression::has_failures(&checks);
+        if regressed {
+            eprintln!("performance regression vs baseline (BENCHMARKS.md §5) — see above");
+        }
+    }
 
     // Exit non-zero if any applicable NFR missed — makes this the CI guard too.
     let checks = report::check_nfrs(&results);
@@ -173,9 +216,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .iter()
         .filter(|c| !c.passed && !c.not_applicable)
         .collect();
-    if missed.is_empty() {
-        Ok(ExitCode::SUCCESS)
-    } else {
+    if !missed.is_empty() {
         eprintln!("\n{} NFR(s) missed (reported above):", missed.len());
         for c in missed {
             eprintln!(
@@ -183,8 +224,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 c.name, c.target, c.measured
             );
         }
-        Ok(ExitCode::FAILURE)
+        return Ok(ExitCode::FAILURE);
     }
+    if regressed {
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Loads the `.vec` sidecar (and thus assumes the `.mind` exists), or

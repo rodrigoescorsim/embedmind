@@ -23,10 +23,14 @@
 //! - [`competitors`] — the pinned sqlite-vec/zvec registry and comparison
 //!   adapters (feature-gated; honest "not measured" when a toolchain is absent).
 //! - [`report`] — NFR validation and the README-ready markdown + JSON renderers.
+//! - [`regression`] — baseline comparison for the CI regression guard
+//!   (BENCHMARKS.md §5 thresholds; spec S15).
 //!
 //! Binaries: `gen_dataset <name>` materializes a dataset; `baseline <name>`
 //! runs the brute-force recall@10 reference over it; `run_all` runs the full
-//! suite end-to-end and emits the results table (see `benches/run_all.sh`).
+//! suite end-to-end and emits the results table (see `benches/run_all.sh`);
+//! `compare_baseline <baseline.json> <current.json>` runs just the §5
+//! regression comparison between two results files.
 
 pub mod baseline;
 pub mod competitors;
@@ -35,6 +39,7 @@ pub mod dataset;
 pub mod harness;
 pub mod metrics;
 pub mod recall;
+pub mod regression;
 pub mod report;
 pub mod sysmem;
 
