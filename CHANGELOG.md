@@ -15,6 +15,19 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Graceful recall on `.mind` files with no full-text index** (S9 edge,
+  roadmap 2.3) — a file written before the full-text index existed (header's
+  `fts_root_page == 0`) never fails `recall`: it degrades to vector-only
+  automatically (RRF fusion with an empty text list) and the degradation is
+  now *visible*, not silent — the CLI prints a stderr warning pointing at
+  `embedmind vacuum` (which rebuilds the file with the index) and the MCP
+  `recall` response gains a top-level `warning` field, absent on healthy
+  files so existing clients see an unchanged shape. Covered end-to-end: a
+  core integration test opens a legacy-shaped fixture and asserts valid
+  vector hits + the outcome flag, CLI and MCP tests assert the warning on
+  their channels, and the S9 fusion invariants (union never intersection,
+  deterministic best-first order, limit cap) are now property-tested with
+  `proptest` — closing story S9.
 - **Real head-to-head benchmark numbers vs. sqlite-vec + zvec** — the comparison
   columns the harness reserved are now filled with measured values (no more
   "not measured on this run"). Ran `benches/run_all.sh` with

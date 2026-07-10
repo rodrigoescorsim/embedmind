@@ -47,12 +47,17 @@ fn legacy_embedding_store(content: &str) -> Store {
         embedder: Some(Arc::new(OnnxEmbedder::load().expect("model must load"))),
         ..StoreOptions::default()
     };
-    let mut store = Store::create_with(Arc::clone(&vfs), Path::new("m.mind"), opts.clone()).unwrap();
+    let mut store =
+        Store::create_with(Arc::clone(&vfs), Path::new("m.mind"), opts.clone()).unwrap();
     store.remember(MemoryDraft::new(content)).unwrap();
     store.close().unwrap();
 
-    let mut pager =
-        Pager::open(Arc::clone(&vfs), Path::new("m.mind"), PagerOptions::default()).unwrap();
+    let mut pager = Pager::open(
+        Arc::clone(&vfs),
+        Path::new("m.mind"),
+        PagerOptions::default(),
+    )
+    .unwrap();
     let mut txn = pager.begin().unwrap();
     txn.set_fts_root_page(0);
     txn.commit().unwrap();

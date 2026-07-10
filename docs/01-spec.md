@@ -157,7 +157,7 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
 
 ## P1 — M2 (lançamento + híbrido)
 
-### S9. Busca híbrida full-text + vetor [⬜ pendente]
+### S9. Busca híbrida full-text + vetor [✅ implementada]
 
 - **Dado** memórias com termos exatos (nomes de função, siglas, ids), **quando** chamo
   `recall`, **então** a lista final funde ranking vetorial e BM25 por **Reciprocal Rank

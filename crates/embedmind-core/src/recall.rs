@@ -206,6 +206,46 @@ mod tests {
         );
     }
 
+    // S9 verification: property tests over the fusion invariants. Random
+    // lists (duplicates and overlaps included) — the properties the golden
+    // cases spot-check must hold universally.
+    proptest::proptest! {
+        #[test]
+        fn fuse_holds_its_invariants_for_any_input(
+            v_seeds in proptest::collection::vec(1u128..40, 0..12),
+            t_seeds in proptest::collection::vec(1u128..40, 0..12),
+            limit in 0usize..24,
+        ) {
+            let vector: Vec<Ulid> = v_seeds.iter().map(|&s| Ulid::from(s)).collect();
+            let text: Vec<Ulid> = t_seeds.iter().map(|&s| Ulid::from(s)).collect();
+            let fused = fuse(&vector, &text, limit);
+
+            // Deterministic: same inputs, same output.
+            proptest::prop_assert_eq!(&fused, &fuse(&vector, &text, limit));
+
+            // Capped at limit, sorted best-first.
+            proptest::prop_assert!(fused.len() <= limit);
+            for w in fused.windows(2) {
+                proptest::prop_assert!(w[0].score >= w[1].score);
+            }
+
+            // Exactly the union (each id once, positive score), never an
+            // intersection: with room, every distinct input id survives.
+            let distinct: std::collections::BTreeSet<Ulid> =
+                vector.iter().chain(text.iter()).copied().collect();
+            let out: std::collections::BTreeSet<Ulid> =
+                fused.iter().map(|f| f.record_id).collect();
+            proptest::prop_assert_eq!(out.len(), fused.len(), "no id repeats");
+            proptest::prop_assert!(out.is_subset(&distinct), "no invented ids");
+            if limit >= distinct.len() {
+                proptest::prop_assert_eq!(&out, &distinct, "union, never intersection");
+            }
+            for f in &fused {
+                proptest::prop_assert!(f.score > 0.0);
+            }
+        }
+    }
+
     #[test]
     fn output_is_sorted_descending_and_deterministic() {
         let all = ids(6);
