@@ -15,6 +15,7 @@ use std::sync::Arc;
 use embedmind_core::api::{MemoryDraft, Query, Scope, Store, StoreOptions};
 use embedmind_core::storage::sim::SimVfs;
 use embedmind_core::storage::vfs::Vfs;
+use embedmind_core::storage::{Pager, PagerOptions};
 use embedmind_core::{Result, embed::OnnxEmbedder};
 
 const STORE: &str = "memory.mind";
@@ -187,6 +188,56 @@ fn recall_finds_content_past_the_first_window_via_chunking() {
     assert_eq!(
         hit.content, long,
         "recall returns the whole memory, never a chunk"
+    );
+}
+
+/// S9 edge (docs/01-spec.md): a `.mind` written before the full-text index
+/// existed presents `fts_root_page == 0` in its header. Opening such a file
+/// and calling `recall` must degrade to vector-only — valid hits by vector
+/// similarity, the degradation reported via [`RecallOutcome`]
+/// (`degraded_to_vector_only`) so the shells can warn, never a typed error.
+#[test]
+fn legacy_file_without_fts_index_recalls_vector_only_with_warning_flag() {
+    let (vfs, mut store) = store();
+    let feline = store
+        .remember(MemoryDraft::new("a kitten was sleeping on the rug"))
+        .unwrap();
+    store
+        .remember(MemoryDraft::new("quarterly corporate tax filing deadline"))
+        .unwrap();
+    store.close().unwrap();
+
+    // Rewind the file to the pre-M2 shape: drop the header's full-text root
+    // pointer. The fts pages become unreferenced leftovers, which is exactly
+    // how detection works on a real legacy file — it keys on the pointer,
+    // never on the pages.
+    let mut pager =
+        Pager::open(Arc::clone(&vfs), Path::new(STORE), PagerOptions::default()).unwrap();
+    let mut txn = pager.begin().unwrap();
+    txn.set_fts_root_page(0);
+    txn.commit().unwrap();
+    pager.close().unwrap();
+
+    let store = reopen(vfs);
+    let outcome = store
+        .recall_detailed(Query::new("a small feline resting").limit(5))
+        .expect("recall on a legacy file must degrade, never error");
+    assert!(
+        outcome.degraded_to_vector_only,
+        "the missing fts index must be reported so shells can warn"
+    );
+    assert!(
+        outcome.hits.iter().any(|h| h.id == feline.id),
+        "vector similarity must still find the semantically close memory"
+    );
+    // The plain `recall` path hides the flag but must return the same hits.
+    let hits = store
+        .recall(Query::new("a small feline resting").limit(5))
+        .unwrap();
+    assert_eq!(
+        hits.iter().map(|h| h.id).collect::<Vec<_>>(),
+        outcome.hits.iter().map(|h| h.id).collect::<Vec<_>>(),
+        "recall and recall_detailed must agree on a legacy file"
     );
 }
 
