@@ -216,10 +216,15 @@ jobs:
           command: build
           args: --release --out dist --manifest-path bindings/python/Cargo.toml
           # Linux wheels build in a manylinux container by default; the ort
-          # ONNX Runtime download works there, but pin the image explicitly
-          # (quay.io — see note above) so the glibc floor is predictable and
-          # maturin-action reuses the image pre-pulled with retry above.
-          manylinux: ${{ matrix.os == 'ubuntu-latest' && 'quay.io/pypa/manylinux_2_28_x86_64' || 'auto' }}
+          # ONNX Runtime download works there, but pin the compatibility tag
+          # explicitly so the glibc floor is predictable. This must be the
+          # bare tag ("2_28"), NOT a full image reference — maturin passes it
+          # straight to `--compatibility`, which rejects a registry path
+          # (confirmed on CI: "invalid value 'quay.io/...' for
+          # '--compatibility': invalid manylinux option"). maturin-action
+          # resolves "2_28" to quay.io/pypa/manylinux_2_28_x86_64 itself,
+          # reusing whatever the pre-pull step above already cached.
+          manylinux: ${{ matrix.os == 'ubuntu-latest' && '2_28' || 'auto' }}
 
       # Prove the freshly built wheel installs and its full remember → recall →
       # forget → stats → vacuum cycle works — the pytest E2E suite (the Python
