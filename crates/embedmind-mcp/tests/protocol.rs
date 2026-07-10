@@ -34,6 +34,33 @@ fn embedding_store() -> Store {
     Store::create_with(vfs, Path::new("m.mind"), opts).unwrap()
 }
 
+/// A store on a `.mind` rewound to the pre-M2 shape (no full-text index):
+/// content is remembered normally, then the header's fts root pointer is
+/// dropped through the pager — exactly what an old file presents on open.
+/// For the S9 graceful-degradation edge.
+fn legacy_embedding_store(content: &str) -> Store {
+    use embedmind_core::MemoryDraft;
+    use embedmind_core::storage::{Pager, PagerOptions};
+
+    let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+    let opts = StoreOptions {
+        embedder: Some(Arc::new(OnnxEmbedder::load().expect("model must load"))),
+        ..StoreOptions::default()
+    };
+    let mut store = Store::create_with(Arc::clone(&vfs), Path::new("m.mind"), opts.clone()).unwrap();
+    store.remember(MemoryDraft::new(content)).unwrap();
+    store.close().unwrap();
+
+    let mut pager =
+        Pager::open(Arc::clone(&vfs), Path::new("m.mind"), PagerOptions::default()).unwrap();
+    let mut txn = pager.begin().unwrap();
+    txn.set_fts_root_page(0);
+    txn.commit().unwrap();
+    pager.close().unwrap();
+
+    Store::open_with(vfs, Path::new("m.mind"), opts).unwrap()
+}
+
 /// Feeds `requests` (one JSON value per line) through the server loop and
 /// returns the responses in order. No project context.
 fn roundtrip(store: Store, requests: &[Value]) -> Vec<Value> {
@@ -239,6 +266,43 @@ fn recall_returns_scored_hits_with_provenance() {
     assert_eq!(
         hits[0]["provenance"]["agent"], "test-agent",
         "clientInfo.name from initialize must be recorded as provenance"
+    );
+    assert!(
+        responses[3]["result"]["structuredContent"]
+            .get("warning")
+            .is_none(),
+        "a healthy file must not carry a degradation warning"
+    );
+}
+
+/// S9 edge over the protocol: `recall` against a `.mind` with no full-text
+/// index (a pre-M2 file) returns vector-only hits plus a `warning` field —
+/// never a tool error, and the response shape is otherwise unchanged.
+#[test]
+fn recall_on_legacy_file_without_fts_index_returns_hits_with_warning() {
+    let responses = roundtrip(
+        legacy_embedding_store("the kitten sleeps on the rug"),
+        &[
+            initialize_request(1),
+            call(2, "recall", json!({ "query": "a small feline resting" })),
+        ],
+    );
+    let result = &responses[1]["result"];
+    assert!(
+        result.get("isError").is_none(),
+        "degradation must never be a tool error: {result}"
+    );
+    let content = &result["structuredContent"];
+    let hits = content["hits"].as_array().unwrap();
+    assert!(
+        !hits.is_empty(),
+        "vector similarity must still return the memory: {content}"
+    );
+    assert!(hits[0]["content"].as_str().unwrap().contains("kitten"));
+    let warning = content["warning"].as_str().unwrap();
+    assert!(
+        warning.contains("no full-text index"),
+        "the warning must say what degraded: {warning}"
     );
 }
 

@@ -345,9 +345,10 @@ impl McpServer {
             json!("all")
         };
 
-        Ok(match self.store.recall(query) {
-            Ok(hits) => {
-                let hits: Vec<Value> = hits
+        Ok(match self.store.recall_detailed(query) {
+            Ok(outcome) => {
+                let hits: Vec<Value> = outcome
+                    .hits
                     .iter()
                     .map(|hit| {
                         json!({
@@ -363,7 +364,19 @@ impl McpServer {
                         })
                     })
                     .collect();
-                Ok(json!({ "hits": hits, "scope": applied_scope }))
+                let mut result = json!({ "hits": hits, "scope": applied_scope });
+                // S9 edge: a file with no full-text index (pre-M2) still
+                // recalls, vector-only — a warning field, never an error, and
+                // absent entirely on a healthy file so existing clients see
+                // an unchanged response.
+                if outcome.degraded_to_vector_only {
+                    result["warning"] = json!(
+                        "this memory file has no full-text index (written by an \
+                         older EmbedMind); results are vector-only. Run \
+                         `embedmind vacuum` to build it"
+                    );
+                }
+                Ok(result)
             }
             Err(e) => Err(e.to_string()),
         })
