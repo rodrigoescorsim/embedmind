@@ -42,6 +42,16 @@ enum Command {
         /// Store as a global memory even inside a project
         #[arg(long)]
         global: bool,
+        /// Tag the memory with an explicit entity ("postgres",
+        /// "auth-service", ...; repeatable). Query back with
+        /// `embedmind related --entity NAME`.
+        #[arg(long = "entity", value_name = "NAME")]
+        entities: Vec<String>,
+        /// Relate this memory to an existing one (repeatable): KIND=ID,
+        /// e.g. `refines=01ABC...`. The target must exist and be live.
+        /// Navigate back with `embedmind related ID`.
+        #[arg(long = "relation", value_name = "KIND=ID")]
+        relations: Vec<String>,
     },
     /// Semantic search over everything remembered
     Recall {
@@ -66,6 +76,20 @@ enum Command {
         /// see `stats` for which agents have memories)
         #[arg(long)]
         agent: Option<String>,
+        /// Also pull each hit's explicitly related memories (1 hop, both
+        /// directions), appended after the ranked hits as connected context
+        #[arg(long)]
+        expand_related: bool,
+    },
+    /// Navigate the explicit memory graph: neighbors of one memory, or
+    /// every memory tagged with an entity
+    Related {
+        /// Memory id whose entity tags and related memories to list
+        #[arg(required_unless_present = "entity")]
+        id: Option<String>,
+        /// List every memory tagged with this entity instead
+        #[arg(long, conflicts_with = "id")]
+        entity: Option<String>,
     },
     /// Delete one memory by id
     Forget { id: String },
@@ -104,7 +128,9 @@ fn run(cli: Cli) -> Result<(), String> {
             content,
             project,
             global,
-        } => remember(&file, content, project, global),
+            entities,
+            relations,
+        } => remember(&file, content, project, global, entities, relations),
         Command::Recall {
             query,
             limit,
@@ -112,7 +138,18 @@ fn run(cli: Cli) -> Result<(), String> {
             all,
             filters,
             agent,
-        } => recall(&file, query, limit, project, all, filters, agent),
+            expand_related,
+        } => recall(
+            &file,
+            query,
+            limit,
+            project,
+            all,
+            filters,
+            agent,
+            expand_related,
+        ),
+        Command::Related { id, entity } => related(&file, id, entity),
         Command::Forget { id } => forget(&file, &id),
         Command::Stats => stats(&file),
         Command::Vacuum => vacuum(&file),
@@ -149,7 +186,10 @@ fn remember(
     content: String,
     project: Option<String>,
     global: bool,
+    entities: Vec<String>,
+    relations: Vec<String>,
 ) -> Result<(), String> {
+    let relations = parse_relations(&relations)?;
     let mut store = open(file)?;
     let project = if global {
         None
@@ -160,7 +200,10 @@ fn remember(
                 .and_then(|cwd| detect_project(&cwd))
         })
     };
-    let mut draft = MemoryDraft::new(content).agent("cli");
+    let mut draft = MemoryDraft::new(content)
+        .agent("cli")
+        .entities(entities.clone())
+        .relations(relations.clone());
     if let Some(project) = &project {
         draft = draft.project(project.clone());
     }
@@ -172,9 +215,16 @@ fn remember(
         Some(name) => println!("{} (project: {name})", memory.id),
         None => println!("{} (global)", memory.id),
     }
+    if !entities.is_empty() {
+        println!("entities: {}", entities.join(", "));
+    }
+    for (kind, target) in &relations {
+        println!("relation: {kind} -> {target}");
+    }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // one CLI flag each; a struct would just rename them
 fn recall(
     file: &Path,
     text: String,
@@ -183,9 +233,10 @@ fn recall(
     all: bool,
     filters: Vec<String>,
     agent: Option<String>,
+    expand_related: bool,
 ) -> Result<(), String> {
     let store = open(file)?;
-    let mut query = Query::new(text).limit(limit);
+    let mut query = Query::new(text).limit(limit).expand_related(expand_related);
     if !filters.is_empty() {
         query = query.filters(parse_filters(&filters)?);
     }
@@ -221,8 +272,69 @@ fn recall(
     }
     for hit in &hits {
         let project = hit.project.as_deref().unwrap_or("global");
-        println!("[{:>5.3}] {}  ({project})", hit.score, hit.id);
+        // Graph-expanded hits carry exactly 0.0 (connected context, not a
+        // ranked match — RRF scores are strictly positive): mark them.
+        if expand_related && hit.score == 0.0 {
+            println!("[  rel] {}  ({project})", hit.id);
+        } else {
+            println!("[{:>5.3}] {}  ({project})", hit.score, hit.id);
+        }
         println!("        {}", hit.content.replace('\n', "\n        "));
+    }
+    Ok(())
+}
+
+/// `embedmind related <ID>` / `embedmind related --entity NAME`: the graph
+/// navigation of S13. By id: the memory's entity tags plus its relation
+/// neighbors, both directions. By entity: every live memory tagged with it.
+fn related(file: &Path, id: Option<String>, entity: Option<String>) -> Result<(), String> {
+    let store = open(file)?;
+    if let Some(entity) = entity {
+        let members = store
+            .entity_members(&entity)
+            .map_err(|e| format!("related failed: {e}"))?;
+        if members.is_empty() {
+            eprintln!("no memories tagged with entity '{entity}'");
+            return Ok(());
+        }
+        eprintln!("memories tagged with entity '{entity}':");
+        for memory in &members {
+            let project = memory.project.as_deref().unwrap_or("global");
+            println!("{}  ({project})", memory.id);
+            println!("        {}", memory.content.replace('\n', "\n        "));
+        }
+        return Ok(());
+    }
+    // Clap guarantees `id` is present when `--entity` is absent.
+    let id = id.ok_or("related: a memory id or --entity is required")?;
+    let id = Ulid::from_string(&id).map_err(|_| format!("'{id}' is not a valid memory id"))?;
+    if store
+        .get(id)
+        .map_err(|e| format!("related failed: {e}"))?
+        .is_none()
+    {
+        return Err(format!("no live memory with id {id}"));
+    }
+    let entities = store
+        .entities_of(id)
+        .map_err(|e| format!("related failed: {e}"))?;
+    if !entities.is_empty() {
+        println!("entities: {}", entities.join(", "));
+    }
+    let related = store
+        .related(id)
+        .map_err(|e| format!("related failed: {e}"))?;
+    if related.is_empty() {
+        eprintln!("no related memories");
+        return Ok(());
+    }
+    for rel in &related {
+        let project = rel.project.as_deref().unwrap_or("global");
+        // `->` = this memory relates to the neighbor; `<-` = the neighbor
+        // relates to this memory.
+        let arrow = if rel.outgoing { "->" } else { "<-" };
+        println!("{arrow} {:<14} {}  ({project})", rel.kind, rel.id);
+        println!("        {}", rel.content.replace('\n', "\n        "));
     }
     Ok(())
 }
@@ -323,6 +435,28 @@ fn default_memory_file() -> Result<PathBuf, String> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .ok_or("cannot determine home directory (HOME/USERPROFILE unset); pass --file")?;
     Ok(PathBuf::from(home).join(".embedmind").join("memory.mind"))
+}
+
+/// Parses `--relation KIND=ID` arguments into the engine's `(kind, target)`
+/// pairs (S13). Pure argument transport — target existence/liveness is
+/// validated by the engine inside the `remember` transaction.
+fn parse_relations(specs: &[String]) -> Result<Vec<(String, Ulid)>, String> {
+    let mut out = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let Some((kind, target)) = spec.split_once('=') else {
+            return Err(format!(
+                "invalid --relation '{spec}': expected KIND=ID (e.g. refines=01ABC...)"
+            ));
+        };
+        let kind = kind.trim();
+        if kind.is_empty() {
+            return Err(format!("invalid --relation '{spec}': empty kind"));
+        }
+        let target = Ulid::from_string(target.trim())
+            .map_err(|_| format!("invalid --relation '{spec}': '{target}' is not a memory id"))?;
+        out.push((kind.to_string(), target));
+    }
+    Ok(out)
 }
 
 /// Parses `--filter` arguments into the engine's `key -> Filter` map (S10).

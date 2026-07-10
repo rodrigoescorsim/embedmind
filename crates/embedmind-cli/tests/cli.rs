@@ -386,6 +386,135 @@ fn recall_by_agent_and_stats_breakdown() {
     assert!(stdout.contains("beta-agent"), "{stdout}");
 }
 
+/// S13 through the CLI: `remember --entity/--relation` writes explicit graph
+/// data, `related` navigates it by id (both directions) and by entity,
+/// `recall --expand-related` pulls the connected neighbor as context, and a
+/// forgotten neighbor's relation disappears with the tombstone.
+#[test]
+fn graph_remember_related_and_expand() {
+    let scratch = Scratch::new("graph");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    // A: the base decision.
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "remember",
+            "we chose postgres for the storage layer",
+        ],
+    );
+    assert!(ok, "remember A failed: {stderr}");
+    let a_id = stdout.split_whitespace().next().unwrap().to_string();
+
+    // B refines A and is tagged with an entity.
+    let relation = format!("refines={a_id}");
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "remember",
+            "specifically postgres sixteen with the pgvector extension",
+            "--entity",
+            "postgres",
+            "--relation",
+            &relation,
+        ],
+    );
+    assert!(ok, "remember B failed: {stderr}");
+    let b_id = stdout.split_whitespace().next().unwrap().to_string();
+    assert!(stdout.contains("entities: postgres"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("relation: refines -> {a_id}")),
+        "{stdout}"
+    );
+
+    // related B: outgoing edge to A, with B's entity tags.
+    let (ok, stdout, stderr) = run(scratch.path(), &["--file", file, "related", &b_id]);
+    assert!(ok, "related B failed: {stderr}");
+    assert!(stdout.contains("entities: postgres"), "{stdout}");
+    assert!(stdout.contains("-> refines"), "{stdout}");
+    assert!(stdout.contains(&a_id), "{stdout}");
+
+    // related A: the same edge, incoming.
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "related", &a_id]);
+    assert!(ok);
+    assert!(stdout.contains("<- refines"), "{stdout}");
+    assert!(stdout.contains(&b_id), "{stdout}");
+
+    // related --entity postgres: B is the only member.
+    let (ok, stdout, _) = run(
+        scratch.path(),
+        &["--file", file, "related", "--entity", "postgres"],
+    );
+    assert!(ok);
+    assert!(stdout.contains(&b_id), "{stdout}");
+    assert!(stdout.contains("pgvector"), "{stdout}");
+    assert!(
+        !stdout.contains("storage layer"),
+        "A is not tagged: {stdout}"
+    );
+
+    // recall --expand-related: B ranks (limit 1), A comes along as context
+    // marked "rel" instead of a score.
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "recall",
+            "the pgvector extension",
+            "--limit",
+            "1",
+            "--expand-related",
+        ],
+    );
+    assert!(ok, "expanded recall failed: {stderr}");
+    assert!(stdout.contains(&b_id), "ranked hit expected: {stdout}");
+    assert!(
+        stdout.contains(&a_id) && stdout.contains("[  rel]"),
+        "neighbor must come along marked as related context: {stdout}"
+    );
+
+    // Malformed / dangling relations are clear errors.
+    let (ok, _, stderr) = run(
+        scratch.path(),
+        &["--file", file, "remember", "x", "--relation", "garbage"],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("invalid --relation"), "{stderr}");
+    let (ok, _, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "remember",
+            "x",
+            "--relation",
+            "refines=01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        ],
+    );
+    assert!(!ok, "dangling relation target must fail the remember");
+    assert!(stderr.contains("remember failed"), "{stderr}");
+
+    // Forget A: the relation disappears with the tombstone.
+    let (ok, _, _) = run(scratch.path(), &["--file", file, "forget", &a_id]);
+    assert!(ok);
+    let (ok, stdout, stderr) = run(scratch.path(), &["--file", file, "related", &b_id]);
+    assert!(ok);
+    assert!(
+        !stdout.contains(&a_id),
+        "relation to a forgotten memory must disappear: {stdout}"
+    );
+    assert!(stderr.contains("no related memories"), "{stderr}");
+    let (ok, _, stderr) = run(scratch.path(), &["--file", file, "related", &a_id]);
+    assert!(!ok, "related on a forgotten id is an error");
+    assert!(stderr.contains("no live memory"), "{stderr}");
+}
+
 /// `embedmind serve` speaks MCP over stdio — the exact integration the
 /// README promises (`claude mcp add embedmind -- embedmind serve`).
 #[test]
