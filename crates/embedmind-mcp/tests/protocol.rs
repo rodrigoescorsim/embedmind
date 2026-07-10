@@ -1008,3 +1008,178 @@ fn forget_through_protocol_hides_memory_from_recall() {
         "forgotten memory must not be recalled"
     );
 }
+
+/// S19 through the protocol: `remember` accepts `supersedes: [ids]`, echoes
+/// them back, the version chain is navigable via `related` in both
+/// directions, and argument/engine edges fail the right way (protocol error
+/// vs. tool error, nothing stored).
+#[test]
+fn supersedes_remember_related_and_edges_through_the_protocol() {
+    let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+    let store = Store::create_with(vfs, Path::new("m.mind"), StoreOptions::default()).unwrap();
+    let mut server = McpServer::new(store, Some("alpha".to_string()));
+
+    let feed = |server: &mut McpServer, reqs: &[Value]| -> Vec<Value> {
+        let input: String = reqs.iter().map(|r| format!("{r}\n")).collect();
+        let mut out = Vec::new();
+        server.serve(input.as_bytes(), &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+
+    // A (in project "alpha"), then B superseding A.
+    let r = feed(
+        &mut server,
+        &[call(1, "remember", json!({ "content": "fact, first version" }))],
+    );
+    let a_id = r[0]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = feed(
+        &mut server,
+        &[call(
+            2,
+            "remember",
+            json!({ "content": "fact, corrected", "supersedes": [a_id] }),
+        )],
+    );
+    let structured = &r[0]["result"]["structuredContent"];
+    let b_id = structured["id"].as_str().unwrap().to_string();
+    assert_eq!(structured["supersedes"], json!([a_id]));
+
+    // The chain is navigable both ways with the "supersedes" kind.
+    let r = feed(&mut server, &[call(3, "related", json!({ "id": b_id }))]);
+    let neighbors = r[0]["result"]["structuredContent"]["related"]
+        .as_array()
+        .unwrap();
+    assert_eq!(neighbors.len(), 1);
+    assert_eq!(neighbors[0]["id"], a_id);
+    assert_eq!(neighbors[0]["kind"], "supersedes");
+    assert_eq!(neighbors[0]["outgoing"], true);
+    let r = feed(&mut server, &[call(4, "related", json!({ "id": a_id }))]);
+    let neighbors = r[0]["result"]["structuredContent"]["related"]
+        .as_array()
+        .unwrap();
+    assert_eq!(neighbors.len(), 1);
+    assert_eq!(neighbors[0]["id"], b_id);
+    assert_eq!(neighbors[0]["outgoing"], false);
+
+    // Edges. Malformed arguments are protocol errors; a ghost target or a
+    // cross-project target is an engine failure (tool error, nothing stored).
+    let ghost = "01ARZ3NDEKTSV4RRFFQ69G5FAV"; // valid ULID, never stored
+    let r = feed(
+        &mut server,
+        &[
+            call(
+                5,
+                "remember",
+                json!({ "content": "bad shape", "supersedes": "not-an-array" }),
+            ),
+            call(
+                6,
+                "remember",
+                json!({ "content": "bad id", "supersedes": ["not-a-ulid"] }),
+            ),
+            call(
+                7,
+                "remember",
+                json!({ "content": "ghost target", "supersedes": [ghost] }),
+            ),
+            call(
+                8,
+                "remember",
+                json!({ "content": "global cannot supersede scoped",
+                        "project": null, "supersedes": [a_id] }),
+            ),
+        ],
+    );
+    assert_eq!(r[0]["error"]["code"], -32602);
+    assert_eq!(r[1]["error"]["code"], -32602);
+    assert_eq!(r[2]["result"]["isError"], true, "ghost target: tool error");
+    assert_eq!(
+        r[3]["result"]["isError"], true,
+        "cross-project (global vs. alpha) target: tool error"
+    );
+}
+
+/// S19 end to end with the real model: after `remember(supersedes: [A])`,
+/// recall through the protocol returns only the new version — and forgetting
+/// the new version does not resurrect the old one.
+#[test]
+fn supersedes_hides_old_version_from_recall_through_protocol() {
+    let mut server = McpServer::new(embedding_store(), None);
+    let feed = |server: &mut McpServer, reqs: &[Value]| -> Vec<Value> {
+        let input: String = reqs.iter().map(|r| format!("{r}\n")).collect();
+        let mut out = Vec::new();
+        server.serve(input.as_bytes(), &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+
+    let r = feed(
+        &mut server,
+        &[call(
+            1,
+            "remember",
+            json!({ "content": "the launch date is august 4th" }),
+        )],
+    );
+    let old_id = r[0]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = feed(
+        &mut server,
+        &[call(
+            2,
+            "remember",
+            json!({ "content": "the launch date moved to august 11th",
+                    "supersedes": [old_id] }),
+        )],
+    );
+    let new_id = r[0]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = feed(
+        &mut server,
+        &[call(3, "recall", json!({ "query": "when is the launch date" }))],
+    );
+    let hits = r[0]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h["id"] == new_id.as_str()),
+        "the new version must be recalled: {hits:?}"
+    );
+    assert!(
+        hits.iter().all(|h| h["id"] != old_id.as_str()),
+        "the superseded version must not be recalled: {hits:?}"
+    );
+
+    // Forgetting the superseder does not resurrect the superseded (its
+    // exclusion is state on its own record, docs/adr/0013).
+    let r = feed(
+        &mut server,
+        &[
+            call(4, "forget", json!({ "id": new_id })),
+            call(5, "recall", json!({ "query": "when is the launch date" })),
+        ],
+    );
+    assert_eq!(r[0]["result"]["structuredContent"]["count"], 1);
+    let hits = r[1]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert!(
+        hits.iter().all(|h| h["id"] != old_id.as_str()),
+        "forget of the new version must not resurrect the old: {hits:?}"
+    );
+}
