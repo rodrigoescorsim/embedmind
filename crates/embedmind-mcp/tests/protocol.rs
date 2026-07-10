@@ -1033,7 +1033,11 @@ fn supersedes_remember_related_and_edges_through_the_protocol() {
     // A (in project "alpha"), then B superseding A.
     let r = feed(
         &mut server,
-        &[call(1, "remember", json!({ "content": "fact, first version" }))],
+        &[call(
+            1,
+            "remember",
+            json!({ "content": "fact, first version" }),
+        )],
     );
     let a_id = r[0]["result"]["structuredContent"]["id"]
         .as_str()
@@ -1060,6 +1064,10 @@ fn supersedes_remember_related_and_edges_through_the_protocol() {
     assert_eq!(neighbors[0]["id"], a_id);
     assert_eq!(neighbors[0]["kind"], "supersedes");
     assert_eq!(neighbors[0]["outgoing"], true);
+    assert_eq!(
+        neighbors[0]["superseded"], true,
+        "the old version is marked as history"
+    );
     let r = feed(&mut server, &[call(4, "related", json!({ "id": a_id }))]);
     let neighbors = r[0]["result"]["structuredContent"]["related"]
         .as_array()
@@ -1067,6 +1075,10 @@ fn supersedes_remember_related_and_edges_through_the_protocol() {
     assert_eq!(neighbors.len(), 1);
     assert_eq!(neighbors[0]["id"], b_id);
     assert_eq!(neighbors[0]["outgoing"], false);
+    assert_eq!(
+        neighbors[0]["superseded"], false,
+        "the current version is not history"
+    );
 
     // Edges. Malformed arguments are protocol errors; a ghost target or a
     // cross-project target is an engine failure (tool error, nothing stored).
@@ -1151,7 +1163,11 @@ fn supersedes_hides_old_version_from_recall_through_protocol() {
 
     let r = feed(
         &mut server,
-        &[call(3, "recall", json!({ "query": "when is the launch date" }))],
+        &[call(
+            3,
+            "recall",
+            json!({ "query": "when is the launch date" }),
+        )],
     );
     let hits = r[0]["result"]["structuredContent"]["hits"]
         .as_array()

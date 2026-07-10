@@ -672,7 +672,12 @@ fn supersedes_flow_recall_hides_history_stays_navigable() {
     let (ok, _, stderr) = run(
         scratch.path(),
         &[
-            "--file", file, "remember", "x", "--supersedes", "not-a-ulid",
+            "--file",
+            file,
+            "remember",
+            "x",
+            "--supersedes",
+            "not-a-ulid",
         ],
     );
     assert!(!ok);

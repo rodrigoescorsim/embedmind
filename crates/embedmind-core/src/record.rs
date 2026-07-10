@@ -460,7 +460,11 @@ mod tests {
         // Bit 1 was reserved-zero before S19: a record encoded without it
         // (any pre-S19 file) must decode as not-superseded.
         let old = sample(); // superseded: false ⇒ bit 1 written zero
-        assert!(!MemoryRecord::decode(&old.encode().unwrap()).unwrap().superseded);
+        assert!(
+            !MemoryRecord::decode(&old.encode().unwrap())
+                .unwrap()
+                .superseded
+        );
     }
 
     #[test]

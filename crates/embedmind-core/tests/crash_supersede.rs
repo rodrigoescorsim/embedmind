@@ -71,7 +71,12 @@ impl Model {
 
 /// One durable `remember`, superseding the most recent confirmed live
 /// non-superseded memory when `supersede` is set (and one exists).
-fn do_remember(store: &mut Store, model: &mut Model, content: String, supersede: bool) -> Result<()> {
+fn do_remember(
+    store: &mut Store,
+    model: &mut Model,
+    content: String,
+    supersede: bool,
+) -> Result<()> {
     let target = if supersede {
         model
             .ids
@@ -89,10 +94,9 @@ fn do_remember(store: &mut Store, model: &mut Model, content: String, supersede:
         next.insert(target_content.clone(), true);
     }
     model.snapshots.push(next);
-    model.superseded_by.insert(
-        content.clone(),
-        target.as_ref().map(|(_, c)| c.clone()),
-    );
+    model
+        .superseded_by
+        .insert(content.clone(), target.as_ref().map(|(_, c)| c.clone()));
 
     let mut draft = MemoryDraft::new(content.clone()).agent("crash-test");
     if let Some((target_id, _)) = target {
@@ -158,7 +162,10 @@ fn check_invariants(vfs: &SimVfs, model: &Model, ctx: &str) {
         .map(|m| (m.content.clone(), m.superseded))
         .collect();
     assert_eq!(got.len(), survivors.len(), "duplicate contents ({ctx})");
-    assert_eq!(&got, expected, "supersede atomicity violated ({ctx}) at txn {t}");
+    assert_eq!(
+        &got, expected,
+        "supersede atomicity violated ({ctx}) at txn {t}"
+    );
 
     // Superseded memories stay readable by id (history, not deletion).
     for (id, content) in &model.ids {

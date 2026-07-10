@@ -2338,7 +2338,11 @@ mod tests {
         assert_eq!(step1[0].kind, SUPERSEDES_RELATION);
         let from_b = store.related(b.id).unwrap();
         let down: Vec<Ulid> = from_b.iter().filter(|r| r.outgoing).map(|r| r.id).collect();
-        let up: Vec<Ulid> = from_b.iter().filter(|r| !r.outgoing).map(|r| r.id).collect();
+        let up: Vec<Ulid> = from_b
+            .iter()
+            .filter(|r| !r.outgoing)
+            .map(|r| r.id)
+            .collect();
         assert_eq!(down, vec![a.id]);
         assert_eq!(up, vec![c.id]);
     }

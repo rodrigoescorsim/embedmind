@@ -466,6 +466,10 @@ impl McpServer {
                     "id": rel.id.to_string(),
                     "kind": rel.kind,
                     "outgoing": rel.outgoing,
+                    // S19: a superseded neighbor is history — readable here,
+                    // excluded from recall. Surfaced so agents can tell a
+                    // previous version from current knowledge.
+                    "superseded": rel.superseded,
                     "content": rel.content,
                     "project": rel.project,
                     "provenance": {
