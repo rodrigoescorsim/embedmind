@@ -24,8 +24,11 @@
 //! An entry's footprint is capped at `usable/4` (bodies above the matching
 //! inline limit spill to overflow), which makes leaf splits provably safe by
 //! the same midpoint argument as the record B-tree (`docs/FORMAT.md` §5.1).
-//! Replacing a value that had an overflow chain orphans the old chain until
-//! `vacuum` — the same documented leak as the record B-tree.
+//! Replacing a value that had an overflow chain **reuses the old chain's
+//! pages in place**, allocating only for growth: hot keys that are rewritten
+//! on every insert (FTS postings, graph member lists) grow the file linearly
+//! with their live size instead of quadratically. Only a *shrinking* rewrite
+//! orphans tail pages (reclaimed by `vacuum`), same as the record B-tree.
 
 use crate::error::{Error, Result};
 use crate::format::{PAGE_HEADER_LEN, PAGE_TRAILER_LEN, PageHeader, PageType, stamp_page_checksum};
@@ -309,8 +312,18 @@ fn overflow_capacity(page_size: u32) -> usize {
     page_size as usize - PAGE_HEADER_LEN - PAGE_TRAILER_LEN
 }
 
-/// Writes a value body into a fresh overflow chain; returns the head page.
-fn write_overflow_chain(txn: &mut Txn<'_>, body: &[u8], spec: DictSpec) -> Result<u64> {
+/// Writes a value body into an overflow chain and returns the head page.
+/// Reuses the pages in `reuse` (an existing chain being replaced, in order)
+/// before allocating fresh ones, so rewriting a growing value costs only the
+/// growth — the fix for the quadratic file blowup on hot keys like FTS
+/// postings. Leftover `reuse` pages (a shrinking rewrite) are orphaned until
+/// `vacuum`.
+fn write_overflow_chain(
+    txn: &mut Txn<'_>,
+    body: &[u8],
+    spec: DictSpec,
+    reuse: &[u64],
+) -> Result<u64> {
     let cap = overflow_capacity(txn.page_size());
     let chunks: Vec<&[u8]> = if body.is_empty() {
         vec![&body[..0]]
@@ -318,8 +331,11 @@ fn write_overflow_chain(txn: &mut Txn<'_>, body: &[u8], spec: DictSpec) -> Resul
         body.chunks(cap).collect()
     };
     let mut pages = Vec::with_capacity(chunks.len());
-    for _ in &chunks {
-        pages.push(txn.allocate_page()?);
+    for i in 0..chunks.len() {
+        match reuse.get(i) {
+            Some(&page_no) => pages.push(page_no),
+            None => pages.push(txn.allocate_page()?),
+        }
     }
     let page_size = txn.page_size() as usize;
     for (i, chunk) in chunks.iter().enumerate() {
@@ -426,15 +442,40 @@ fn child_for(node: &InnerNode, key: &[u8]) -> u64 {
     }
 }
 
+/// Page numbers of an existing overflow chain, in order — the pages a
+/// replacement body may rewrite in place. Bounded by the page count the
+/// recorded `total_len` implies, so a corrupt `next_page` cycle cannot loop.
+fn chain_pages(txn: &Txn<'_>, first_page: u64, total_len: u32, spec: DictSpec) -> Result<Vec<u64>> {
+    let cap = overflow_capacity(txn.page_size());
+    let expected = (total_len as usize).div_ceil(cap).max(1);
+    let mut pages = Vec::with_capacity(expected);
+    let mut page_no = first_page;
+    for _ in 0..expected {
+        let page = txn.read_page(page_no)?;
+        let header =
+            PageHeader::decode(&page).ok_or_else(|| malformed(page_no, "dict overflow header"))?;
+        if header.page_type != spec.overflow {
+            return Err(malformed(page_no, "not a dict overflow page"));
+        }
+        pages.push(page_no);
+        if header.next_page == 0 {
+            break;
+        }
+        page_no = header.next_page;
+    }
+    Ok(pages)
+}
+
 /// Builds the leaf [`Value`] for a body, spilling to an overflow chain when
-/// it is too large to inline.
-fn make_value(txn: &mut Txn<'_>, body: &[u8], spec: DictSpec) -> Result<Value> {
+/// it is too large to inline. `reuse` carries the replaced value's old chain
+/// pages (empty on a fresh insert) for in-place rewriting.
+fn make_value(txn: &mut Txn<'_>, body: &[u8], spec: DictSpec, reuse: &[u64]) -> Result<Value> {
     if body.len() <= max_inline_body(spec, txn.page_size()) {
         Ok(Value::Inline(body.to_vec()))
     } else {
         let total_len = u32::try_from(body.len())
             .map_err(|_| Error::InvalidArgument("dict value exceeds u32"))?;
-        let first_page = write_overflow_chain(txn, body, spec)?;
+        let first_page = write_overflow_chain(txn, body, spec, reuse)?;
         Ok(Value::Overflow {
             total_len,
             first_page,
@@ -448,8 +489,9 @@ enum Ins {
 }
 
 /// Inserts or replaces `key → body`, returning the (possibly moved) root.
-/// Replacing a value that had an overflow chain orphans the old chain until
-/// `vacuum` (same documented leak as the record B-tree).
+/// Replacing a value that had an overflow chain rewrites the old chain's
+/// pages in place (allocating only for growth); a shrinking rewrite orphans
+/// the tail pages until `vacuum` (same discipline as the record B-tree).
 pub(crate) fn upsert(
     txn: &mut Txn<'_>,
     spec: DictSpec,
@@ -460,9 +502,9 @@ pub(crate) fn upsert(
     if key.len() > spec.max_key_len {
         return Err(Error::InvalidArgument("dict key exceeds its length cap"));
     }
-    let value = make_value(txn, body, spec)?;
     let page_size = txn.page_size();
     if root == 0 {
+        let value = make_value(txn, body, spec, &[])?;
         let page_no = txn.allocate_page()?;
         let entry = LeafEntry {
             key: key.to_vec(),
@@ -473,7 +515,7 @@ pub(crate) fn upsert(
         txn.write_page(page_no, &page)?;
         return Ok(page_no);
     }
-    match insert_rec(txn, root, key, value, 0, spec)? {
+    match insert_rec(txn, root, key, body, 0, spec)? {
         Ins::Fit => Ok(root),
         Ins::Split { sep, right } => {
             let new_root = txn.allocate_page()?;
@@ -493,7 +535,7 @@ fn insert_rec(
     txn: &mut Txn<'_>,
     page_no: u64,
     key: &[u8],
-    value: Value,
+    body: &[u8],
     depth: usize,
     spec: DictSpec,
 ) -> Result<Ins> {
@@ -504,15 +546,30 @@ fn insert_rec(
     let page = txn.read_page(page_no)?;
     match decode_node(&page, page_no, spec)? {
         Node::Leaf(mut entries) => {
+            // The value is built here at the leaf, not up in `upsert`, so a
+            // replacement can hand the old value's overflow chain to
+            // `make_value` for in-place reuse.
             match entries.binary_search_by(|e| e.key.as_slice().cmp(key)) {
-                Ok(i) => entries[i].value = value,
-                Err(i) => entries.insert(
-                    i,
-                    LeafEntry {
-                        key: key.to_vec(),
-                        value,
-                    },
-                ),
+                Ok(i) => {
+                    let reuse = match &entries[i].value {
+                        Value::Overflow {
+                            total_len,
+                            first_page,
+                        } => chain_pages(txn, *first_page, *total_len, spec)?,
+                        Value::Inline(_) => Vec::new(),
+                    };
+                    entries[i].value = make_value(txn, body, spec, &reuse)?;
+                }
+                Err(i) => {
+                    let value = make_value(txn, body, spec, &[])?;
+                    entries.insert(
+                        i,
+                        LeafEntry {
+                            key: key.to_vec(),
+                            value,
+                        },
+                    );
+                }
             }
             if let Some(encoded) = encode_leaf(&entries, page_size, spec) {
                 txn.write_page(page_no, &encoded)?;
@@ -560,7 +617,7 @@ fn insert_rec(
                 Some((_, c)) => *c,
                 None => node.rightmost,
             };
-            match insert_rec(txn, child, key, value, depth + 1, spec)? {
+            match insert_rec(txn, child, key, body, depth + 1, spec)? {
                 Ins::Fit => Ok(Ins::Fit),
                 Ins::Split { sep, right } => {
                     match node.entries.get_mut(idx) {
@@ -799,6 +856,57 @@ mod tests {
             let (body, _) = get(&txn, SPEC, root, key.as_bytes()).unwrap().unwrap();
             assert_eq!(body, i.to_le_bytes());
         }
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn growing_rewrites_reuse_the_overflow_chain() {
+        // The FTS-postings pattern: one key rewritten with a slightly larger
+        // body on every insert. With chain reuse the file grows linearly with
+        // the final body; the old copy-the-whole-chain behavior grew
+        // quadratically (the agent-mem-10k store ballooned 82 MiB → ~4 GiB).
+        let page_size = 512u32;
+        let mut pager = pager(page_size);
+        let mut txn = pager.begin().unwrap();
+        let mut root = 0;
+        let rounds = 200usize;
+        let step = 20usize; // ~posting size; final body spans many pages
+        for i in 1..=rounds {
+            let body = vec![0xCD; i * step];
+            root = upsert(&mut txn, SPEC, root, b"hot-term", &body).unwrap();
+        }
+        let final_body = vec![0xCD; rounds * step];
+        assert_eq!(
+            get(&txn, SPEC, root, b"hot-term").unwrap().unwrap().0,
+            final_body
+        );
+        // Pages actually needed: the final chain + one leaf. Allow slack for
+        // the inline→overflow transition, but stay an order of magnitude
+        // below the ~2000 pages the quadratic rewrite would have allocated.
+        let chain_len = final_body.len().div_ceil(overflow_capacity(page_size)) as u64;
+        assert!(
+            txn.page_count() <= chain_len + 8,
+            "chain reuse regressed: {} pages allocated for a {}-page chain",
+            txn.page_count(),
+            chain_len
+        );
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn shrinking_rewrite_truncates_the_chain_and_reads_back() {
+        let mut pager = pager(512);
+        let mut txn = pager.begin().unwrap();
+        let big = vec![0xAB; 5000];
+        let root = upsert(&mut txn, SPEC, 0, b"k", &big).unwrap();
+        // Shrink to a shorter (still overflowing) body: reuses the head of
+        // the old chain, orphans the tail, and must read back exactly.
+        let small = vec![0xEF; 1200];
+        let root = upsert(&mut txn, SPEC, root, b"k", &small).unwrap();
+        assert_eq!(get(&txn, SPEC, root, b"k").unwrap().unwrap().0, small);
+        // Shrink to inline: the whole chain is orphaned, value still correct.
+        let root = upsert(&mut txn, SPEC, root, b"k", b"tiny").unwrap();
+        assert_eq!(get(&txn, SPEC, root, b"k").unwrap().unwrap().0, b"tiny");
         txn.commit().unwrap();
     }
 
