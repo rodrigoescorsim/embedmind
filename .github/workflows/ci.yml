@@ -52,6 +52,11 @@ jobs:
   fuzz:
     name: fuzz (${{ github.event_name == 'schedule' && 'nightly, 1h/target' || 'short pass' }})
     runs-on: ubuntu-latest
+    env:
+      # cargo-fuzz precisa de nightly (flags -Z), mas o rust-toolchain.toml da
+      # raiz pina stable e vence o default do dtolnay/rust-toolchain@nightly
+      # (precedência do rustup: env > arquivo > default). O env vence o arquivo.
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

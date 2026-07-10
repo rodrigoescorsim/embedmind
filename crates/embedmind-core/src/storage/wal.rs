@@ -54,10 +54,7 @@ pub fn scan(file: &dyn VfsFile) -> Result<Option<RecoveredWal>> {
     let mut frame_header = [0u8; WAL_FRAME_HEADER_LEN];
     let mut image = vec![0u8; header.page_size as usize];
 
-    loop {
-        let Some(end) = offset.checked_add(frame_len) else {
-            break;
-        };
+    while let Some(end) = offset.checked_add(frame_len) {
         if end > file_len {
             break; // partial frame at the tail
         }
