@@ -192,55 +192,74 @@ fn check_after_crash(vfs: &SimVfs, pre: &State, post: &State, ctx: &str) -> Outc
 
 #[test]
 fn crash_sweep_vacuum() {
-    // Dry run: build a store, measure exactly which mutating ops the *vacuum*
-    // performs, so we sweep only those (not the populate phase).
-    let vfs = SimVfs::new();
-    let (mut store, _, dry_post) = populate_and_settle(&vfs);
-    let base = vfs.op_count();
-    store.vacuum().expect("dry-run vacuum must succeed");
-    let end = vfs.op_count();
-    // Post-vacuum state is what a clean run yields.
-    assert_eq!(observe(&store), dry_post, "dry-run post-vacuum state");
-    store.close().unwrap();
-    assert!(end > base, "vacuum performed no mutating I/O");
-
-    // Sweep a kill point at every mutating op the vacuum makes.
+    // Each `populate_and_settle` call mints fresh ULIDs (real wall-clock
+    // timestamps via `Ulid::new()` in `remember`), so the exact op count a
+    // vacuum performs — and therefore how many kill points land pre- vs.
+    // post-swap — shifts slightly round to round. One dry-run's range can,
+    // by chance, be too narrow to contain a kill point past the atomic swap
+    // (observed on CI: the sweep fired real crashes but only ever saw the
+    // pre-vacuum outcome). Retry with a fresh dry-run/range instead of
+    // failing outright — this changes nothing about what's being proven
+    // (every kill point in whatever range is still swept exhaustively,
+    // `CrashMode::Before` and `::Torn`), it just doesn't gamble the whole
+    // test's signal on a single round's ULID-dependent op count.
     let mut fired = 0u32;
     let mut saw_pre = false;
     let mut saw_post = false;
-    for p in base..end {
-        for mode in [CrashMode::Before, CrashMode::Torn] {
-            let seed = p ^ ((mode == CrashMode::Torn) as u64) << 40;
-            let ctx = format!("P {p}, mode {mode:?}, seed {seed:#x}");
 
-            let vfs = SimVfs::new();
-            let (mut store, pre, post) = populate_and_settle(&vfs);
-            assert_eq!(pre.len(), 18);
+    for _round in 0..8 {
+        // Dry run: build a store, measure exactly which mutating ops the
+        // *vacuum* performs, so we sweep only those (not the populate phase).
+        let vfs = SimVfs::new();
+        let (mut store, _, dry_post) = populate_and_settle(&vfs);
+        let base = vfs.op_count();
+        store.vacuum().expect("dry-run vacuum must succeed");
+        let end = vfs.op_count();
+        // Post-vacuum state is what a clean run yields.
+        assert_eq!(observe(&store), dry_post, "dry-run post-vacuum state");
+        store.close().unwrap();
+        assert!(end > base, "vacuum performed no mutating I/O");
 
-            vfs.arm_crash(p, mode, seed);
-            let result = store.vacuum();
-            if result.is_ok() {
-                // ULIDs shifted the op count and the armed crash never fired:
-                // this is a clean vacuum — verify the compacted end state.
-                assert_eq!(observe(&store), post, "clean vacuum ({ctx})");
-                drop(store);
-                continue;
+        // Sweep a kill point at every mutating op this round's vacuum makes.
+        for p in base..end {
+            for mode in [CrashMode::Before, CrashMode::Torn] {
+                let seed = p ^ ((mode == CrashMode::Torn) as u64) << 40;
+                let ctx = format!("P {p}, mode {mode:?}, seed {seed:#x}");
+
+                let vfs = SimVfs::new();
+                let (mut store, pre, post) = populate_and_settle(&vfs);
+                assert_eq!(pre.len(), 18);
+
+                vfs.arm_crash(p, mode, seed);
+                let result = store.vacuum();
+                if result.is_ok() {
+                    // ULIDs shifted the op count and the armed crash never fired:
+                    // this is a clean vacuum — verify the compacted end state.
+                    assert_eq!(observe(&store), post, "clean vacuum ({ctx})");
+                    drop(store);
+                    continue;
+                }
+                drop(store); // release the crashed store's handles
+
+                vfs.power_fail(seed.rotate_left(17));
+                fired += 1;
+                match check_after_crash(&vfs, &pre, &post, &ctx) {
+                    Outcome::PreVacuum => saw_pre = true,
+                    Outcome::PostVacuum => saw_post = true,
+                }
             }
-            drop(store); // release the crashed store's handles
+        }
 
-            vfs.power_fail(seed.rotate_left(17));
-            fired += 1;
-            match check_after_crash(&vfs, &pre, &post, &ctx) {
-                Outcome::PreVacuum => saw_pre = true,
-                Outcome::PostVacuum => saw_post = true,
-            }
+        if saw_pre && saw_post {
+            break;
         }
     }
 
     // The sweep must actually exercise crashes, and both legal outcomes: an
     // early crash that leaves the original intact (pre-vacuum) and a late one
     // that lands after the atomic swap (post-vacuum). If we never saw one of
-    // them the sweep is not covering the transition it claims to.
+    // them across every round the sweep is not covering the transition it
+    // claims to.
     assert!(
         fired > 0,
         "no armed crash ever fired — sweep covered nothing"
