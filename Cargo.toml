@@ -38,7 +38,19 @@ ulid = "1"
 # stay in lockstep). `ort` default features include `download-binaries`,
 # fetching the ONNX Runtime shared library at build time — no system install
 # required, keeping the "one command" promise (ROADMAP 1.6).
-ort = "2.0.0-rc.12"
+# Default features pull in `tls-native` (native-tls -> openssl-sys) for that
+# download; swapped for `tls-rustls` (vendored, no system OpenSSL) because the
+# manylinux container the release workflow's `wheels` job builds Linux wheels
+# in has no OpenSSL dev headers and fails to compile openssl-sys.
+ort = { version = "2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "tls-rustls",
+    "copy-dylibs",
+    "api-24",
+] }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 # Shells only (DESIGN.md §10): the binary format never uses serde.
 serde_json = "1"
