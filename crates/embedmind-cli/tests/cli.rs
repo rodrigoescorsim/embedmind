@@ -613,3 +613,84 @@ fn serve_speaks_mcp_over_stdio() {
         "served memory must be recallable"
     );
 }
+
+/// S19 end to end: `remember --supersedes ID` hides the old version from
+/// recall, keeps it navigable as history via `related`, and rejects bad
+/// targets with a clear error.
+#[test]
+fn supersedes_flow_recall_hides_history_stays_navigable() {
+    let scratch = Scratch::new("supersedes");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &["--file", file, "remember", "the launch date is august 4th"],
+    );
+    assert!(ok, "remember v1 failed: {stderr}");
+    let old_id = stdout.split_whitespace().next().unwrap().to_string();
+
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "remember",
+            "the launch date moved to august 11th",
+            "--supersedes",
+            &old_id,
+        ],
+    );
+    assert!(ok, "remember v2 failed: {stderr}");
+    let new_id = stdout.split_whitespace().next().unwrap().to_string();
+    assert!(
+        stdout.contains(&format!("supersedes: {old_id}")),
+        "supersedes echoed: {stdout}"
+    );
+
+    // Only the new version recalls.
+    let (ok, stdout, _) = run(
+        scratch.path(),
+        &["--file", file, "recall", "when is the launch?"],
+    );
+    assert!(ok);
+    assert!(stdout.contains(&new_id), "new version recalls: {stdout}");
+    assert!(!stdout.contains(&old_id), "old version hidden: {stdout}");
+
+    // The chain is navigable both ways; the old version is marked history.
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "related", &new_id]);
+    assert!(ok);
+    assert!(stdout.contains("supersedes"), "{stdout}");
+    assert!(stdout.contains(&old_id), "{stdout}");
+    assert!(stdout.contains("[superseded]"), "history marked: {stdout}");
+    let (ok, stdout, _) = run(scratch.path(), &["--file", file, "related", &old_id]);
+    assert!(ok, "related on a superseded memory must work (history)");
+    assert!(stdout.contains(&new_id), "{stdout}");
+
+    // Bad targets: malformed id is a CLI parse error; a valid-but-unknown id
+    // fails in the engine. Both exit non-zero with a clear message.
+    let (ok, _, stderr) = run(
+        scratch.path(),
+        &[
+            "--file", file, "remember", "x", "--supersedes", "not-a-ulid",
+        ],
+    );
+    assert!(!ok);
+    assert!(stderr.contains("not a memory id"), "{stderr}");
+    let (ok, _, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "remember",
+            "x",
+            "--supersedes",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        ],
+    );
+    assert!(!ok);
+    assert!(
+        stderr.contains("does not exist or was forgotten"),
+        "{stderr}"
+    );
+}
