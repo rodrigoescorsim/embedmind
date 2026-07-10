@@ -1,0 +1,99 @@
+{
+  "env": {
+    "os": "windows",
+    "arch": "x86_64",
+    "cpus": 20,
+    "embedmind_version": "0.1.0-dev",
+    "date_utc": "2026-07-09"
+  },
+  "compared_on": "agent-mem-10k",
+  "datasets": [
+    {
+      "dataset": "agent-mem-10k",
+      "count": 10000,
+      "dims": 384,
+      "model_id": "all-MiniLM-L6-v2-int8",
+      "recall_at_10": 0.995300,
+      "recall_at_10_min": 0.900000,
+      "query_p50_ms": 10.3989,
+      "query_p99_ms": 14.2736,
+      "cold_open_ms": 0.3664,
+      "cold_first_query_ms": 10.5636,
+      "remember_p50_ms": 7.4859,
+      "remember_p99_ms": 22.2795,
+      "ingest_per_sec": 67.54,
+      "file_bytes": 85991424,
+      "peak_rss_ingest_mib": 118.57,
+      "peak_rss_query_mib": 117.79
+    },
+    {
+      "dataset": "agent-mem-100k",
+      "count": 100000,
+      "dims": 384,
+      "model_id": "all-MiniLM-L6-v2-int8",
+      "recall_at_10": 0.931300,
+      "recall_at_10_min": 0.200000,
+      "query_p50_ms": 10.9473,
+      "query_p99_ms": 15.4970,
+      "cold_open_ms": 0.3305,
+      "cold_first_query_ms": 12.8875,
+      "remember_p50_ms": 7.3656,
+      "remember_p99_ms": 22.4308,
+      "ingest_per_sec": 67.81,
+      "file_bytes": 859643904,
+      "peak_rss_ingest_mib": 280.93,
+      "peak_rss_query_mib": 280.34
+    }
+  ],
+  "competitors": [
+    {
+      "name": "sqlite-vec",
+      "version": "0.1.10-alpha.4",
+      "measured": true,
+      "metrics": {
+        "recall_at_10": 0.998400,
+        "query_p50_ms": 9.842100,
+        "query_p99_ms": 13.208400,
+        "ingest_vecs_per_sec": 196.234266,
+        "file_bytes": 16003072
+      },
+      "reason": ""
+    },
+    {
+      "name": "zvec",
+      "version": "0.5.1",
+      "measured": true,
+      "metrics": {
+        "recall_at_10": 0.991200,
+        "query_p50_ms": 1.046100,
+        "query_p99_ms": 1.527000,
+        "ingest_vecs_per_sec": 70904.586534,
+        "file_bytes": 18206899
+      },
+      "reason": ""
+    }
+  ],
+  "nfrs": [
+    {
+      "name": "recall p99 @ 100k (CPU-only)",
+      "target": "< 50 ms",
+      "measured": "15.50 ms",
+      "passed": true,
+      "not_applicable": false
+    },
+    {
+      "name": "remember p99 (end-to-end, incl. embedding)",
+      "target": "< 200 ms",
+      "measured": "22.43 ms (@ 100k)",
+      "passed": true,
+      "not_applicable": false
+    },
+    {
+      "name": "peak RAM @ 100k",
+      "target": "< 300 MiB",
+      "measured": "280.9 MiB",
+      "passed": true,
+      "not_applicable": false
+    }
+  ]
+}
