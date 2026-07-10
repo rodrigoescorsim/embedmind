@@ -163,7 +163,13 @@ pub fn ingest_corpus(
     corpus: &[GenMemory],
 ) -> embedmind_core::Result<VectorSet> {
     let mut entries = Vec::with_capacity(corpus.len());
-    for mem in corpus {
+    for (i, mem) in corpus.iter().enumerate() {
+        // Heartbeat on (unbuffered) stderr: the 100k ingest runs for ~half an
+        // hour with no other output, and from outside that silence is
+        // indistinguishable from a hang.
+        if i > 0 && i % 5_000 == 0 {
+            eprintln!("  ingest: {i}/{} memories", corpus.len());
+        }
         let stored = store.remember(
             MemoryDraft::new(mem.content.clone())
                 .project(mem.project.clone())

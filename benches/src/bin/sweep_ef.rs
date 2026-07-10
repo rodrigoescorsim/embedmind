@@ -30,6 +30,7 @@
 #![allow(clippy::print_stderr, clippy::print_stdout)]
 
 use std::collections::HashSet;
+use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -55,6 +56,18 @@ const DEFAULT_EF_LADDER: &[u16] = &[64, 96, 128, 192, 256, 384, 512];
 /// Same query-set size as the harness's warm/recall phase, so the ef=64 row
 /// reproduces the committed baseline numbers (same seeds, same texts).
 const DEFAULT_QUERIES: usize = 1000;
+
+/// Stderr heartbeat cadence inside the per-ef query loops. A full sweep runs
+/// for tens of minutes; with stdout fully buffered under redirection, silence
+/// is indistinguishable from a hang to whoever is watching the log files.
+const PROGRESS_EVERY: usize = 250;
+
+/// Rust's stdout is fully buffered when redirected to a file, so a sweep row
+/// would only reach the log when ~8 KiB accumulate — flush after every line
+/// that carries a result.
+fn flush_stdout() {
+    let _ = std::io::stdout().flush();
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -144,7 +157,7 @@ fn sweep_dataset(
     );
     let started = Instant::now();
     let mut exact_sets: Vec<HashSet<Ulid>> = Vec::with_capacity(texts.len());
-    for t in &texts {
+    for (i, t) in texts.iter().enumerate() {
         let mut qv = embedder.embed(t)?;
         normalize(&mut qv);
         let exact: HashSet<Ulid> = baseline::top_k(&set, &qv, K, |_| true)
@@ -152,6 +165,9 @@ fn sweep_dataset(
             .map(|h| h.record_id)
             .collect();
         exact_sets.push(exact);
+        if (i + 1) % PROGRESS_EVERY == 0 {
+            eprintln!("  [{}] baseline {}/{}", spec.name, i + 1, texts.len());
+        }
     }
     eprintln!(
         "  [{}] baseline ready in {:.1}s",
@@ -163,7 +179,9 @@ fn sweep_dataset(
         "| ef_search | recall@10 mean | min | p10 | p50 | vec p50 ms | vec p99 ms | hybrid p50 ms | hybrid p99 ms |"
     );
     println!("|---|---|---|---|---|---|---|---|---|");
+    flush_stdout();
     for &ef in efs {
+        let ef_started = Instant::now();
         let row = sweep_one_ef(&store, &texts, &exact_sets, ef)?;
         println!(
             "| {ef} | {:.4} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} |",
@@ -175,6 +193,12 @@ fn sweep_dataset(
             row.vec_p99_ms,
             row.hybrid_p50_ms,
             row.hybrid_p99_ms,
+        );
+        flush_stdout();
+        eprintln!(
+            "  [{}] ef={ef} done in {:.1}s",
+            spec.name,
+            ef_started.elapsed().as_secs_f64()
         );
     }
     store.close()?;
@@ -205,13 +229,16 @@ fn sweep_one_ef(
     //     this latency is text→ids end-to-end like the harness's) ---
     let mut recalls: Vec<f64> = Vec::with_capacity(texts.len());
     let mut vec_lat = Latencies::with_capacity(texts.len());
-    for (t, exact) in texts.iter().zip(exact_sets) {
+    for (i, (t, exact)) in texts.iter().zip(exact_sets).enumerate() {
         let started = Instant::now();
         let hits = store.recall_vector(Query::new(t.clone()).limit(K).ef_search(ef))?;
         vec_lat.push(started.elapsed());
         let approx: HashSet<Ulid> = hits.into_iter().map(|r| r.id).collect();
         let denom = exact.len().max(1);
         recalls.push(exact.intersection(&approx).count() as f64 / denom as f64);
+        if (i + 1) % PROGRESS_EVERY == 0 {
+            eprintln!("    ef={ef}: vec {}/{}", i + 1, texts.len());
+        }
     }
     recalls.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mean = recalls.iter().sum::<f64>() / recalls.len().max(1) as f64;
@@ -221,10 +248,13 @@ fn sweep_one_ef(
         let _ = store.recall(Query::new(t.clone()).limit(K).ef_search(ef))?;
     }
     let mut hybrid_lat = Latencies::with_capacity(texts.len());
-    for t in texts {
+    for (i, t) in texts.iter().enumerate() {
         let started = Instant::now();
         let _ = store.recall(Query::new(t.clone()).limit(K).ef_search(ef))?;
         hybrid_lat.push(started.elapsed());
+        if (i + 1) % PROGRESS_EVERY == 0 {
+            eprintln!("    ef={ef}: hybrid {}/{}", i + 1, texts.len());
+        }
     }
 
     Ok(EfRow {
