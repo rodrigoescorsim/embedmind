@@ -232,6 +232,133 @@ impl Store {
     /// a typed error; so is a target scoped to a *different* project —
     /// superseding never crosses project boundaries.
     pub fn remember(&mut self, draft: MemoryDraft) -> Result<Memory> {
+        let chunks = self.embed_draft_content(&draft.content)?;
+        self.write_remembered(draft, chunks)
+    }
+
+    /// [`Store::remember`] plus write-time curation (S21, `docs/adr/0016`):
+    /// before storing, the *same* embedding the write will index is searched
+    /// against the existing memories (zero extra embedding cost), and the
+    /// ones above [`NEAR_DUP_THRESHOLD`] come back as
+    /// [`Remembered::similar`] — hint material for the caller to decide
+    /// `forget`, [`MemoryDraft::supersede`], or keep both. The store **always
+    /// happens**; near-duplicates inform, they never block.
+    ///
+    /// Only live, non-superseded memories in the draft's exact scope (same
+    /// project, or global for a global draft) are considered — a near-match
+    /// in another project is not a duplicate of anything. The first memory of
+    /// a file (or a KV-only store) yields an empty list.
+    pub fn remember_detailed(&mut self, draft: MemoryDraft) -> Result<Remembered> {
+        let chunks = self.embed_draft_content(&draft.content)?;
+        let similar = self.near_duplicates(&chunks, draft.project.as_deref())?;
+        let memory = self.write_remembered(draft, chunks)?;
+        Ok(Remembered { memory, similar })
+    }
+
+    /// Embeds one draft's content into its (normalized) chunk vectors —
+    /// everything about a `remember` that can run *before* its transaction.
+    /// Empty on a KV-only store (no embedder).
+    fn embed_draft_content(&self, content: &str) -> Result<Vec<Vec<f32>>> {
+        let Some(embedder) = &self.embedder else {
+            return Ok(Vec::new());
+        };
+        let mut chunks = embedder.embed_chunks(content)?;
+        for vector in &mut chunks {
+            index::normalize(vector);
+        }
+        Ok(chunks)
+    }
+
+    /// The near-duplicate scan of [`Store::remember_detailed`]: searches the
+    /// committed index with the new content's own chunk vectors (before they
+    /// are inserted, so the new memory never matches itself), keeps hits at
+    /// or above [`NEAR_DUP_THRESHOLD`] that are live, non-superseded and in
+    /// exactly the given project scope, best first, at most
+    /// [`NEAR_DUP_LIMIT`]. A multi-chunk draft reports each existing memory
+    /// once, under its best-matching chunk's score.
+    fn near_duplicates(
+        &self,
+        chunks: &[Vec<f32>],
+        project: Option<&str>,
+    ) -> Result<Vec<SimilarMemory>> {
+        let Some(embedder) = &self.embedder else {
+            return Ok(Vec::new());
+        };
+        let hnsw_meta_page = self.pager.header().hnsw_meta_page;
+        let node_count = index::node_count(&self.pager, hnsw_meta_page)?;
+        if chunks.is_empty() || node_count == 0 {
+            return Ok(Vec::new());
+        }
+        let root = self.pager.header().root_btree_page;
+        let pager = &self.pager;
+        let cache: std::cell::RefCell<BTreeMap<Ulid, Option<MemoryRecord>>> =
+            std::cell::RefCell::new(BTreeMap::new());
+        let load = |id: Ulid| -> Result<Option<MemoryRecord>> {
+            if let Some(rec) = cache.borrow().get(&id) {
+                return Ok(rec.clone());
+            }
+            let rec = match btree::get(pager, root, &id.to_bytes())? {
+                Some(bytes) => Some(MemoryRecord::decode(&bytes)?),
+                None => None,
+            };
+            cache.borrow_mut().insert(id, rec.clone());
+            Ok(rec)
+        };
+        // Same-scope only, and exactly: a global draft compares against
+        // global memories, a project draft against that project's — never
+        // `Scope::All`. Liveness and the superseded flag are re-checked
+        // against the record, like every other search (ADR 0003/0013).
+        let keep = |id: Ulid| -> bool {
+            matches!(
+                load(id),
+                Ok(Some(rec))
+                    if !rec.tombstone && !rec.superseded && rec.project.as_deref() == project
+            )
+        };
+
+        let mut best: BTreeMap<Ulid, f32> = BTreeMap::new();
+        for vector in chunks {
+            let hits = index::search(
+                pager,
+                hnsw_meta_page,
+                embedder.dims(),
+                vector,
+                NEAR_DUP_LIMIT,
+                SearchParams {
+                    ef_search: index::default_ef_search(node_count),
+                },
+                &keep,
+            )?;
+            for hit in hits {
+                if hit.score >= NEAR_DUP_THRESHOLD {
+                    let entry = best.entry(hit.record_id).or_insert(hit.score);
+                    if hit.score > *entry {
+                        *entry = hit.score;
+                    }
+                }
+            }
+        }
+        let mut ranked: Vec<(Ulid, f32)> = best.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(NEAR_DUP_LIMIT);
+        let mut out = Vec::with_capacity(ranked.len());
+        for (id, score) in ranked {
+            if let Some(rec) = load(id)? {
+                out.push(SimilarMemory {
+                    id,
+                    content: near_dup_snippet(&rec.content),
+                    score,
+                    created_at_micros: rec.provenance.created_at_micros,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The transactional half of [`Store::remember`]: validates graph/version
+    /// targets and writes the record, its pre-embedded `chunks`, full-text
+    /// postings and graph data as one durable transaction.
+    fn write_remembered(&mut self, draft: MemoryDraft, chunks: Vec<Vec<f32>>) -> Result<Memory> {
         let MemoryDraft {
             content,
             project,
@@ -303,9 +430,12 @@ impl Store {
             supersedes_targets.push((target, target_rec));
         }
         if let Some(embedder) = &self.embedder {
-            for mut vector in embedder.embed_chunks(&record.content)? {
-                index::normalize(&mut vector);
-                let (page_no, slot) = index::insert(&mut txn, embedder.dims(), record.id, &vector)?;
+            // The chunks were embedded (and normalized) by the caller before
+            // this transaction began — the same vectors a
+            // `remember_detailed` near-duplicate scan already searched with,
+            // so embedding happens exactly once per remember (S21).
+            for vector in &chunks {
+                let (page_no, slot) = index::insert(&mut txn, embedder.dims(), record.id, vector)?;
                 if record.vec_ref.is_none() {
                     record.vec_ref = Some(VecRef { page_no, slot });
                 }
@@ -1241,6 +1371,35 @@ pub const DEFAULT_RECALL_LIMIT: usize = 8;
 /// `superseded` flag, never from this edge.
 pub const SUPERSEDES_RELATION: &str = "supersedes";
 
+/// Cosine-similarity floor at or above which an existing memory is reported
+/// as a near-duplicate by [`Store::remember_detailed`] (S21). Measured, not
+/// guessed (`benches` `calibrate_near_dup`, numbers in `docs/adr/0016`): on
+/// the harness corpus with the shipped model, unrelated pairs sit at p99 =
+/// 0.639 (max 0.810), while re-statements of the same fact with framing
+/// noise sit at p5 = 0.840 — at 0.80, 98.5% of those duplicates are caught
+/// and 0.10% of unrelated pairs are flagged. The list informs, never blocks,
+/// so a rare spurious hint is the cheap side of the trade.
+pub const NEAR_DUP_THRESHOLD: f32 = 0.80;
+
+/// Most near-duplicates one [`Store::remember_detailed`] reports. The list is
+/// a write-time hint for a caller deciding forget/supersede/keep, not a
+/// search result — past a handful, more entries add noise, not signal.
+pub const NEAR_DUP_LIMIT: usize = 5;
+
+/// Character cap of [`SimilarMemory::content`]. The snippet identifies the
+/// existing memory; the full text stays one [`Store::get`] away.
+pub const NEAR_DUP_SNIPPET_CHARS: usize = 160;
+
+/// [`SimilarMemory::content`]: at most [`NEAR_DUP_SNIPPET_CHARS`] characters
+/// (never split mid-character), with an ellipsis marking an actual cut.
+fn near_dup_snippet(content: &str) -> String {
+    let mut chars = content.char_indices();
+    match chars.nth(NEAR_DUP_SNIPPET_CHARS) {
+        None => content.to_owned(),
+        Some((cut, _)) => format!("{}…", &content[..cut]),
+    }
+}
+
 /// A nearest-neighbor recall request. Build with [`Query::new`] plus the
 /// chainable setters; the defaults (limit 8, all projects, the index's
 /// default `ef_search`) match DESIGN.md §8.
@@ -1499,6 +1658,40 @@ pub struct RecallOutcome {
     /// old files still recall, just without keyword matching. Shells surface
     /// this as a warning.
     pub degraded_to_vector_only: bool,
+}
+
+/// The full result of [`Store::remember_detailed`]: the stored memory plus
+/// the near-duplicates found at write time (S21).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Remembered {
+    /// The memory that was stored — storing always happens; the similar list
+    /// informs, it never blocks.
+    pub memory: Memory,
+    /// Existing memories similar to the new content, best first: live,
+    /// non-superseded, same scope, cosine ≥ [`NEAR_DUP_THRESHOLD`], at most
+    /// [`NEAR_DUP_LIMIT`]. Empty when nothing comes close (or the store is
+    /// KV-only / was empty).
+    pub similar: Vec<SimilarMemory>,
+}
+
+/// One near-duplicate reported by [`Store::remember_detailed`] (S21): enough
+/// to decide forget/supersede/keep without another lookup — the id to act
+/// on, a content snippet to recognize it by, the similarity that flagged it,
+/// and its age.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimilarMemory {
+    /// Id of the existing memory.
+    pub id: Ulid,
+    /// Its content, truncated to [`NEAR_DUP_SNIPPET_CHARS`] characters (an
+    /// `…` marks a cut). Full text via [`Store::get`].
+    pub content: String,
+    /// Cosine similarity to the new content, in `[-1, 1]` — the raw score,
+    /// not an RRF rank (this is a same-scale duplicate check, not fusion;
+    /// ADR 0005 applies to recall ranking, not here).
+    pub score: f32,
+    /// When the existing memory was written (µs since the Unix epoch) — the
+    /// caller's cue for which side is stale.
+    pub created_at_micros: i64,
 }
 
 /// One [`Store::recall`] hit: the memory plus its fused relevance score. Derefs
@@ -2554,6 +2747,249 @@ mod tests {
         assert_eq!(edges.len(), 2, "one edge per distinct target: {edges:?}");
         assert!(edges.iter().all(|e| e.kind == SUPERSEDES_RELATION));
         assert_eq!(store.stats().unwrap().graph_relations, 2);
+    }
+
+    // --- S21 near-duplicates at write time (docs/adr/0016) ------------------
+
+    #[test]
+    fn remember_detailed_reports_near_duplicates_and_always_stores() {
+        let mut store = store_with_embedder(&[&["rust"], &["wal"], &["python"]]);
+        let first = store
+            .remember_detailed(MemoryDraft::new("rust wal"))
+            .unwrap();
+        assert!(
+            first.similar.is_empty(),
+            "the first memory of a file has nothing to duplicate"
+        );
+
+        // Exact restatement: cosine 1.0, well above any measured threshold.
+        let second = store
+            .remember_detailed(MemoryDraft::new("rust wal"))
+            .unwrap();
+        assert_eq!(second.similar.len(), 1);
+        let hit = &second.similar[0];
+        assert_eq!(hit.id, first.memory.id);
+        assert_eq!(hit.content, "rust wal", "short content is not truncated");
+        assert!(hit.score > 0.99, "identical content: {}", hit.score);
+        assert_eq!(
+            hit.created_at_micros,
+            first.memory.provenance.created_at_micros
+        );
+
+        // Informing never blocks: both memories were stored.
+        assert!(store.get(first.memory.id).unwrap().is_some());
+        assert!(store.get(second.memory.id).unwrap().is_some());
+        assert_eq!(store.stats().unwrap().live_memories, 2);
+
+        // An unrelated write reports nothing.
+        let unrelated = store.remember_detailed(MemoryDraft::new("python")).unwrap();
+        assert!(unrelated.similar.is_empty(), "{:?}", unrelated.similar);
+    }
+
+    #[test]
+    // allow: o assert sobre a constante é um tripwire deliberado da calibração (ADR 0016)
+    #[allow(clippy::assertions_on_constants)]
+    fn near_duplicates_respect_the_measured_threshold() {
+        // With WordEmbedder, two memories of n distinct single-axis words
+        // sharing k of them have cosine exactly k/n. Bracket the threshold
+        // with n = 8: 7/8 must sit at-or-above it and 6/8 below — re-craft
+        // these pairs if a re-measurement ever moves the constant out of
+        // (0.75, 0.875].
+        assert!(
+            NEAR_DUP_THRESHOLD <= 7.0 / 8.0 && NEAR_DUP_THRESHOLD > 6.0 / 8.0,
+            "threshold moved ({NEAR_DUP_THRESHOLD}); re-craft this test's pairs"
+        );
+        let mut store = store_with_embedder(&[
+            &["w0"],
+            &["w1"],
+            &["w2"],
+            &["w3"],
+            &["w4"],
+            &["w5"],
+            &["w6"],
+            &["w7"],
+            &["w8"],
+            &["w9"],
+            &["wa"],
+        ]);
+
+        let base = store
+            .remember_detailed(MemoryDraft::new("w0 w1 w2 w3 w4 w5 w6 w7"))
+            .unwrap();
+
+        // 7 of 8 words shared → cosine 0.875 ≥ threshold: reported.
+        let above = store
+            .remember_detailed(MemoryDraft::new("w0 w1 w2 w3 w4 w5 w6 w8"))
+            .unwrap();
+        assert_eq!(above.similar.len(), 1, "{:?}", above.similar);
+        assert_eq!(above.similar[0].id, base.memory.id);
+
+        // 6 of 8 words shared with *each* stored memory → cosine 0.75 for
+        // both < threshold: silent.
+        let below = store
+            .remember_detailed(MemoryDraft::new("w0 w1 w2 w3 w4 w5 w9 wa"))
+            .unwrap();
+        assert!(
+            below.similar.is_empty(),
+            "cosine 0.75 must stay under the threshold: {:?}",
+            below.similar
+        );
+    }
+
+    #[test]
+    fn near_duplicates_see_only_live_same_scope_not_superseded() {
+        let mut store = store_with_embedder(&[&["rust"], &["wal"]]);
+        let in_x = store
+            .remember_detailed(MemoryDraft::new("rust wal").project("x"))
+            .unwrap();
+        let _global = store
+            .remember_detailed(MemoryDraft::new("rust wal"))
+            .unwrap();
+        let _in_y = store
+            .remember_detailed(MemoryDraft::new("rust wal").project("y"))
+            .unwrap();
+
+        // Same applied scope only: a draft in "x" sees x's memory, never the
+        // global or other-project twins.
+        let again_x = store
+            .remember_detailed(MemoryDraft::new("rust wal").project("x"))
+            .unwrap();
+        let ids: Vec<Ulid> = again_x.similar.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![in_x.memory.id], "{:?}", again_x.similar);
+
+        // Tombstoned: gone from the report.
+        store.forget(in_x.memory.id).unwrap();
+        store.forget(again_x.memory.id).unwrap();
+        let after_forget = store
+            .remember_detailed(MemoryDraft::new("rust wal").project("x"))
+            .unwrap();
+        assert!(
+            after_forget.similar.is_empty(),
+            "{:?}",
+            after_forget.similar
+        );
+
+        // Superseded: the old version never resurfaces as a near-duplicate —
+        // only its live successor does (the supersedes flow S21 suggests).
+        let old = store
+            .remember_detailed(MemoryDraft::new("rust wal").project("z"))
+            .unwrap();
+        let new = store
+            .remember_detailed(
+                MemoryDraft::new("rust wal")
+                    .project("z")
+                    .supersede(old.memory.id),
+            )
+            .unwrap();
+        let third = store
+            .remember_detailed(MemoryDraft::new("rust wal").project("z"))
+            .unwrap();
+        let ids: Vec<Ulid> = third.similar.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![new.memory.id], "{:?}", third.similar);
+    }
+
+    #[test]
+    fn near_duplicate_snippets_truncate_on_char_boundaries() {
+        // Unit level: multibyte content cut at the cap, never mid-character.
+        let long = "é".repeat(NEAR_DUP_SNIPPET_CHARS * 2);
+        let cut = near_dup_snippet(&long);
+        assert_eq!(cut.chars().count(), NEAR_DUP_SNIPPET_CHARS + 1);
+        assert!(cut.ends_with('…'));
+        let short = "é".repeat(NEAR_DUP_SNIPPET_CHARS);
+        assert_eq!(near_dup_snippet(&short), short, "no cut, no ellipsis");
+
+        // End to end: the reported content of a long near-duplicate is the
+        // truncated snippet, not the full text.
+        let mut store = store_with_embedder(&[&["rust"], &["wal"]]);
+        let padding = "x ".repeat(200); // unknown words: no effect on the vector
+        let long_content = format!("rust wal {padding}");
+        store
+            .remember_detailed(MemoryDraft::new(long_content.clone()))
+            .unwrap();
+        let again = store
+            .remember_detailed(MemoryDraft::new(long_content))
+            .unwrap();
+        assert_eq!(again.similar.len(), 1);
+        let snippet = &again.similar[0].content;
+        assert!(snippet.ends_with('…'), "{snippet}");
+        assert_eq!(snippet.chars().count(), NEAR_DUP_SNIPPET_CHARS + 1);
+    }
+
+    /// Counts embedding calls, forwarding to [`WordEmbedder`] — proves the
+    /// near-duplicate scan reuses the write's own embedding (S21's zero-
+    /// extra-embedding requirement).
+    struct CountingEmbedder {
+        inner: WordEmbedder,
+        embeds: std::sync::atomic::AtomicUsize,
+        chunk_embeds: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Embedder for CountingEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            self.embeds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.embed(text)
+        }
+        fn embed_chunks(&self, text: &str) -> Result<Vec<Vec<f32>>> {
+            self.chunk_embeds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.embed_chunks(text)
+        }
+        fn id(&self) -> crate::embed::ModelId {
+            self.inner.id()
+        }
+        fn dims(&self) -> u16 {
+            self.inner.dims()
+        }
+    }
+
+    #[test]
+    fn remember_detailed_embeds_exactly_once() {
+        let counting = Arc::new(CountingEmbedder {
+            inner: WordEmbedder::new(&[&["rust"], &["wal"]]),
+            embeds: std::sync::atomic::AtomicUsize::new(0),
+            chunk_embeds: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+        let opts = StoreOptions {
+            embedder: Some(Arc::clone(&counting) as Arc<dyn Embedder>),
+            ..StoreOptions::default()
+        };
+        let mut store = Store::create_with(vfs, Path::new("m.mind"), opts).unwrap();
+
+        store
+            .remember_detailed(MemoryDraft::new("rust wal"))
+            .unwrap();
+        store
+            .remember_detailed(MemoryDraft::new("rust wal"))
+            .unwrap();
+
+        // One embed_chunks per remember — the scan runs on those vectors, it
+        // never embeds again.
+        assert_eq!(
+            counting
+                .chunk_embeds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            counting.embeds.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the near-duplicate scan must not re-embed"
+        );
+    }
+
+    #[test]
+    fn remember_detailed_on_a_kv_only_store_stores_with_empty_similar() {
+        let (_, mut store) = store();
+        let first = store
+            .remember_detailed(MemoryDraft::new("no vectors here"))
+            .unwrap();
+        let second = store
+            .remember_detailed(MemoryDraft::new("no vectors here"))
+            .unwrap();
+        assert!(first.similar.is_empty() && second.similar.is_empty());
+        assert_eq!(store.stats().unwrap().live_memories, 2);
     }
 
     #[test]

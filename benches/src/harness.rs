@@ -370,7 +370,10 @@ fn measure_ingest(
     let wall_started = Instant::now();
     for mem in &corpus {
         let started = Instant::now();
-        let _ = store.remember(
+        // `remember_detailed`, not plain `remember`: since S21 the MCP tool's
+        // write path includes the near-duplicate scan, so the honest
+        // end-to-end `remember` latency includes it too.
+        let _ = store.remember_detailed(
             MemoryDraft::new(mem.content.clone())
                 .project(mem.project.clone())
                 .agent("bench-ingest"),

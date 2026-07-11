@@ -48,15 +48,15 @@ Repo **privado** até o fim do marco. Prioridade absoluta: crash-safety antes de
 
 ## M2 — Semanas 5–8: lançamento público e primeiro ciclo de feedback
 
-| # | Entrega | Depende de |
-|---|---|---|
-| 2.1 | **Dia 35: repo público + lançamento coordenado** — Show HN, r/ClaudeAI, r/LocalLLaMA, r/rust, X. Post: *"I built persistent memory for coding agents in Rust — single file, no server"* | M1 completo |
-| 2.2 | Toda issue respondida em <24h (capacidade de resposta É o marketing nesta fase) | 2.1 |
-| 2.3 | **Full-text search** na engine | 1.2 |
-| 2.4 | **Filtros de metadados** no `recall` | 2.3 |
-| 2.5 | **Bindings Python** (destrava LangChain/agentes custom — multiplicador de audiência) | API da engine estável (M1) |
-| 2.6 | 2º post técnico: a engine por dentro (WAL, HNSW em arquivo único) | 2.1 |
-| 2.7 | Releases quinzenais guiados pelas issues mais pedidas | 2.2 |
+| # | Entrega | Depende de | Status |
+|---|---|---|---|
+| 2.1 | **Dia 35: repo público + lançamento coordenado** — Show HN, r/ClaudeAI, r/LocalLLaMA, r/rust, X. Post: *"I built persistent memory for coding agents in Rust — single file, no server"* | M1 completo | ⬜ [MANUAL — founder], previsto ≈ 11/ago/2026 |
+| 2.2 | Toda issue respondida em <24h (capacidade de resposta É o marketing nesta fase) | 2.1 | ⬜ inicia pós-launch |
+| 2.3 | **Full-text search** na engine | 1.2 | ✅ BM25 + fusão RRF (k=60) com o ranking vetorial — `crates/embedmind-core` (S9), `cargo test -p embedmind-core` |
+| 2.4 | **Filtros de metadados** no `recall` | 2.3 | ✅ `Query::filters` (igualdade + faixa numérica), MCP e CLI — `crates/embedmind-core` (S10), `cargo test -p embedmind-core filters` |
+| 2.5 | **Bindings Python** (destrava LangChain/agentes custom — multiplicador de audiência) | API da engine estável (M1) | ✅ `bindings/python` (PyO3 + maturin): `remember`/`recall`/`forget`/`stats`, mesmos arquivos `.mind`; suite pytest (`tests/test_e2e.py`, `tests/test_roundtrip.py`). Ainda NÃO publicado no PyPI; não cobre grafo (`related`, `entities`/`relations`, `supersedes`) — TypeScript segue pendente |
+| 2.6 | 2º post técnico: a engine por dentro (WAL, HNSW em arquivo único) | 2.1 | ⬜ [MANUAL — founder], pós-launch |
+| 2.7 | Releases quinzenais guiados pelas issues mais pedidas | 2.2 | ⬜ inicia pós-launch |
 
 **🎯 Milestone:** projeto vivo em público, ciclo de release estabelecido, primeiros usuários externos reais.
 
@@ -64,12 +64,12 @@ Repo **privado** até o fim do marco. Prioridade absoluta: crash-safety antes de
 
 ## M3 — Semanas 9–12: aprofundar o núcleo
 
-| # | Entrega | Depende de |
-|---|---|---|
-| 3.1 | **Camada de grafo simples** (entidades + relações entre memórias) — o diferencial vs. "só vetor" que nenhum embarcado tem completo | 2.3, 2.4 |
-| 3.2 | **Proveniência básica** por memória (qual agente/sessão gravou) | 1.4 |
-| 3.3 | 3º post: caso de uso real com números ("30 dias usando memória persistente no meu fluxo com agentes") | dogfooding contínuo |
-| 3.4 | **Avaliação go/no-go do dia 90** | métricas abaixo |
+| # | Entrega | Depende de | Status |
+|---|---|---|---|
+| 3.1 | **Camada de grafo simples** (entidades + relações entre memórias) — o diferencial vs. "só vetor" que nenhum embarcado tem completo | 2.3, 2.4 | ✅ entidades/relações tipadas persistidas, `related(id \| entity)`, `recall --expand-related` — `crates/embedmind-core` + `embedmind-mcp`/`embedmind-cli` (S13), `cargo test -p embedmind-core graph` |
+| 3.2 | **Proveniência básica** por memória (qual agente/sessão gravou) | 1.4 | ✅ `recall` devolve `provenance`, filtro `Query::agent`, `stats` com breakdown por agente — `crates/embedmind-core` (S14/C2), MCP e CLI |
+| 3.3 | 3º post: caso de uso real com números ("30 dias usando memória persistente no meu fluxo com agentes") | dogfooding contínuo | ⬜ [MANUAL — founder], pós-launch |
+| 3.4 | **Avaliação go/no-go do dia 90** | métricas abaixo | ⬜ previsto ≈ 05/out/2026 |
 
 **🎯 Milestone:** núcleo diferenciado (vetor + texto + grafo), dados para a decisão de 90 dias.
 
@@ -87,6 +87,33 @@ Repo **privado** até o fim do marco. Prioridade absoluta: crash-safety antes de
 - **Maioria 🟡** → mais 90 dias no núcleo OSS com *um* reposicionamento de mensagem.
 - **Maioria 🔴** com launch bem executado → **reempacotar** (mesma engine, outra porta de entrada). Só após 2 empacotamentos fracos a tese se considera refutada.
 - **Cláusula anti-armadilha-do-construtor:** repo ainda privado no dia 45 = alarme vermelho; lançar o que existir.
+
+---
+
+## Fase FR — Frescor do conhecimento + observabilidade (pré-launch, decisão do founder 10/jul/2026)
+
+Inserida ANTES do dia 35 (2.1), fora da ordem M1→M2→M3: origem no dogfooding via Painel
+Agêntico, que passou a usar o próprio EmbedMind como memória do agente que o desenvolve.
+Três achados de produto motivaram a decisão: (1) o ranking do `recall` não tinha
+componente temporal — memória defasada semanticamente próxima vencia a correção mais
+nova; (2) as relações `contradicts`/`refines` registravam o conflito mas o `recall` não
+agia sobre elas; (3) zero observabilidade de operações (nenhum log estruturado), e o lock
+exclusivo do arquivo impedia inspeção concorrente. "Conhecimento versionado" é
+diferencial de anúncio que nenhum store embarcado tem — por isso entra antes do launch,
+não depois. Detalhe das stories: [docs/01-spec.md](docs/01-spec.md) §"FR", breakdown de
+tarefas: [docs/03-tasks.md](docs/03-tasks.md) "Fase FR".
+
+| # | Entrega | Depende de | Status |
+|---|---|---|---|
+| FR0 | Docs (README/ROADMAP) ao estado real do código | — | ✅ esta atualização |
+| FR1 | `supersedes` — conhecimento versionado de primeira classe (S19) | grafo (3.1) | ✅ flag no record + aresta de grafo na mesma transação ([ADR 0013](docs/adr/0013-supersedes-flag-no-record.md)); `cargo test -p embedmind-core supersede` + `crash_supersede.rs` |
+| FR2 | Recência na fusão do `recall` (S20) | S9 (RRF) | ✅ terceira lista na fusão RRF (`created_at` desc.) ([ADR 0014](docs/adr/0014-recencia-terceira-lista-rrf.md)) |
+| FR3 | Curadoria na escrita — near-duplicates no `remember` (S21) | FR1 | ⬜ planejada, não implementada |
+| FR4 | Op-log estruturado no `serve` (S22) | — | ⬜ planejada, não implementada |
+
+**🎯 Direção, não promessa de prontidão:** FR1/FR2 já protegem o dogfooding do painel
+hoje; FR3/FR4 seguem como trabalho pré-launch — nenhuma delas deve ser citada como
+entregue até ter código + teste em `main`.
 
 ---
 

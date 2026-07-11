@@ -343,7 +343,7 @@ em ADR com os números.
   antes/depois anexada ao ADR.
 - **Verificação:** `cargo test --workspace` + `benches/run_all.sh` nos dois datasets.
 
-### FR3. Curadoria na escrita — near-duplicates no `remember` (story S21) — depende de FR1
+### FR3. Curadoria na escrita — near-duplicates no `remember` (story S21) — depende de FR1 [✅ ENTREGUE]
 
 A resposta do `remember` ganha `similar: [{id, content truncado, score,
 created_at_micros}]` acima de um limiar (decidido por medição no corpus do harness,

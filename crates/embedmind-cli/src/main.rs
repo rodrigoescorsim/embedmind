@@ -226,13 +226,13 @@ fn remember(
     if let Some(project) = &project {
         draft = draft.project(project.clone());
     }
-    let memory = store
-        .remember(draft)
+    let remembered = store
+        .remember_detailed(draft)
         .map_err(|e| format!("remember failed: {e}"))?;
     store.close().map_err(|e| format!("close failed: {e}"))?;
     match &project {
-        Some(name) => println!("{} (project: {name})", memory.id),
-        None => println!("{} (global)", memory.id),
+        Some(name) => println!("{} (project: {name})", remembered.memory.id),
+        None => println!("{} (global)", remembered.memory.id),
     }
     if !entities.is_empty() {
         println!("entities: {}", entities.join(", "));
@@ -242,6 +242,16 @@ fn remember(
     }
     for target in &supersedes {
         println!("supersedes: {target}");
+    }
+    // Write-time curation (S21): the memory IS stored; these lines only hint
+    // that a near-duplicate already exists, so the user can forget it, store
+    // again with --supersedes, or keep both. Wording per docs/01-spec.md S21.
+    for similar in &remembered.similar {
+        println!(
+            "memória parecida existente: {} — {}",
+            similar.id,
+            similar.content.replace(['\r', '\n'], " ")
+        );
     }
     Ok(())
 }

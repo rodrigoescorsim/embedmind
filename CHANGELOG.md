@@ -15,6 +15,22 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Write-time near-duplicate hints on `remember`** (story S21) — the response
+  now carries `similar: [{id, content (truncated to 160 chars), score,
+  created_at_micros}]`: existing live, non-superseded memories in the same
+  applied scope whose cosine similarity to the new content clears a *measured*
+  threshold (`NEAR_DUP_THRESHOLD = 0.80`, calibrated on the harness corpus
+  with the shipped model — ADR 0016). The store **always** happens; the list
+  informs the caller's forget / supersedes / keep decision, it never blocks.
+  Zero extra embedding cost: the scan reuses the chunk vectors the write
+  itself indexes (proved by a counting-embedder test). MCP returns the new
+  field (additive — pre-S21 clients unaffected); the CLI prints a legible
+  `memória parecida existente: <id> — <snippet>` hint. Honest limitation,
+  recorded in the ADR: cross-language paraphrases mostly escape the threshold
+  (the embedded MiniLM isn't multilingual); the operationally dominant case —
+  an agent re-storing the same fact with framing — is caught at 98.5% with
+  0.10% false flags. The ingest benchmark now measures `remember_detailed`,
+  so the published `remember` p99 includes the scan.
 - **Graceful recall on `.mind` files with no full-text index** (S9 edge,
   roadmap 2.3) — a file written before the full-text index existed (header's
   `fts_root_page == 0`) never fails `recall`: it degrades to vector-only

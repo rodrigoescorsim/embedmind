@@ -263,9 +263,12 @@ impl McpServer {
             }
             draft = draft.supersedes(supersedes.clone());
         }
-        Ok(match self.store.remember(draft) {
-            Ok(memory) => Ok(json!({
-                "id": memory.id.to_string(),
+        // `remember_detailed`: same store, plus write-time curation (S21) —
+        // the near-duplicates found with the embedding this write indexes.
+        // The field is additive, so pre-S21 clients are unaffected.
+        Ok(match self.store.remember_detailed(draft) {
+            Ok(remembered) => Ok(json!({
+                "id": remembered.memory.id.to_string(),
                 "project": project,
                 "entities": entities,
                 "relations": relations
@@ -275,6 +278,16 @@ impl McpServer {
                 "supersedes": supersedes
                     .iter()
                     .map(|id| Value::String(id.to_string()))
+                    .collect::<Vec<Value>>(),
+                "similar": remembered
+                    .similar
+                    .iter()
+                    .map(|s| json!({
+                        "id": s.id.to_string(),
+                        "content": s.content,
+                        "score": s.score,
+                        "created_at_micros": s.created_at_micros,
+                    }))
                     .collect::<Vec<Value>>(),
             })),
             Err(e) => Err(e.to_string()),
@@ -634,11 +647,15 @@ fn tools_list() -> Value {
             {
                 "name": "remember",
                 "description": "Store one memory persistently in the local memory file. \
-                                Returns the memory's id. Memories are scoped to the \
-                                current project automatically; pass project: null to \
-                                store a global memory. Optionally tag entities and \
-                                relate the memory to existing ones; navigate the graph \
-                                later with the related tool.",
+                                Returns the memory's id, plus 'similar': existing \
+                                memories in the same scope whose content closely matches \
+                                the new one (id, truncated content, similarity score, \
+                                created_at_micros) — the store always happens; use the \
+                                hint to decide forget, supersedes, or keep. Memories are \
+                                scoped to the current project automatically; pass \
+                                project: null to store a global memory. Optionally tag \
+                                entities and relate the memory to existing ones; \
+                                navigate the graph later with the related tool.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

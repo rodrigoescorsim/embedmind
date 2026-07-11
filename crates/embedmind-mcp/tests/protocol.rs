@@ -1239,3 +1239,83 @@ fn supersedes_hides_old_version_from_recall_through_protocol() {
         "forget of the new version must not resurrect the old: {hits:?}"
     );
 }
+
+/// S21 end to end with the real model: `remember` reports near-duplicates in
+/// `similar` (id, truncated content, score, created_at_micros), scoped to the
+/// applied project, without ever blocking the store. The field is additive —
+/// pre-S21 clients simply ignore it.
+#[test]
+fn remember_reports_similar_through_the_protocol() {
+    let mut server = McpServer::new(embedding_store(), Some("alpha".to_string()));
+    let feed = |server: &mut McpServer, reqs: &[Value]| -> Vec<Value> {
+        let input: String = reqs.iter().map(|r| format!("{r}\n")).collect();
+        let mut out = Vec::new();
+        server.serve(input.as_bytes(), &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+
+    // First memory of the file: nothing to duplicate.
+    let content = "the cache eviction policy is LRU with a 4 GiB cap";
+    let r = feed(
+        &mut server,
+        &[call(1, "remember", json!({ "content": content }))],
+    );
+    let first = &r[0]["result"]["structuredContent"];
+    let first_id = first["id"].as_str().unwrap().to_string();
+    assert_eq!(first["similar"].as_array().unwrap().len(), 0, "{first}");
+
+    // Same content again, same scope: the first memory comes back as a
+    // near-duplicate with all four fields — and the store still happened.
+    let r = feed(
+        &mut server,
+        &[call(2, "remember", json!({ "content": content }))],
+    );
+    let second = &r[0]["result"]["structuredContent"];
+    assert!(second["id"].as_str().is_some(), "the store always happens");
+    let similar = second["similar"].as_array().unwrap();
+    assert_eq!(similar.len(), 1, "{second}");
+    assert_eq!(similar[0]["id"], first_id.as_str());
+    assert_eq!(similar[0]["content"], content);
+    assert!(
+        similar[0]["score"].as_f64().unwrap() > 0.99,
+        "identical content: {}",
+        similar[0]["score"]
+    );
+    assert!(similar[0]["created_at_micros"].as_i64().unwrap() > 0);
+
+    // Different applied scope (global via project: null): the near-duplicate
+    // lives in "alpha", so nothing is reported.
+    let r = feed(
+        &mut server,
+        &[call(
+            3,
+            "remember",
+            json!({ "content": content, "project": null }),
+        )],
+    );
+    let global = &r[0]["result"]["structuredContent"];
+    assert_eq!(global["similar"].as_array().unwrap().len(), 0, "{global}");
+}
+
+/// A KV-only store (no embedder) still answers `remember` with the S21 shape:
+/// `similar` present and empty — never an error.
+#[test]
+fn remember_similar_is_empty_on_a_kv_only_store() {
+    let responses = roundtrip(
+        kv_store(),
+        &[
+            call(1, "remember", json!({ "content": "kv fact" })),
+            call(2, "remember", json!({ "content": "kv fact" })),
+        ],
+    );
+    for r in &responses {
+        let similar = r["result"]["structuredContent"]["similar"]
+            .as_array()
+            .unwrap();
+        assert!(similar.is_empty(), "{r}");
+    }
+}
