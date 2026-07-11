@@ -15,6 +15,57 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **`ef_search` default scaled by index size** (story S16, ADR 0015) —
+  `HNSW_DEFAULT_EF_SEARCH = 64` no longer applies unconditionally: the
+  default now grows in measured steps with the live `node_count` (64 below
+  25k, 96 / 160 / 256 at 25k / 50k / 100k). `Query::ef_search(n)` explicit
+  still wins at every scale (`Query.ef_search` is now `Option<u16>`
+  internally). The harness reports the per-query recall distribution
+  (min/p10/p50), not just the mean, so a good average hiding a bad tail can't
+  hide again.
+  **Honest result (2026-07-11 validation, 1000 queries, `benches/run_all.sh
+  --full`):** the mechanism works and 10k is unaffected, but the story's DoD
+  is **not met** at 100k: recall@10 mean 0.9360 (target ≥0.95), worst query
+  0.20 (target ≥0.70) — the same worst-case number that motivated the story
+  in the first place, unmoved by the larger beam — and hybrid query p99
+  1224.62 ms (target < 50 ms), dominated by a pre-existing full-text search
+  bottleneck (the postings list is decoded whole per term per query, cost
+  linear in corpus size) rather than by HNSW itself. Peak RSS @ 100k also
+  crossed its ceiling: 307.1 MiB measured vs. the 300 MiB target (the 6%
+  headroom noted when the story was scoped is gone at this scale). None of
+  this is hidden: it's recorded in ADR 0015 and `docs/03-tasks.md` (BQ1) as
+  reproved-DoD debt with concrete follow-ups (a larger/different `ef`
+  ladder or index-build tuning for the recall tail; a paginated postings
+  index for the FTS latency; RSS investigation at 100k) — none in scope for
+  this task.
+- **`supersedes` — first-class versioned knowledge** (story S19, ADR 0013) —
+  `remember` accepts an optional `supersedes: <id>` pointing at a prior
+  memory; the old memory is tombstoned atomically with the new write (same
+  WAL transaction — a crash mid-write leaves either both live or neither
+  applied, never a half-superseded state) and `recall` never returns a
+  superseded memory even when its content would otherwise rank first. `recall`
+  results carry `superseded_by` when applicable so callers can see the chain.
+  Core, MCP, and CLI all expose the field; a corrective write is now a normal
+  operation instead of requiring a separate `forget`.
+- **Recency as a third list in the recall RRF fusion** (story S20, ADR 0014) —
+  `recall::fuse_lists` generalizes the RRF k=60 fusion from 2 to N ranked
+  lists; a third list reorders the *same* content candidates (the vector+text
+  union, already filtered by scope/tombstone/`supersedes`/metadata/agent) by
+  `created_at_micros` descending, so a genuine content tie breaks toward the
+  newer memory without ever pulling in an irrelevant item or displacing a
+  strong old match (RRF's own bound: a list's max contribution is
+  `1/(k+1)`). Golden cases cover fact+correction (the correction wins a real
+  tie) and old-strong-match-vs-new-weak-match (the old one still wins), plus
+  property tests over 3-list fusion determinism. **Opt-in, default off**
+  (`Query::recency(bool)`, MCP `recency`, CLI `--recency`) — measured on
+  `benches/run_all.sh --full` with `EMBEDMIND_BENCH_RECENCY`: recall@10 is
+  identical with and without it (10k 0.9953, 100k 0.9360, confirming the
+  extra list only reorders, never changes, the result set), but hybrid query
+  p99 on `agent-mem-100k` goes from 1224.62 ms to 2063.94 ms (+68.5%, over 4×
+  the §5 CI regression guard's 15% threshold) from re-reading `created_at` on
+  up to `2·limit` candidates per query; on `agent-mem-10k` the cost is
+  negligible (103.09 → 103.13 ms, +0.04%). The regression is recorded in the
+  ADR rather than hidden behind a default flip.
 - **Write-time near-duplicate hints on `remember`** (story S21) — the response
   now carries `similar: [{id, content (truncated to 160 chars), score,
   created_at_micros}]`: existing live, non-superseded memories in the same

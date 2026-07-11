@@ -105,7 +105,7 @@ fn warm_queries_decompose_into_embed_plus_engine() {
         .into_iter()
         .map(|m| m.content)
         .collect();
-    let warm = measure_warm_queries(&store, timing.as_ref(), &queries, 10).unwrap();
+    let warm = measure_warm_queries(&store, timing.as_ref(), &queries, 10, false).unwrap();
 
     // One sample of each component per query.
     assert_eq!(warm.total.len(), queries.len());

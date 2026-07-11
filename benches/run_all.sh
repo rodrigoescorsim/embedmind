@@ -35,6 +35,13 @@
 # (Latency/RSS checks degrade to warnings when the baseline came from another
 # platform; recall@10 and file size are enforced regardless.)
 #
+# Recency latency cost (S20, docs/adr/0014): set EMBEDMIND_BENCH_RECENCY=1 to
+# run every warm query with Query::recency(true) instead of the shipped
+# default (off), to measure the extra list's cost on query p99. results/ is
+# overwritten each run, so copy latest.json aside between the two passes:
+#   ./benches/run_all.sh --full && cp benches/results/latest.json /tmp/off.json
+#   EMBEDMIND_BENCH_RECENCY=1 ./benches/run_all.sh --full && cp benches/results/latest.json /tmp/on.json
+#
 # Exit code is non-zero if any applicable NFR was missed, or if BASELINE was
 # given and a §5 threshold was crossed (so this doubles as the CI performance
 # guard — see .github/workflows/bench.yml).

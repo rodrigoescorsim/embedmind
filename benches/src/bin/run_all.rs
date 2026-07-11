@@ -50,6 +50,14 @@ fn run_date() -> String {
     std::env::var("BENCH_DATE").unwrap_or_else(|_| "unknown-date".to_string())
 }
 
+/// Whether warm queries run with `Query::recency` on (S20, `docs/adr/0014`).
+/// Off by default (matches the shipped default); set
+/// `EMBEDMIND_BENCH_RECENCY=1` to measure the recency-list latency cost for
+/// the ADR's before/after table.
+fn recency_enabled() -> bool {
+    matches!(std::env::var("EMBEDMIND_BENCH_RECENCY").as_deref(), Ok("1"))
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
@@ -84,6 +92,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     let data_dir = default_data_dir();
     let embedder: Arc<dyn Embedder> = Arc::new(OnnxEmbedder::load()?);
+    let recency = recency_enabled();
+    if recency {
+        println!(">> EMBEDMIND_BENCH_RECENCY=1: warm queries run with Query::recency(true)");
+    }
 
     // Which dataset the competitor comparison runs on. Competitors re-derive an
     // exact brute-force top-k per query, and stores like zvec build a full HNSW
@@ -123,15 +135,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
         println!("  running metric suite ({WARM_QUERIES} queries)...");
         let started = std::time::Instant::now();
-        let result = harness::run_suite(
-            spec,
-            &data_dir,
-            store,
-            &set,
-            &embedder,
-            WARM_QUERIES,
-            REMEMBER_SAMPLES,
-        )?;
+        let suite_opts = harness::SuiteOptions {
+            warm_queries: WARM_QUERIES,
+            remember_samples: REMEMBER_SAMPLES,
+            recency,
+        };
+        let result = harness::run_suite(spec, &data_dir, store, &set, &embedder, suite_opts)?;
         println!(
             "  done in {:.1}s: recall@10 {:.4} (min {:.2} / p10 {:.2} / p50 {:.2}), query p99 {:.2} ms (embed {:.2} / engine {:.2}), remember p99 {:.2} ms",
             started.elapsed().as_secs_f64(),

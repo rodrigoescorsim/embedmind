@@ -216,7 +216,7 @@ técnico com diagramas se solicitado — publicação é do founder.
 > vetor pronto. Ambos ferem a credibilidade dos números que o README vai publicar
 > no launch — por isso esta fase precede o dia 35.
 
-### BQ1. `ef_search` proporcional ao tamanho do índice (story S16) [✅ ENTREGUE]
+### BQ1. `ef_search` proporcional ao tamanho do índice (story S16) [⚠️ IMPLEMENTADO, DoD REPROVADO]
 
 Substituir o default fixo (`HNSW_DEFAULT_EF_SEARCH = 64` em `format.rs`) por um
 default que escala com o número de nós do índice — fórmula/patamares decididos por
@@ -233,6 +233,15 @@ para comprar recall.
 - **Atenção (interação com RAM):** a meta de RSS < 300 MiB @ 100k está com 6% de
   folga (280,9 medido) — validar RSS na mesma rodada; se estourar, reportar e decidir
   em ADR (não esconder).
+- **Validação 2026-07-11 (`benches/run_all.sh --full`, 1000 queries, ver ADR
+  0015):** o mecanismo (degraus + `Query::ef_search` soberano + harness
+  reportando mín/p10/p50) está implementado, testado e correto — mas o DoD da
+  story **reprova em três eixos**: recall@10 média @ 100k = 0,9360 (< 0,95),
+  pior query = 0,20 (< 0,70), query p99 híbrido = 1224,62 ms (>> 50 ms, por um
+  gargalo pré-existente do FTS, fora de escopo — postings decodificadas
+  inteiras por query, custo linear no corpus). RSS de pico também estourou:
+  307,1 MiB > 300 MiB (a folga de 6% citada acima já não existe a 100k).
+  10k segue saudável, sem regressão. Detalhes e follow-ups no ADR 0015.
 
 ### BQ2. Latência decomposta + artefatos consistentes (story S17, metade EmbedMind)
 
