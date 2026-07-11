@@ -499,6 +499,60 @@ scan em si (S25) não for suficiente para cumprir o NFR.
   `recall p99 @ 100k < 50 ms` OU, se ainda não fechar, o ADR 0017 é atualizado com os
   números e a decisão do founder sobre prosseguir vs. documentar limitação.
 
+### S27. Recall de pior-caso a 100k fechando o NFR de S16 [⬜ pendente]
+
+Como agente que faz uma busca "azarada" (query cujo vizinho semântico verdadeiro
+está mal posicionado no grafo HNSW), quero que mesmo a pior query do lote ainda
+recall o suficiente — não só a média.
+
+- **Origem:** BQ1/S16 (task #38) reprovou o NFR de recall de pior-caso mesmo no
+  degrau máximo medido (`ef_search = 256`): pior query = 0,20 contra o alvo ≥ 0,70.
+  O sweep já mostrou a curva de recall médio achatando na faixa 192–384 — subir o
+  `ef_search` de busca sozinho não deve resolver a cauda (ADR 0015, "Duas
+  reprovações do DoD original", item 1).
+- **Dado** o dataset `agent-mem-100k` e o conjunto de 1000 queries do harness,
+  **quando** rodo `benches/run_all.sh --full` com a mudança desta story, **então**
+  a pior query individual do lote atinge recall@10 ≥ 0,70 (ADR 0015/§NFR), sem
+  regredir a média (continua ≥ 0,95) nem o p10/p50 já medidos.
+- **Método (a decidir por medição, registrado em ADR novo):** candidatos a
+  investigar, não escolhidos a priori — (a) revisitar `ef_construction`/`M` na
+  CONSTRUÇÃO do índice (o ADR 0015 só tocou o lado da busca); (b) um degrau de
+  `ef_search` maior que 256, medindo o custo de latência adicional contra o
+  orçamento restante do NFR de p99; (c) heurística de retry/expansão quando o
+  vizinho mais próximo aparenta baixa confiança.
+- **Borda:** a solução não pode regredir latência/RSS além dos limiares do
+  BENCHMARKS.md §5 nem contradizer os degraus já medidos e aceitos (ADR 0015) sem
+  atualizar o ADR com a nova medição.
+- **Verificação:** `benches/run_all.sh --full` nos dois datasets + `cargo test
+  --workspace`; ADR novo registrando o método escolhido e os números antes/depois.
+
+### S28. Investigar e corrigir o estouro de RSS de pico @ 100k [⬜ pendente]
+
+Como mantenedor, quero que o pico de memória a 100k memórias volte a caber no NFR
+de 300 MiB — hoje passa por pouco, mas passa.
+
+- **Origem:** BQ1/S16 mediu RSS de pico 307,1 MiB (query) / 305,4 MiB (ingest) a
+  100k, contra o teto de 300 MiB — a folga de 6% que a task citava como
+  disponível (280,9 MiB medidos antes) já não existe nessa escala. O ADR 0015
+  registra que a causa é "dimensionamento geral do índice a 100k", não um efeito
+  colateral do `ef_search` escalado (que consome mais RAM durante a BUSCA, mas a
+  folga já estava apertada antes dessa mudança) — **precisa de investigação
+  própria**, ainda não feita.
+- **Dado** o dataset `agent-mem-100k` materializado, **quando** rodo o profiling
+  de memória desta story (heap profiler nativo da plataforma, ou instrumentação
+  manual de alocação por fase — mesmo espírito de método do profiling da S24),
+  **então** o resultado aponta que estrutura domina o pico: grafo HNSW em memória,
+  cache de páginas do pager, buffers de decodificação de postings/registros, ou
+  outra.
+- **Dado** a causa identificada, **então** a correção (redução de over-allocation,
+  ajuste de tamanho de cache, streaming em vez de buffer completo — a decidir pelo
+  profiling, não a priori) traz o pico de volta para < 300 MiB @ 100k sem regredir
+  recall ou latência além dos limiares do §5.
+- **Verificação:** `benches/run_all.sh --full` confirmando RSS de pico (ingest e
+  query) < 300 MiB @ 100k; `cargo test --workspace`; ADR novo se a correção mudar
+  uma decisão de dimensionamento já registrada em ADR anterior (ex.: ADR 0002/0008
+  do HNSW).
+
 ---
 
 ## Requisitos não-funcionais consolidados

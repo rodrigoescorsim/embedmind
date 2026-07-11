@@ -216,7 +216,7 @@ técnico com diagramas se solicitado — publicação é do founder.
 > vetor pronto. Ambos ferem a credibilidade dos números que o README vai publicar
 > no launch — por isso esta fase precede o dia 35.
 
-### BQ1. `ef_search` proporcional ao tamanho do índice (story S16) [⚠️ IMPLEMENTADO, DoD REPROVADO]
+### BQ1. `ef_search` proporcional ao tamanho do índice (story S16) [✅ ENTREGUE — DoD desdobrado em FT1-FT5]
 
 Substituir o default fixo (`HNSW_DEFAULT_EF_SEARCH = 64` em `format.rs`) por um
 default que escala com o número de nós do índice — fórmula/patamares decididos por
@@ -242,6 +242,11 @@ para comprar recall.
   inteiras por query, custo linear no corpus). RSS de pico também estourou:
   307,1 MiB > 300 MiB (a folga de 6% citada acima já não existe a 100k).
   10k segue saudável, sem regressão. Detalhes e follow-ups no ADR 0015.
+- **Desdobramento (2026-07-11):** os três eixos reprovados viraram tasks próprias
+  na fase FT — FT1-FT3 (story S24-S26, gargalo do FTS no p99), FT4 (story S27,
+  recall de pior-caso) e FT5 (story S28, RSS). Esta task fecha aqui: o mecanismo
+  que ela pedia está entregue e correto; o que falhou no DoD tem dono e rastro
+  próprios agora, não fica solto.
 
 ### BQ2. Latência decomposta + artefatos consistentes (story S17, metade EmbedMind)
 
@@ -401,21 +406,29 @@ juntados com o arquivo. `--json` = primeira saída estruturada do CLI.
 
 ---
 
-## Fase FT — Otimização do full-text (pré-launch — decisão do founder 2026-07-11)
+## Fase FT — Fechar as dívidas do NFR de recall/latência/RSS a 100k (pré-launch — decisão do founder 2026-07-11)
 
-> Origem: a task BQ1 (`ef_search` escalonado) isolou que o NFR `recall p99 @ 100k
-> < 50 ms` (medido 1.224,62 ms — 24x acima) NÃO vem da busca vetorial
-> (`Store::recall_vector` mede 19,32 ms no mesmo run — dentro do orçamento) e sim do
-> meio full-text da fusão híbrida: o scan de BM25 decodifica a postings list inteira
-> de cada termo, sem corte antecipado, custo O(tamanho da lista) que domina a 100k.
+> Origem: a task BQ1 (`ef_search` escalonado, story S16) reprovou o DoD em TRÊS
+> eixos independentes, todos registrados no ADR 0015 e nenhum deles resolvido pela
+> própria BQ1 — o mecanismo de `ef_search` escalado está correto e entregue, mas
+> não fecha nenhum dos três sozinho: (1) recall de pior-caso a 100k (0,20 contra o
+> alvo ≥ 0,70, mesmo no degrau máximo medido); (2) `query p99 < 50 ms` — NÃO vem da
+> busca vetorial (`Store::recall_vector` mede 19,32 ms no mesmo run, dentro do
+> orçamento), e sim do meio full-text da fusão híbrida (BM25 decodifica a postings
+> list inteira por termo, sem corte antecipado, custo linear no corpus); (3) RSS de
+> pico (307,1 MiB > 300 MiB, causa ainda não investigada). Esta fase ataca os três,
+> cada um com sua própria story — a fase FT1-FT3 (full-text) já tinha sido escrita
+> antes de FT4/FT5 existirem; a numeração ficou fora de ordem por isso, mas a
+> dependência real é só a documentada em cada task.
 > Ver [ADR 0017](adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) para o escopo
-> completo — **profiling obrigatório antes de qualquer otimização estrutural**, bump
-> de `format_version` liberado quando a otimização exigir (aditivo, arquivo antigo
-> continua legível). Stories: S24–S26 da [spec](01-spec.md). **Ordem estritamente
-> sequencial** (ao contrário de BQ/FR): FT2 e FT3 dependem do resultado de FT1; nenhuma
-> task de otimização deve ser derivada/executada antes do relatório de profiling
-> existir — a derivação deve marcar FT2/FT3 com "DEPENDÊNCIA AUSENTE" se rodada fora
-> de ordem. Stories S24–S26 (não confundir com S23, "Relatório de uso", já entregue).
+> do full-text (FT1-FT3) — **profiling obrigatório antes de qualquer otimização
+> estrutural**, bump de `format_version` liberado quando a otimização exigir
+> (aditivo, arquivo antigo continua legível). Stories: S24–S28 da [spec](01-spec.md)
+> (S24–S26 = full-text; S27 = recall de pior-caso; S28 = RSS — não confundir com
+> S23, "Relatório de uso", já entregue). **FT1-FT3 são estritamente sequenciais**
+> entre si (FT2/FT3 dependem do resultado de FT1 — a derivação deve marcar
+> "DEPENDÊNCIA AUSENTE" se rodada fora de ordem); **FT4 e FT5 são independentes**
+> de FT1-FT3 e entre si (podem rodar em paralelo ou em qualquer ordem).
 
 ### FT1. Profiling do meio full-text @ 100k (story S24)
 
@@ -483,6 +496,39 @@ arquivo de versão anterior continua legível pelo layout antigo, nunca erro.
   limitação documentada).
 - **Verificação:** `cargo test --workspace` incluindo fuzz do parser novo de
   `FTS_POSTINGS`; `benches/run_all.sh --full` nos dois datasets.
+
+### FT4. Fechar o recall de pior-caso @ 100k (story S27) — independente de FT1-FT3
+
+O sweep da BQ1 mostrou o recall médio achatando na faixa `ef_search` 192–384, mas a
+pior query individual do lote continua em 0,20 contra o alvo ≥ 0,70 — subir o
+degrau de busca sozinho não resolveu (ADR 0015). Investigar como candidatos, SEM
+escolher a priori: revisitar `ef_construction`/`M` na construção do índice (o ADR
+0015 só mexeu no lado da busca); um degrau de `ef_search` ainda maior, medindo o
+custo de latência restante; ou uma heurística de retry/expansão para queries de
+baixa confiança. Medir no harness e registrar a escolha em ADR novo.
+
+- **DoD:** story S27 verde — pior query do lote de 1000 queries do harness atinge
+  recall@10 ≥ 0,70 @ 100k, sem regredir a média (≥ 0,95) nem os limiares do §5;
+  ADR novo com o método escolhido e os números antes/depois.
+- **Verificação:** `benches/run_all.sh --full` nos dois datasets + `cargo test
+  --workspace`.
+
+### FT5. Corrigir o estouro de RSS de pico @ 100k (story S28) — independente de FT1-FT3
+
+RSS de pico medido em 307,1 MiB (query) / 305,4 MiB (ingest) @ 100k, contra o teto
+de 300 MiB — o ADR 0015 já descarta ser efeito do `ef_search` escalado (a folga já
+estava apertada antes dessa mudança) e registra que a causa é "dimensionamento
+geral do índice a 100k", nunca investigada a fundo. Profiling de memória (heap
+profiler nativo ou instrumentação manual por fase, mesmo espírito de método da
+FT1) para identificar a estrutura dominante — grafo HNSW em memória, cache de
+páginas do pager, buffers de decodificação — antes de escolher a correção.
+
+- **DoD:** story S28 verde — RSS de pico (ingest e query) < 300 MiB @ 100k, sem
+  regredir recall/latência além dos limiares do §5; causa documentada (profiling,
+  não suposição); ADR novo se a correção revisitar uma decisão de dimensionamento
+  já registrada (ex.: ADR 0002/0008 do HNSW).
+- **Verificação:** `benches/run_all.sh --full` confirmando RSS < 300 MiB @ 100k;
+  `cargo test --workspace`.
 
 ---
 
