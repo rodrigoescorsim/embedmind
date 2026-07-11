@@ -216,7 +216,7 @@ técnico com diagramas se solicitado — publicação é do founder.
 > vetor pronto. Ambos ferem a credibilidade dos números que o README vai publicar
 > no launch — por isso esta fase precede o dia 35.
 
-### BQ1. `ef_search` proporcional ao tamanho do índice (story S16)
+### BQ1. `ef_search` proporcional ao tamanho do índice (story S16) [✅ ENTREGUE]
 
 Substituir o default fixo (`HNSW_DEFAULT_EF_SEARCH = 64` em `format.rs`) por um
 default que escala com o número de nós do índice — fórmula/patamares decididos por
@@ -319,7 +319,7 @@ aditiva, política G4); crash tests cobrindo as páginas tocadas.
   `forget` do substituto não ressuscita; crash harness `crash_supersede.rs`; MCP
   `supersedes: [ids]`, CLI `--supersedes ID` repetível.
 
-### FR2. Recência na fusão do recall (story S20)
+### FR2. Recência na fusão do recall (story S20) [✅ ENTREGUE]
 
 Terceira lista na fusão RRF k=60: os candidatos de conteúdo (união vetor+texto)
 reordenados por `created_at` decrescente — desempata pelo mais novo sem derrubar match

@@ -226,7 +226,7 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
   §5) e o workflow `.github/workflows/bench.yml`, que roda em todo PR/push que toca
   engine ou harness e falha o job quando um limiar do §5 é cruzado.
 
-### S16. Recall estável em escala — `ef_search` proporcional ao índice [⬜ pendente]
+### S16. Recall estável em escala — `ef_search` proporcional ao índice [✅ implementada]
 
 Contexto medido (run 2026-07-09, `agent-mem-100k`): recall@10 médio caiu de 0,9953
 (@10k) para 0,9313 e a pior query para **0,20** — causa raiz: `ef_search` default fixo
@@ -319,7 +319,7 @@ substitui a antiga no recall, mas a antiga continua navegável como versão ante
 - **Verificação:** `cargo test -p embedmind-core supersede` + testes de protocolo MCP
   + E2E CLI; crash test se tocar formato.
 
-### S20. Recência na fusão do recall [⬜ pendente]
+### S20. Recência na fusão do recall [✅ implementada]
 
 Como agente, quero que empate semântico penda para o conhecimento mais novo — sem que
 um match forte antigo seja derrubado por novidade irrelevante.
