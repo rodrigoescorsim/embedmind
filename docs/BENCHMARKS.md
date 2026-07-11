@@ -25,6 +25,17 @@ for each baseline (no de-tuning the competition), same hardware, same dataset, s
 embeddings fed to all systems (embedding time measured separately — baselines don't embed,
 so end-to-end `remember` latency is reported for EmbedMind only and labeled as such).
 
+Each baseline's adapter is gated behind its own build feature (`compare-sqlite-vec`,
+`compare-zvec`, `compare-chroma`) so the default harness — and the CI regression guard —
+builds and runs everywhere without any native toolchain or interpreter. A box with the
+toolchain present flips the feature on to fill that row; without it, the row reports
+"not measured" with the reason, never a fabricated number (§4 rule 1). Chroma is pinned
+to `chromadb==1.5.9` (recorded in `benches/src/competitors.rs`) and driven through a
+Python subprocess (`benches/chroma_bench.py`, needs Python 3 + `pip install
+chromadb==1.5.9` on the box — an external, founder-managed dependency, the same shape as
+the sqlite-vec/zvec native toolchains) so the adapter never re-embeds: it receives the
+same pre-computed vectors every other system in the comparison does.
+
 ## 2. Datasets
 
 | Dataset | Size | Purpose |

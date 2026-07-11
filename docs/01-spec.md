@@ -267,7 +267,7 @@ compara coisas diferentes sem rotular — corrigir a medição, não o marketing
 - **Verificação:** `benches/run_all.sh` + revisão da tabela gerada; teste do renderer
   cobrindo a decomposição.
 
-### S18. Comparação com concorrente da categoria de produto [⬜ pendente]
+### S18. Comparação com concorrente da categoria de produto [✅ implementada]
 
 sqlite-vec/zvec são baselines de camada de índice; a alternativa que um dev de agente
 realmente considera é um vector store local que também embeda (Chroma em modo
@@ -279,6 +279,13 @@ local/embedded, com o mesmo all-MiniLM-L6-v2, é a briga justa).
   toolchain ausente reporta "not measured", nunca número inventado.
 - **Verificação:** `benches/run_all.sh` com a feature ligada num ambiente com Python
   disponível (dependência externa do founder, como as toolchains de sqlite-vec/zvec).
+
+Implementada: `--features compare-chroma`, adapter em `benches/src/competitors.rs`
+(`run_chroma`) driblando `benches/chroma_bench.py` via subprocess JSON (sem rede/servidor),
+Chroma pinado a `chromadb==1.5.9`. Recebe os mesmos vetores pré-computados que
+sqlite-vec/zvec (nunca reembeda); recall@10 calculado do lado Rust contra o baseline
+brute-force compartilhado. Verificado com `benches/run_all.sh agent-mem-10k` +
+`COMPARE="--features compare-chroma"`.
 
 ---
 

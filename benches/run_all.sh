@@ -5,7 +5,7 @@
 # their seeds (corpus -> ONNX embeddings -> .mind store + .vec baseline), then
 # measures recall@10, warm + cold-open query latency (p50/p99), remember
 # latency, ingest throughput, file size and peak RSS; compares against the
-# pinned sqlite-vec / zvec baselines; validates the spec NFRs; and writes a
+# pinned sqlite-vec / zvec / Chroma baselines; validates the spec NFRs; and writes a
 # README-ready markdown table plus benches/results/<version>.json.
 #
 # Usage:
@@ -15,8 +15,11 @@
 #   BENCH_DATE=2026-07-08 ./benches/run_all.sh   # stamp the run date
 #
 # Competitor columns: pass the feature to enable an adapter on a box that has
-# the native toolchain, e.g.
+# the native toolchain (sqlite-vec/zvec) or Python + chromadb (Chroma), e.g.
 #   COMPARE="--features compare-sqlite-vec" ./benches/run_all.sh
+#   COMPARE="--features compare-chroma" ./benches/run_all.sh
+# Chroma needs `pip install chromadb==1.5.9` (pinned in competitors.rs); if the
+# interpreter isn't `python`/`python3` on PATH, set EMBEDMIND_BENCH_PYTHON.
 #
 # The competitor comparison runs on one shared dataset — by default the largest
 # in the run. Building a competitor index (e.g. zvec's HNSW) and re-deriving an

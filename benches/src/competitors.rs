@@ -28,7 +28,11 @@
 //! de-tuning), and it fills a [`CompetitorMetrics`] measured identically.
 
 use crate::dataset::VectorSet;
-#[cfg(any(feature = "compare-sqlite-vec", feature = "compare-zvec"))]
+#[cfg(any(
+    feature = "compare-sqlite-vec",
+    feature = "compare-zvec",
+    feature = "compare-chroma"
+))]
 use crate::metrics::{self, Latencies};
 
 /// A benchmarked competitor and the exact version this harness targets. The
@@ -96,6 +100,23 @@ pub const COMPETITORS: &[Competitor] = &[
             persists: "vectors + primary key only",
         },
     },
+    Competitor {
+        name: "Chroma",
+        // The product-category competitor (docs/03-tasks.md BQ4 / story S18):
+        // a local vector store that, in real agent-dev use, also embeds —
+        // unlike sqlite-vec/zvec, which are index-layer-only baselines. This
+        // harness drives it with the *same* pre-computed all-MiniLM-L6-v2
+        // vectors as every other system (BENCHMARKS.md Sec1: same embeddings
+        // fed to all systems), so the comparison isolates the store, not the
+        // embedding step — Chroma's own embedding functions are never called.
+        version: "1.5.9",
+        feature: "compare-chroma",
+        note: "Local/embedded mode (PersistentClient), cosine space (its documented default for embedding search), driven via a pinned Python subprocess (benches/chroma_bench.py) — no server, no network.",
+        scope: Scope {
+            returns: "ids only (queried by vector; metadata/documents optional and unused here)",
+            persists: "vectors + ids (a local Chroma collection can also store documents/metadata, unused in this comparison)",
+        },
+    },
 ];
 
 /// The metrics a competitor is graded on — the same shape as EmbedMind's own
@@ -145,6 +166,7 @@ pub fn run_all(
             let outcome = match c.name {
                 "sqlite-vec" => run_sqlite_vec(c, set, queries, k),
                 "zvec" => run_zvec(c, set, queries, k),
+                "Chroma" => run_chroma(c, set, queries, k),
                 _ => CompetitorOutcome::NotMeasured {
                     reason: "no adapter".to_string(),
                 },
@@ -184,6 +206,25 @@ fn run_zvec(
     CompetitorOutcome::NotMeasured {
         reason: format!(
             "feature `{}` disabled (build with it + a zvec {} build to fill this row)",
+            c.feature, c.version
+        ),
+    }
+}
+
+/// Chroma adapter. Real implementation lives behind `--features compare-chroma`
+/// (needs a Python 3 interpreter with `chromadb` installed, driven as a
+/// subprocess — see `benches/chroma_bench.py`). Without the feature it records
+/// why it is absent.
+#[cfg(not(feature = "compare-chroma"))]
+fn run_chroma(
+    c: &Competitor,
+    _set: &VectorSet,
+    _queries: &[Vec<f32>],
+    _k: usize,
+) -> CompetitorOutcome {
+    CompetitorOutcome::NotMeasured {
+        reason: format!(
+            "feature `{}` disabled (build with it + Python 3 + `pip install chromadb=={}` to fill this row)",
             c.feature, c.version
         ),
     }
@@ -336,7 +377,11 @@ fn run_sqlite_vec(
 /// that same position (sqlite-vec's `rowid`, zvec's string pk), so this maps
 /// an exact-baseline hit back to the id space each adapter's query returns,
 /// letting recall be computed as a plain set overlap.
-#[cfg(any(feature = "compare-sqlite-vec", feature = "compare-zvec"))]
+#[cfg(any(
+    feature = "compare-sqlite-vec",
+    feature = "compare-zvec",
+    feature = "compare-chroma"
+))]
 fn id_index(set: &VectorSet, id: ulid::Ulid) -> usize {
     set.entries
         .iter()
@@ -491,6 +536,167 @@ fn dir_size(dir: &std::path::Path) -> Option<u64> {
     Some(total)
 }
 
+/// Chroma adapter: drives `benches/chroma_bench.py` as a subprocess over
+/// newline-delimited JSON on stdin/stdout (the script's own docstring is the
+/// protocol reference). No native FFI, no `unsafe` — the boundary is a plain
+/// child process, the same shape as `Command::new` anywhere else in the crate.
+///
+/// The request carries the *same* pre-computed vectors/queries every other
+/// competitor receives (never re-embedded by Chroma itself, matching
+/// `docs/BENCHMARKS.md` Sec1 "same embeddings fed to all systems"). Ids are
+/// stringified indices into `set.entries`, which the script echoes back in
+/// `results` so `id_index`'s position-based recall math applies unchanged.
+#[cfg(feature = "compare-chroma")]
+fn run_chroma(
+    c: &Competitor,
+    set: &VectorSet,
+    queries: &[Vec<f32>],
+    k: usize,
+) -> CompetitorOutcome {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let run = || -> Result<CompetitorMetrics, String> {
+        let ids: Vec<String> = (0..set.entries.len()).map(|i| i.to_string()).collect();
+        let vectors: Vec<&[f32]> = set.entries.iter().map(|e| e.vector.as_slice()).collect();
+
+        let request = serde_json::json!({
+            "dims": set.dims,
+            "ids": ids,
+            "vectors": vectors,
+            "queries": queries,
+            "k": k,
+        });
+        let request_bytes =
+            serde_json::to_vec(&request).map_err(|e| format!("encoding request: {e}"))?;
+
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("chroma_bench.py");
+        let mut child = Command::new(python_interpreter())
+            .arg(&script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawning python for {}: {e}", script.display()))?;
+
+        child
+            .stdin
+            .take()
+            .ok_or("no stdin handle on spawned python")?
+            .write_all(&request_bytes)
+            .map_err(|e| format!("writing request to python stdin: {e}"))?;
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("waiting for python: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "chroma_bench.py exited with {}: {stderr}",
+                output.status
+            ));
+        }
+
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("parsing python response: {e}"))?;
+        if let Some(err) = response.get("error").and_then(|v| v.as_str()) {
+            return Err(err.to_string());
+        }
+
+        let ingest_ms: Vec<f64> = response["ingest_ms_per_op"]
+            .as_array()
+            .ok_or("response missing ingest_ms_per_op")?
+            .iter()
+            .filter_map(serde_json::Value::as_f64)
+            .collect();
+        let query_ms: Vec<f64> = response["query_ms"]
+            .as_array()
+            .ok_or("response missing query_ms")?
+            .iter()
+            .filter_map(serde_json::Value::as_f64)
+            .collect();
+        let results: Vec<Vec<String>> = response["results"]
+            .as_array()
+            .ok_or("response missing results")?
+            .iter()
+            .map(|row| {
+                row.as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .collect();
+        let file_bytes = response["file_bytes"].as_u64();
+
+        let ingest_total_secs: f64 = ingest_ms.iter().sum::<f64>() / 1000.0;
+        let ingest_per_sec = metrics::ops_per_sec(
+            set.entries.len(),
+            std::time::Duration::from_secs_f64(ingest_total_secs.max(0.0)),
+        );
+
+        let mut warm = Latencies::with_capacity(query_ms.len());
+        for ms in &query_ms {
+            warm.push(std::time::Duration::from_secs_f64((ms / 1000.0).max(0.0)));
+        }
+
+        // --- recall@k against the shared brute-force baseline, same pattern
+        // as run_sqlite_vec/run_zvec: Chroma's returned ids are stringified
+        // positions into `set.entries`, mapped back through `id_index`. ---
+        let mut recall_sum = 0.0;
+        let mut recall_n = 0usize;
+        for (q, got_ids) in queries.iter().zip(results.iter()) {
+            let got: std::collections::HashSet<i64> = got_ids
+                .iter()
+                .filter_map(|s| s.parse::<i64>().ok())
+                .collect();
+            let exact = crate::baseline::top_k(set, q, k, |_| true);
+            let exact_ids: std::collections::HashSet<i64> = exact
+                .iter()
+                .map(|hit| id_index(set, hit.record_id) as i64)
+                .collect();
+            let hit_count = got.iter().filter(|r| exact_ids.contains(r)).count();
+            if !exact_ids.is_empty() {
+                recall_sum += hit_count as f64 / exact_ids.len() as f64;
+                recall_n += 1;
+            }
+        }
+
+        Ok(CompetitorMetrics {
+            recall_at_10: if recall_n > 0 {
+                Some(recall_sum / recall_n as f64)
+            } else {
+                None
+            },
+            query_p50_ms: warm.p50_ms(),
+            query_p99_ms: warm.p99_ms(),
+            cold_open_ms: None,
+            ingest_vecs_per_sec: Some(ingest_per_sec),
+            file_bytes,
+            peak_rss_mib: None,
+        })
+    };
+
+    match run() {
+        Ok(m) => CompetitorOutcome::Measured(m),
+        Err(e) => CompetitorOutcome::NotMeasured {
+            reason: format!("Chroma adapter failed: {e} (target {})", c.version),
+        },
+    }
+}
+
+/// Resolves the Python interpreter to invoke: `EMBEDMIND_BENCH_PYTHON` if set
+/// (a pinned venv on a release box), else `python3`, the portable name on
+/// every platform this harness targets except Windows, where the launcher is
+/// conventionally just `python` — `python3` is not guaranteed to exist there.
+#[cfg(feature = "compare-chroma")]
+fn python_interpreter() -> String {
+    if let Ok(p) = std::env::var("EMBEDMIND_BENCH_PYTHON") {
+        return p;
+    }
+    if cfg!(windows) { "python" } else { "python3" }.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -538,6 +744,7 @@ mod tests {
             let enabled = match c.feature {
                 "compare-sqlite-vec" => cfg!(feature = "compare-sqlite-vec"),
                 "compare-zvec" => cfg!(feature = "compare-zvec"),
+                "compare-chroma" => cfg!(feature = "compare-chroma"),
                 _ => false,
             };
             if !enabled {
