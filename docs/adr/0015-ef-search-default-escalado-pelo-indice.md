@@ -1,7 +1,9 @@
 # ADR 0015 — `ef_search` default escalado pelo tamanho do índice (patamares medidos)
 
-**Status:** Aceito (jul/2026). Story S16 / task BQ1 ([01-spec.md](../01-spec.md),
-[03-tasks.md](../03-tasks.md)) — recall estável em escala antes do launch.
+**Status:** Aceito (jul/2026) — o mecanismo de degraus fica; **DoD da story S16
+reprovado** na validação de 2026-07-11 (ver seção "Validação" abaixo). Story
+S16 / task BQ1 ([01-spec.md](../01-spec.md), [03-tasks.md](../03-tasks.md)) —
+recall estável em escala antes do launch.
 
 ## Contexto
 
@@ -52,15 +54,46 @@ medidos** (`index::default_ef_search`):
   dúzia de patamares auditáveis são mais fáceis de manter honestos (re-medir e
   ajustar uma linha da tabela) do que uma curva ajustada fingindo precisão.
 
-Validação (run 2026-07-10, `benches/run_all.sh --full`, 200 queries vs.
-brute-force, mesma máquina do baseline):
+Validação (run 2026-07-11, `benches/run_all.sh --full`, 1000 queries vs.
+brute-force via `Store::recall_vector` — a metade HNSW pura, não contaminada
+pela busca híbrida — mesma máquina do baseline; log completo em
+`benches/results/adr0014-off.log`):
 
-| dataset | recall@10 média | pior query | p10 | p50 | query p99 |
+| dataset | recall@10 média | pior query | p10 | p50 | query p99 (híbrido, e2e) |
 |---|---|---|---|---|---|
-| agent-mem-10k (ef 64, inalterado) | «10K_MEAN» | «10K_MIN» | «10K_P10» | «10K_P50» | «10K_P99» ms |
-| agent-mem-100k (ef 256) | «100K_MEAN» | «100K_MIN» | «100K_P10» | «100K_P50» | «100K_P99» ms |
+| agent-mem-10k (ef 64, inalterado) | 0,9953 | 0,90 | 1,00 | 1,00 | 103,09 ms |
+| agent-mem-100k (ef 256) | 0,9360 | 0,20 | 0,70 | 1,00 | 1224,62 ms |
 
-«VEREDITO_DOD»
+**Reprovado — parcialmente.** O default escalado por degraus melhora o
+recall@10 médio a 100k (0,9313 → 0,9360) e o p10 por query (a cauda "razoável"
+sobe: 0,70 no lugar de queries piores), mas **não** atinge o DoD original da
+S16 nos dois eixos que ele exige:
+
+- **recall@10 média @ 100k:** 0,9360 < 0,95 alvo. **Reprova.**
+- **pior query @ 100k:** 0,20 < 0,70 alvo — idêntico ao número que motivou a
+  story (`docs/03-tasks.md` BQ1), apesar do degrau `ef=256`. Com 1000 queries
+  (a rodada real do harness, não as 50 ruidosas do sweep) a cauda de pior caso
+  não desaparece: existe pelo menos uma consulta cujo vizinho verdadeiro fica
+  fora do beam mesmo em `ef=256`. **Reprova.**
+- **query p99 < 50 ms:** 1224,62 ms medido (híbrido, e2e) a 100k — **23x o
+  teto**. Causa raiz **não é o `ef_search`**: o vetor puro decidido por
+  `default_ef_search` é rápido (ver `↳ query engine p50/p99` no relatório
+  completo; o HNSW em si não é o gargalo). O custo dominante é a busca
+  full-text: o índice de postings do FTS decodifica a lista inteira por termo
+  a cada query (decisão pré-existente, fora do escopo deste ADR — não há
+  paginação/skip-list nas postings), e cresce linearmente com o corpus. A 100k
+  isso já domina o p99 do `recall` híbrido. Achado novo, registrado aqui para
+  não se perder: **fora de escopo da S16**, precisa de story própria
+  (ver "Consequências").
+
+O 10k segue saudável (recall 0,9953 média / 0,90 pior, degrau inalterado —
+sem regressão além do limiar §5 do BENCHMARKS.md). O `ef_search` escalado por
+si só está correto e ativo (`index::default_ef_search`, testado por
+`default_ef_search_scales_up_with_node_count_and_is_monotonic` e cobertura de
+`Query::effective_ef_search`); o que falha é o DoD do S16 como um todo, por
+dois motivos: a cauda de pior-caso do HNSW a 100k não fecha em 0,70 mesmo no
+maior degrau medido, e o p99 é dominado por um gargalo do FTS que este ADR
+nunca teve como escopo consertar.
 
 ## Alternativas rejeitadas
 
@@ -88,3 +121,25 @@ brute-force, mesma máquina do baseline):
 - DESIGN.md (§ HNSW) atualizado; `benches/sweep_ef.rs` referencia este ADR.
 - Quando o corpus de referência crescer (ex.: dataset 1M), o degrau seguinte
   se decide com novo sweep — a tabela é o contrato, re-medível.
+- **RSS de pico @ 100k também estoura o NFR** (< 300 MiB): medido 307,1 MiB
+  (query) / 305,4 MiB (ingest) na mesma rodada — a folga de 6% citada na task
+  BQ1 (280,9 MiB) já não existe. Reportado aqui e no CHANGELOG por
+  transparência; a causa é dimensionamento geral do índice a 100k, não algo
+  que o `ef_search` escalado piora sozinho (o degrau maior consome mais RAM
+  durante a busca, mas a folga já estava apertada antes deste ADR). Sem
+  correção nesta task — precisa de investigação própria.
+- **Duas reprovações do DoD original ficam registradas como dívida técnica,
+  não escondidas:**
+  1. **Recall de pior-caso a 100k não fecha em 0,70** mesmo no degrau máximo
+     medido (`ef=256`); subir o degrau é a alavanca óbvia, mas o sweep já
+     mostrou a curva achatando por volta de 192–384 — o próximo passo exige
+     ou um degrau ainda maior com nova medição de custo, ou revisitar a
+     construção do índice (`ef_construction`, `M`) em vez de só o lado da
+     busca.
+  2. **`query p99 < 50 ms` (híbrido) falha por um gargalo pré-existente do
+     FTS**, não do HNSW: a lista de postings é decodificada inteira por termo
+     a cada query, sem paginação — custo linear no tamanho do corpus,
+     dominante a 100k (p99 híbrido 1224,62 ms vs. HNSW puro, que é rápido).
+     Fora do escopo deste ADR e da story S16; precisa de story própria no
+     roadmap (índice de postings com skip/paginação) antes do NFR de latência
+     poder ser revalidado a 100k.

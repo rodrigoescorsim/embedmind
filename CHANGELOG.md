@@ -15,6 +15,29 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **`ef_search` default scaled by index size** (story S16, ADR 0015) —
+  `HNSW_DEFAULT_EF_SEARCH = 64` no longer applies unconditionally: the
+  default now grows in measured steps with the live `node_count` (64 below
+  25k, 96 / 160 / 256 at 25k / 50k / 100k). `Query::ef_search(n)` explicit
+  still wins at every scale (`Query.ef_search` is now `Option<u16>`
+  internally). The harness reports the per-query recall distribution
+  (min/p10/p50), not just the mean, so a good average hiding a bad tail can't
+  hide again.
+  **Honest result (2026-07-11 validation, 1000 queries, `benches/run_all.sh
+  --full`):** the mechanism works and 10k is unaffected, but the story's DoD
+  is **not met** at 100k: recall@10 mean 0.9360 (target ≥0.95), worst query
+  0.20 (target ≥0.70) — the same worst-case number that motivated the story
+  in the first place, unmoved by the larger beam — and hybrid query p99
+  1224.62 ms (target < 50 ms), dominated by a pre-existing full-text search
+  bottleneck (the postings list is decoded whole per term per query, cost
+  linear in corpus size) rather than by HNSW itself. Peak RSS @ 100k also
+  crossed its ceiling: 307.1 MiB measured vs. the 300 MiB target (the 6%
+  headroom noted when the story was scoped is gone at this scale). None of
+  this is hidden: it's recorded in ADR 0015 and `docs/03-tasks.md` (BQ1) as
+  reproved-DoD debt with concrete follow-ups (a larger/different `ef`
+  ladder or index-build tuning for the recall tail; a paginated postings
+  index for the FTS latency; RSS investigation at 100k) — none in scope for
+  this task.
 - **Write-time near-duplicate hints on `remember`** (story S21) — the response
   now carries `similar: [{id, content (truncated to 160 chars), score,
   created_at_micros}]`: existing live, non-superseded memories in the same
