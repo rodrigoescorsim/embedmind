@@ -154,11 +154,37 @@ const VERBS: &[&str] = &[
 ];
 
 fn fill(template: &str, rng: &mut Rng) -> String {
+    let slots = Slots::draw(rng);
+    fill_with(template, &slots)
+}
+
+/// One draw of the four slot banks — the *facts* of a memory, independent of
+/// the template that words them. Two templates filled with the same [`Slots`]
+/// state the same thing in different words: a synthetic near-duplicate.
+struct Slots {
+    a: &'static str,
+    b: &'static str,
+    c: &'static str,
+    v: &'static str,
+}
+
+impl Slots {
+    fn draw(rng: &mut Rng) -> Slots {
+        Slots {
+            a: rng.pick(NOUNS_A),
+            b: rng.pick(NOUNS_B),
+            c: rng.pick(CONTEXTS),
+            v: rng.pick(VERBS),
+        }
+    }
+}
+
+fn fill_with(template: &str, slots: &Slots) -> String {
     template
-        .replace("{a}", rng.pick(NOUNS_A))
-        .replace("{b}", rng.pick(NOUNS_B))
-        .replace("{c}", rng.pick(CONTEXTS))
-        .replace("{v}", rng.pick(VERBS))
+        .replace("{a}", slots.a)
+        .replace("{b}", slots.b)
+        .replace("{c}", slots.c)
+        .replace("{v}", slots.v)
 }
 
 /// Generates `count` synthetic memories from `seed`, deterministically. The
@@ -183,6 +209,83 @@ pub fn generate(seed: u64, count: usize) -> Vec<GenMemory> {
         }
         let project = rng.pick(PROJECTS).to_owned();
         out.push(GenMemory { content, project });
+    }
+    out
+}
+
+/// How the second half of a [`duplicate_pairs`] pair restates the first —
+/// the two shapes a real agent's near-duplicate re-`remember` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicateKind {
+    /// Same facts (identical slot fills, same category), worded by a
+    /// *different* template — a genuine paraphrase, possibly crossing the
+    /// pt-BR/en language boundary.
+    Paraphrase,
+    /// The same text with small edits around it (a prefix like "Update:",
+    /// a trailing note) — the "agent pastes the fact again with framing"
+    /// case.
+    NoisyCopy,
+}
+
+/// One synthetic near-duplicate pair for threshold calibration (story S21):
+/// `original` is a corpus-distribution memory, `duplicate` restates it per
+/// `kind`. Deterministic in `seed`, like [`generate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicatePair {
+    pub original: String,
+    pub duplicate: String,
+    pub kind: DuplicateKind,
+}
+
+/// Prefixes/suffixes for [`DuplicateKind::NoisyCopy`] — small framing an
+/// agent adds when re-stating a fact it already stored.
+const NOISE_PREFIXES: &[&str] = &["Update: ", "Nota: ", "Reminder: ", "Confirmado: "];
+const NOISE_SUFFIXES: &[&str] = &[
+    " (still true.)",
+    " Confirmed again today.",
+    " — sem mudanças.",
+];
+
+/// Generates `count` near-duplicate pairs from `seed`, deterministically,
+/// alternating [`DuplicateKind::Paraphrase`] and [`DuplicateKind::NoisyCopy`].
+/// The calibration binary (`calibrate_near_dup`) embeds both sides with the
+/// shipped model and measures the cosine-score distribution duplicates
+/// occupy vs. unrelated corpus pairs — the measurement behind the S21
+/// near-duplicate threshold (ADR 0016).
+pub fn duplicate_pairs(seed: u64, count: usize) -> Vec<DuplicatePair> {
+    let mut rng = Rng::new(seed);
+    let banks: &[&[&str]] = &[DECISIONS, FACTS, PREFERENCES, CODE_NOTES];
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let bank: &[&str] = rng.pick(banks);
+        let slots = Slots::draw(&mut rng);
+        let template_a = rng.pick(bank);
+        let original = fill_with(template_a, &slots);
+        if i % 2 == 0 {
+            // Different template, same slots: the same fact reworded. Draw
+            // until the template differs (every bank has >= 2 templates).
+            let mut template_b = rng.pick(bank);
+            while template_b == template_a {
+                template_b = rng.pick(bank);
+            }
+            out.push(DuplicatePair {
+                original,
+                duplicate: fill_with(template_b, &slots),
+                kind: DuplicateKind::Paraphrase,
+            });
+        } else {
+            let duplicate = format!(
+                "{}{}{}",
+                rng.pick(NOISE_PREFIXES),
+                original,
+                rng.pick(NOISE_SUFFIXES)
+            );
+            out.push(DuplicatePair {
+                original,
+                duplicate,
+                kind: DuplicateKind::NoisyCopy,
+            });
+        }
     }
     out
 }

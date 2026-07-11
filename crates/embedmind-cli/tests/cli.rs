@@ -738,3 +738,48 @@ fn supersedes_flow_recall_hides_history_stays_navigable() {
         "{stderr}"
     );
 }
+
+/// S21 end to end: a `remember` of content similar to an existing memory
+/// prints a legible near-duplicate hint ("memória parecida existente: ...")
+/// while still storing — and an unrelated remember prints none.
+#[test]
+fn remember_warns_about_near_duplicates_but_still_stores() {
+    let scratch = Scratch::new("neardup");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    let content = "the deploy pipeline runs on github actions with a windows runner";
+    let (ok, stdout, stderr) = run(scratch.path(), &["--file", file, "remember", content]);
+    assert!(ok, "remember failed: {stderr}");
+    assert!(
+        !stdout.contains("memória parecida existente"),
+        "first memory has nothing to duplicate: {stdout}"
+    );
+    let first_id = stdout.split_whitespace().next().unwrap().to_string();
+
+    // Same content again: the hint names the existing memory and shows a
+    // snippet — and the new memory is still stored (its id is printed).
+    let (ok, stdout, stderr) = run(scratch.path(), &["--file", file, "remember", content]);
+    assert!(ok, "a near-duplicate must not block the store: {stderr}");
+    let second_id = stdout.split_whitespace().next().unwrap().to_string();
+    assert_eq!(second_id.len(), 26, "the store always happens: {stdout}");
+    assert!(
+        stdout.contains(&format!("memória parecida existente: {first_id}")),
+        "hint must name the duplicate: {stdout}"
+    );
+    assert!(
+        stdout.contains("github actions"),
+        "hint must show a content snippet: {stdout}"
+    );
+
+    // Unrelated content: no hint.
+    let (ok, stdout, _) = run(
+        scratch.path(),
+        &["--file", file, "remember", "prefiro café sem açúcar"],
+    );
+    assert!(ok);
+    assert!(
+        !stdout.contains("memória parecida existente"),
+        "unrelated content must not warn: {stdout}"
+    );
+}
