@@ -411,13 +411,13 @@ juntados com o arquivo. `--json` = primeira saída estruturada do CLI.
 > Ver [ADR 0017](adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) para o escopo
 > completo — **profiling obrigatório antes de qualquer otimização estrutural**, bump
 > de `format_version` liberado quando a otimização exigir (aditivo, arquivo antigo
-> continua legível). Stories: S23–S25 da [spec](01-spec.md). **Ordem estritamente
+> continua legível). Stories: S24–S26 da [spec](01-spec.md). **Ordem estritamente
 > sequencial** (ao contrário de BQ/FR): FT2 e FT3 dependem do resultado de FT1; nenhuma
 > task de otimização deve ser derivada/executada antes do relatório de profiling
 > existir — a derivação deve marcar FT2/FT3 com "DEPENDÊNCIA AUSENTE" se rodada fora
-> de ordem.
+> de ordem. Stories S24–S26 (não confundir com S23, "Relatório de uso", já entregue).
 
-### FT1. Profiling do meio full-text @ 100k (story S23)
+### FT1. Profiling do meio full-text @ 100k (story S24)
 
 Isolar, com evidência de profiling (não leitura de código), a fração do tempo do
 `recall` híbrido @ 100k gasta em cada fase do full-text: decodificação de postings,
@@ -429,7 +429,7 @@ fase de `fts::search` é aceitável — o que importa é o número, não a ferra
 Resultado registrado no ADR 0017 (seção "Resultado do profiling") ou arquivo próprio
 referenciado por ele: números concretos por fase.
 
-- **DoD:** story S23 verde — relatório existe, cita números concretos, e ou aponta
+- **DoD:** story S24 verde — relatório existe, cita números concretos, e ou aponta
   uma fração dominante (> 60% do tempo do meio full-text) ou registra explicitamente
   "sem causa dominante clara" (resultado válido que muda a estratégia das próximas
   tasks — ver ADR 0017 §3).
@@ -441,7 +441,7 @@ referenciado por ele: números concretos por fase.
   mesmo que a causa pareça óbvia durante a investigação. Anotar candidatos para as
   próximas tasks, não implementar.
 
-### FT2. Early termination no scan de postings (story S24) — depende de FT1
+### FT2. Early termination no scan de postings (story S25) — depende de FT1
 
 Cortar o scan de BM25 antes de decodificar/pontuar a postings list inteira de um
 termo, quando já há candidatos suficientes para o top-k final. Critério exato do
@@ -455,14 +455,14 @@ reduz trabalho, nunca muda quais documentos retornam ou sua ordem).
   apontou outra causa dominante (ex.: I/O de página, não decodificação/scoring), esta
   task deve ser reavaliada antes de prosseguir — parar com "DEPENDÊNCIA AUSENTE" se o
   relatório não existir ou não sustentar esta abordagem.
-- **DoD:** story S24 verde; teste de equivalência (resultado idêntico com/sem early
+- **DoD:** story S25 verde; teste de equivalência (resultado idêntico com/sem early
   termination, corpus pequeno e grande); ADR 0018 escrito com o critério de corte e a
   justificativa; `benches/run_all.sh --full` mostrando o ganho de
   `query_engine_p50/p99_ms` @ 100k.
 - **Verificação:** `cargo test --workspace` + `benches/run_all.sh --full` (comparar
   contra o baseline pré-FT2, não sobrescrever sem registrar o antes/depois).
 
-### FT3. Compressão delta+varint e/ou skip lists nas postings (story S25) — depende de FT1/FT2
+### FT3. Compressão delta+varint e/ou skip lists nas postings (story S26) — depende de FT1/FT2
 
 Se o profiling (FT1) apontou I/O de página ou volume de bytes decodificados como
 causa relevante, OU o early termination (FT2) sozinho não fechar o NFR
@@ -475,7 +475,7 @@ arquivo de versão anterior continua legível pelo layout antigo, nunca erro.
 - **Pré-requisito:** ler os relatórios/resultados de FT1 e FT2. Se FT2 já fechou o
   NFR, esta task pode ser adiada (registrar a decisão) — não é obrigatória por
   princípio, só se o NFR continuar reprovado.
-- **DoD:** story S25 verde; round-trip de leitura/escrita entre `format_version`
+- **DoD:** story S26 verde; round-trip de leitura/escrita entre `format_version`
   antigo e novo (arquivo antigo abre normalmente, sem skip list/compressão); crash
   test cobrindo as páginas `FTS_POSTINGS` no novo layout; `benches/run_all.sh --full`
   confirmando o NFR `recall p99 @ 100k < 50 ms` — OU, se ainda não fechar, ADR 0017
