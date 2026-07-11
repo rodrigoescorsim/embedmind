@@ -15,6 +15,7 @@ use std::sync::Arc;
 use embedmind_bench::baseline;
 use embedmind_bench::corpus;
 use embedmind_bench::dataset::{VectorSet, ingest_corpus};
+use embedmind_bench::harness::{TimingEmbedder, measure_warm_queries};
 use embedmind_bench::recall;
 use embedmind_core::api::{Query, Store, StoreOptions};
 use embedmind_core::embed::{Embedder, OnnxEmbedder};
@@ -81,6 +82,49 @@ fn store_and_baseline_agree_on_a_stored_memory() {
     assert!(
         hits.iter().any(|h| h.id == probe.id),
         "the store must recall a memory by its own content"
+    );
+}
+
+#[test]
+fn warm_queries_decompose_into_embed_plus_engine() {
+    // S17: a store opened with a TimingEmbedder lets the warm-latency phase
+    // split every timed recall into embed (query embedding) + engine (hybrid
+    // search + fusion + record load). Real ONNX model, real index, SimVfs.
+    let inner: Arc<dyn Embedder> = Arc::new(OnnxEmbedder::load().expect("model must load"));
+    let timing = Arc::new(TimingEmbedder::new(Arc::clone(&inner)));
+    let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+    let opts = StoreOptions {
+        embedder: Some(Arc::clone(&timing) as Arc<dyn Embedder>),
+        ..StoreOptions::default()
+    };
+    let mut store = Store::create_with(vfs, Path::new("bench.mind"), opts).unwrap();
+    let memories = corpus::generate(0xABCD_1234, 200);
+    ingest_corpus(&mut store, inner.as_ref(), &memories).unwrap();
+
+    let queries: Vec<String> = corpus::generate(0x5151_2026, 20)
+        .into_iter()
+        .map(|m| m.content)
+        .collect();
+    let warm = measure_warm_queries(&store, timing.as_ref(), &queries, 10).unwrap();
+
+    // One sample of each component per query.
+    assert_eq!(warm.total.len(), queries.len());
+    assert_eq!(warm.embed.len(), queries.len());
+    assert_eq!(warm.engine.len(), queries.len());
+
+    // The real model spends measurable time on every query embed.
+    assert!(
+        warm.embed.p50_ms().unwrap() > 0.0,
+        "query embedding must have a nonzero cost"
+    );
+
+    // engine is derived as total - embed per query (embed runs nested inside
+    // the timed recall), so the means must add up exactly, modulo f64 noise.
+    let total = warm.total.mean_ms().unwrap();
+    let parts = warm.embed.mean_ms().unwrap() + warm.engine.mean_ms().unwrap();
+    assert!(
+        (total - parts).abs() < 1e-6,
+        "embed + engine must reconstruct the total (total {total} ms, parts {parts} ms)"
     );
 }
 

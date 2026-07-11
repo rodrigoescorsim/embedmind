@@ -47,6 +47,20 @@ pub struct Competitor {
     /// One-line note on settings used / why it is the fair comparison, shown
     /// under the table.
     pub note: &'static str,
+    /// What a query returns and what ingest persists (`docs/BENCHMARKS.md` §4
+    /// rule 6): a smaller on-disk file or a faster query that does less is not
+    /// a win row, so every comparison row states its scope explicitly.
+    pub scope: Scope,
+}
+
+/// A system's scope in the comparison (`docs/BENCHMARKS.md` §4 rule 6):
+/// what a query returns, and what ingest persists to disk.
+#[derive(Debug, Clone, Copy)]
+pub struct Scope {
+    /// What a query returns, e.g. "ids only" vs. "full content + metadata".
+    pub returns: &'static str,
+    /// What ingest persists, e.g. "vectors only" vs. "text + metadata + full-text + graph".
+    pub persists: &'static str,
 }
 
 /// The competitors the methodology names (`docs/BENCHMARKS.md` §1), with the
@@ -64,6 +78,10 @@ pub const COMPETITORS: &[Competitor] = &[
         version: "0.1.10-alpha.4",
         feature: "compare-sqlite-vec",
         note: "SQLite extension, default page size, vec0 virtual table, brute-force KNN (its recommended small-scale path).",
+        scope: Scope {
+            returns: "rowid + distance only (no content/metadata store)",
+            persists: "vectors only",
+        },
     },
     Competitor {
         name: "zvec",
@@ -73,6 +91,10 @@ pub const COMPETITORS: &[Competitor] = &[
         version: "0.5.1",
         feature: "compare-zvec",
         note: "Embedded vector store (alibaba/zvec) via the official zvec-rust binding, default HNSW settings (M=16, ef_construction=200, cosine).",
+        scope: Scope {
+            returns: "primary key + distance only (no content/metadata store)",
+            persists: "vectors + primary key only",
+        },
     },
 ];
 
@@ -480,6 +502,24 @@ mod tests {
         for c in COMPETITORS {
             assert!(!c.version.is_empty(), "{} has no pinned version", c.name);
             assert!(!c.feature.is_empty());
+        }
+    }
+
+    #[test]
+    fn every_competitor_states_its_scope() {
+        // BENCHMARKS.md §4 rule 6: every comparison row must state what it
+        // returns and what it persists — never a silent "smaller/faster" claim.
+        for c in COMPETITORS {
+            assert!(
+                !c.scope.returns.is_empty(),
+                "{} has no scope.returns",
+                c.name
+            );
+            assert!(
+                !c.scope.persists.is_empty(),
+                "{} has no scope.persists",
+                c.name
+            );
         }
     }
 

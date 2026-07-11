@@ -105,3 +105,10 @@ path = "src/bin/run_all.rs"
 [[bin]]
 name = "compare_baseline"
 path = "src/bin/compare_baseline.rs"
+
+# One-off decision tooling: sweeps ef_search candidates over the committed
+# datasets and prints the recall@10 distribution + latency per candidate — the
+# data behind the adaptive-ef_search ADR (story S16 / docs/adr/0013).
+[[bin]]
+name = "sweep_ef"
+path = "src/bin/sweep_ef.rs"

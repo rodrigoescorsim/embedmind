@@ -104,6 +104,10 @@ de bytes comprovadamente seguro, cadeias de overflow para records > ~usable/4 (t
   config via `trait Embedder`, não código.
 - mmap vs. read/write + page cache próprio: **default read/write** (controle total de
   durabilidade; mmap complica WAL e Windows).
+- Fase FR (2026-07-10): representação do `supersedes` (flag no record **default** vs.
+  índice de exclusão), recência default vs. opt-in (S20) e limiar de near-duplicate
+  (S21) — os três decididos POR MEDIÇÃO no harness e registrados em ADR (0012+),
+  nunca por palpite.
 
 ## 5. Subsistemas — como cada um funciona
 
@@ -142,9 +146,13 @@ com `isError: true`. Contexto de projeto: marcador mais próximo subindo do cwd 
 
 | Tool | Entrada | Saída |
 |---|---|---|
-| `remember` | `content, metadata?, project?` (`null` = global) | `{id, project}` |
-| `recall` | `query, limit?=8, project?, scope?` (+`filters` no M2) | `{hits: [{id, content, score, project, provenance, created_at_micros}], scope}` |
+| `remember` | `content, metadata?, project?` (`null` = global) · fase FR: +`supersedes?: [ids]` (S19) | `{id, project}` · fase FR: +`similar: [...]` (S21) |
+| `recall` | `query, limit?=8, project?, scope?, filters?` · fase FR: `recency?` SE a S20 decidir por opt-in | `{hits: [{id, content, score, project, provenance, created_at_micros}], scope}` |
 | `forget` | `id` (query/idade + `confirm: true` no futuro) | `{count}` |
+
+Fase FR na casca CLI: `remember --supersedes ID` (repetível) e `serve --op-log <path>`
+(JSONL, S22) — schemas MCP evoluem de forma retrocompatível (campo novo, nunca
+mudança de significado).
 
 **CLI:** `embedmind serve | remember | recall | forget | stats | vacuum`, flags globais
 `--file` (default `~/.embedmind/memory.mind`), `--project`/`--global`/`--all`,

@@ -282,6 +282,106 @@ local/embedded, com o mesmo all-MiniLM-L6-v2, é a briga justa).
 
 ---
 
+## P1 — FR: frescor do conhecimento + observabilidade (pré-launch — decisão do founder 2026-07-10)
+
+> Origem: dogfooding via Painel Agêntico (10/jul/2026), que passou a usar o EmbedMind
+> como memória do agente que desenvolve este repo. Três achados de produto: (1) o
+> ranking não tem componente temporal — memória defasada semanticamente próxima vence
+> a correção mais nova; (2) relações `contradicts`/`refines` registram o conflito mas
+> o recall não age sobre elas; (3) zero observabilidade de operações (nenhum log
+> estruturado) e o lock exclusivo impede inspeção concorrente do arquivo. Decisão:
+> entra ANTES do launch de 11/ago — "conhecimento versionado" é diferencial de anúncio
+> que nenhum store embarcado tem.
+
+### S19. `supersedes` — conhecimento versionado de primeira classe [⬜ pendente]
+
+Como agente, quero corrigir um fato gravado sem perder o histórico: a memória nova
+substitui a antiga no recall, mas a antiga continua navegável como versão anterior.
+
+- **Dado** `remember(content, supersedes: [id_A])`, **quando** gravo a memória B,
+  **então** A deixa de aparecer em QUALQUER `recall` subsequente (status re-verificado
+  contra o registro no momento da busca, mesma regra dos tombstones da S2), mas
+  `get(A)` continua funcionando e `related(B)` mostra a aresta `supersedes → A`
+  (com a direção inversa visível em `related(A)`).
+- **Dado** uma cadeia A←B←C (C supersedes B, que supersedes A), **então** só C aparece
+  no recall; a cadeia é navegável passo a passo via `related`.
+- **Borda:** alvo inexistente ou tombstoned → erro tipado (mesma regra das relations);
+  alvo de OUTRO projeto → erro tipado (não cruzar escopo). `forget` de B NÃO
+  ressuscita A (a exclusão de A é estado próprio, não derivada por travessia de grafo
+  — default a registrar em ADR com a alternativa rejeitada e o porquê).
+- **Borda:** `vacuum` PRESERVA memórias superseded (são histórico, não lixo);
+  `forget` explícito delas continua possível.
+- **Formato:** sem quebra — reusar a infra de relações tipadas do grafo (S13);
+  representação exata (flag no record vs. índice de exclusão) decidida em ADR;
+  FORMAT.md atualizado se houver página/campo novo (versão aditiva, política G4).
+- **Cascas:** MCP `remember` ganha `supersedes: [ids]` (retrocompatível); CLI
+  `remember --supersedes ID` (repetível).
+- **Verificação:** `cargo test -p embedmind-core supersede` + testes de protocolo MCP
+  + E2E CLI; crash test se tocar formato.
+
+### S20. Recência na fusão do recall [⬜ pendente]
+
+Como agente, quero que empate semântico penda para o conhecimento mais novo — sem que
+um match forte antigo seja derrubado por novidade irrelevante.
+
+- **Dado** memórias relevantes de idades distintas, **quando** `recall` roda,
+  **então** uma terceira lista entra na fusão RRF k=60 ao lado de vetor e texto: os
+  MESMOS candidatos das buscas de conteúdo (união vetor+texto), reordenados por
+  `created_at` decrescente — recência desempata entre o que JÁ é relevante, nunca
+  traz item irrelevante só por ser novo. Só posições de rank, nunca escalas
+  (ADR 0005 preservado: nada a calibrar).
+- **Dado** um match forte antigo (rank 0 em vetor e texto), **então** ele só perde
+  para outro hit de conteúdo comparável — a lista de recência sozinha nunca inverte
+  um domínio de conteúdo (propriedade do RRF: a contribuição máxima de uma lista é
+  `1/(k+1)`).
+- **Default vs. opt-in:** decidir POR MEDIÇÃO no harness — se o recall@10 vs.
+  brute-force regredir além do limiar do BENCHMARKS.md §5 com recência ligada, ela
+  vira opt-in (`recency: true` em Query/MCP/CLI); registrar a decisão e os números
+  em ADR.
+- **Borda:** a lista de recência respeita os mesmos filtros (escopo, tombstone,
+  superseded, metadados, agente) das demais — nunca reintroduz um excluído.
+- **Verificação:** casos de ouro (fato + correção: a correção vem primeiro; match
+  forte antigo vs. novo fraco: o antigo segue primeiro) + property tests da fusão de
+  3 listas + `benches/run_all.sh` antes/depois.
+
+### S21. Curadoria na escrita — near-duplicates no `remember` [⬜ pendente]
+
+Como agente, quero saber NA HORA DE GRAVAR que já existe memória parecida, para
+decidir forget/supersedes/manter — higiene de conflito onde há contexto para julgar.
+
+- **Dado** `remember` de conteúdo similar a memórias existentes, **então** a resposta
+  inclui, além de `{id, project}`, `similar: [{id, content (truncado), score,
+  created_at_micros}]` acima de um limiar de similaridade (valor decidido por medição
+  no corpus do harness, registrado em ADR); lista vazia quando não há parecidos.
+  A gravação SEMPRE acontece — informar, nunca bloquear.
+- **Custo:** reusa o embedding já computado pelo próprio `remember` (zero embedding
+  extra); NFR `remember` p99 < 200 ms fim a fim se mantém.
+- **Borda:** near-duplicates só consideram memórias vivas, não-superseded e do MESMO
+  escopo aplicado; primeira memória do arquivo → `similar: []`.
+- **Cascas:** MCP retorna o campo novo (retrocompatível); CLI imprime aviso legível
+  ("memória parecida existente: <id> — <trecho>").
+- **Verificação:** testes core (limiar, escopo, truncamento) + protocolo MCP + E2E
+  CLI + benchmark do `remember` (p99 dentro do NFR).
+
+### S22. Op-log estruturado do servidor [⬜ pendente]
+
+Como operador (painel/founder), quero observar o que o agente grava e busca — sem
+tocar no arquivo `.mind` (lock exclusivo) e sem poluir o protocolo.
+
+- **Dado** `embedmind serve --op-log <path>`, **então** cada tool call appenda 1 linha
+  JSON (JSONL) com `{ts, tool, args resumidos (query/content truncados ~200 chars),
+  ids retornados, scores, latency_ms, project, isError}`.
+- **Dado** a flag ausente, **então** zero custo e nenhum arquivo criado.
+- **Borda:** falha de escrita no op-log NUNCA falha a tool call (aviso em stderr,
+  resposta normal); stdout permanece canal exclusivo do protocolo (S6).
+- **Borda:** arquivo é append-only e cada linha é JSON independente — um leitor pode
+  tail-ar a partir de qualquer ponto (consumidor imediato: card de memória do Painel
+  Agêntico, tail via SSE).
+- **Verificação:** E2E MCP dirigindo sessão com `--op-log` e validando linhas
+  parseáveis uma a uma, incluindo caso de erro de engine (`isError: true` logado).
+
+---
+
 ## Requisitos não-funcionais consolidados
 
 | Requisito | Alvo | Verificação |

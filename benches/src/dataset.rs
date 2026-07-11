@@ -157,13 +157,33 @@ pub fn materialize(spec: &DatasetSpec, data_dir: &Path) -> io::Result<VectorSet>
 /// `materialize` (real file) and the in-memory harness tests. `store` and the
 /// returned set are guaranteed to hold the *same* vectors, which is what makes
 /// recall@k against them meaningful.
+///
+/// Backlog idea (not started): this calls `Store::remember` once per memory,
+/// each a full commit (embed + HNSW insert + FTS + graph + btree write + WAL
+/// fsync) — measured at ~64 mem/s, so materializing `agent-mem-100k` from
+/// scratch costs ~26 min of ingest alone. A `remember_batch` on the engine
+/// (one transaction/fsync for N drafts) would remove that per-call commit
+/// cost, but only pays off for bulk scenarios — dataset generation exactly
+/// like this, initial import from another system, or a full reindex after
+/// changing embedders — not the product's real hot path (one memory at a
+/// time, incrementally, during a session). Lower priority than anything on
+/// the engine's actual read/write path; also needs a partial-failure story
+/// (today one bad draft rolls back to nothing — a batch of 1000 needs a
+/// deliberate all-or-nothing-vs-best-effort call, not an implementation
+/// detail).
 pub fn ingest_corpus(
     store: &mut Store,
     embedder: &dyn Embedder,
     corpus: &[GenMemory],
 ) -> embedmind_core::Result<VectorSet> {
     let mut entries = Vec::with_capacity(corpus.len());
-    for mem in corpus {
+    for (i, mem) in corpus.iter().enumerate() {
+        // Heartbeat on (unbuffered) stderr: the 100k ingest runs for ~half an
+        // hour with no other output, and from outside that silence is
+        // indistinguishable from a hang.
+        if i > 0 && i % 5_000 == 0 {
+            eprintln!("  ingest: {i}/{} memories", corpus.len());
+        }
         let stored = store.remember(
             MemoryDraft::new(mem.content.clone())
                 .project(mem.project.clone())

@@ -274,6 +274,86 @@ demais; sem toolchain, reporta "not measured".
 
 ---
 
+## Fase FR — Frescor do conhecimento + observabilidade (pré-launch — decisão do founder 2026-07-10)
+
+> Origem: dogfooding via Painel Agêntico — o EmbedMind virou a memória do agente que
+> desenvolve o próprio EmbedMind, e três achados saíram do uso real: o ranking não tem
+> componente temporal (memória defasada vence a correção nova), as relações
+> `contradicts`/`refines` são só navegacionais (o recall não age sobre elas), e não há
+> observabilidade de operações. Decisão do founder: entra ANTES do launch de 11/ago —
+> **"conhecimento versionado" é diferencial de anúncio** que nenhum embarcado tem.
+> Stories: S19–S22 da [spec](01-spec.md). Ordem interna: FR1 antes de FR3 (a resposta
+> de near-dup sugere o fluxo supersedes e filtra superseded); FR2 e FR4 independentes.
+
+### FR0. Docs ao estado real: README/ROADMAP refletindo M2/M3 entregues
+
+O README diz "v0.1 vector-only, full-text/filtros next (M2)", mas S9/S10/S13/S14 estão
+entregues — informação defasada nos docs já induziu erro em consumidores (comprovado em
+10/jul). Atualizar README.md (linha de status, features, tabela de tools, claims de
+roadmap) e ROADMAP.md (marcar 2.3/2.4/2.5 e 3.1/3.2 como ✅; registrar a fase FR como
+direção pré-launch) ao estado real do código. Nada não-entregue prometido como pronto
+(mesma regra do A4); benchmarks citados continuam vindo de `benches/results/`.
+
+- **DoD:** nenhuma claim do README/ROADMAP contradiz o código; fase FR registrada no
+  ROADMAP; quickstart continua copy-paste válido.
+- **Verificação:** revisão cruzada README/ROADMAP vs. `crates/` (S9, S10, S13, S14
+  citadas com evidência de código/teste); `cargo test --workspace` verde (nenhum
+  código de produção muda nesta task).
+
+### FR1. `supersedes` de primeira classe (story S19)
+
+Semântica de versão de conhecimento: `remember(supersedes: [id])` exclui o alvo de todo
+`recall` subsequente preservando-o como histórico navegável (`get` + `related` nos dois
+sentidos). Reusar a infra de relações tipadas do grafo (C1); decisões de design
+(representação flag-no-record vs. índice de exclusão; interação com forget/vacuum;
+cadeias) registradas em ADR; FORMAT.md atualizado se houver campo/página novo (versão
+aditiva, política G4); crash tests cobrindo as páginas tocadas.
+
+- **DoD:** story S19 verde em core, MCP e CLI; ADR escrito; `vacuum` preserva
+  superseded; sem regressão na suite.
+- **Verificação:** `cargo test -p embedmind-core supersede` + testes de protocolo
+  (`embedmind-mcp`) + E2E CLI + `cargo test --workspace`.
+
+### FR2. Recência na fusão do recall (story S20)
+
+Terceira lista na fusão RRF k=60: os candidatos de conteúdo (união vetor+texto)
+reordenados por `created_at` decrescente — desempata pelo mais novo sem derrubar match
+forte antigo (propriedade do RRF; ADR 0005 preservado, só posições de rank). Default
+vs. opt-in decidido POR MEDIÇÃO no harness (limiar do BENCHMARKS.md §5) e registrado
+em ADR com os números.
+
+- **DoD:** story S20 verde; casos de ouro (a correção vence; o match forte antigo não
+  é derrubado por novidade fraca); property tests da fusão de 3 listas; medição
+  antes/depois anexada ao ADR.
+- **Verificação:** `cargo test --workspace` + `benches/run_all.sh` nos dois datasets.
+
+### FR3. Curadoria na escrita — near-duplicates no `remember` (story S21) — depende de FR1
+
+A resposta do `remember` ganha `similar: [{id, content truncado, score,
+created_at_micros}]` acima de um limiar (decidido por medição no corpus do harness,
+registrado em ADR), reusando o embedding já computado do próprio `remember` (zero
+embedding extra). Gravação sempre acontece — informar, nunca bloquear. Depende de FR1:
+a resposta sugere o fluxo supersedes e o filtro exclui superseded.
+
+- **DoD:** story S21 verde em core, MCP e CLI; NFR `remember` p99 < 200 ms mantido
+  (medido); primeira memória → `similar: []`.
+- **Verificação:** `cargo test --workspace` + E2E MCP/CLI + `benches/run_all.sh`
+  (p99 do remember).
+
+### FR4. Op-log estruturado no `serve` (story S22)
+
+`embedmind serve --op-log <path>` — 1 linha JSON (JSONL) por tool call: `{ts, tool,
+args resumidos/truncados ~200 chars, ids, scores, latency_ms, project, isError}`.
+Flag ausente = zero custo; falha de escrita do log nunca falha a tool (aviso em
+stderr); stdout permanece exclusivo do protocolo. Consumidor imediato: card de memória
+do Painel Agêntico (tail via SSE).
+
+- **DoD:** story S22 verde; E2E MCP com `--op-log` validando cada linha como JSON
+  independente, incluindo caso `isError: true`.
+- **Verificação:** `cargo test --workspace` (E2E dos crates mcp/cli).
+
+---
+
 ## Fase C — M3: profundidade — semanas 9–12
 
 ### C1. Camada de grafo simples (item 3.1) [✅ ENTREGUE]

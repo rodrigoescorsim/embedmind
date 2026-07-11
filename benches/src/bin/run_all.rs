@@ -133,10 +133,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             REMEMBER_SAMPLES,
         )?;
         println!(
-            "  done in {:.1}s: recall@10 {:.4}, query p99 {:.2} ms, remember p99 {:.2} ms",
+            "  done in {:.1}s: recall@10 {:.4}, query p99 {:.2} ms (embed {:.2} / engine {:.2}), remember p99 {:.2} ms",
             started.elapsed().as_secs_f64(),
             result.recall.recall_at_k,
             result.query_p99_ms,
+            result.query_embed_p99_ms,
+            result.query_engine_p99_ms,
             result.remember_p99_ms,
         );
 
