@@ -78,6 +78,7 @@ fn main() {
     let full = MemoryRecord {
         id: Ulid::from_parts(1_751_900_000_000, 42),
         tombstone: false,
+        superseded: true, // exercise the S19 flag bit in the corpus
         content: "memória de exemplo com acentuação".to_owned(),
         vec_ref: Some(VecRef {
             page_no: 7,
@@ -102,6 +103,7 @@ fn main() {
     let minimal = MemoryRecord {
         id: Ulid::from_parts(0, 0),
         tombstone: true,
+        superseded: false,
         content: String::new(),
         vec_ref: None,
         project: None,

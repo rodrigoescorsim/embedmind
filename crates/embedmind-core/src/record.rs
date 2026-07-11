@@ -147,6 +147,12 @@ pub struct MemoryRecord {
     /// Soft-delete marker: `forget` sets it, `vacuum` reclaims the space
     /// (`docs/adr/0003`).
     pub tombstone: bool,
+    /// Versioned-knowledge marker (S19, `docs/adr/0013`): set on the target
+    /// of a `remember(supersedes: [id])`. A superseded memory is excluded
+    /// from every recall/search (re-checked against this record at query
+    /// time, like the tombstone) but stays readable via `get`/`related` as
+    /// history — and `vacuum` preserves it, unlike a tombstone.
+    pub superseded: bool,
     /// The memory text.
     pub content: String,
     /// Embedding location; `None` until the vector layer (M1 item 1.3)
@@ -160,9 +166,11 @@ pub struct MemoryRecord {
     pub metadata: BTreeMap<String, Scalar>,
 }
 
-/// Record flags: bit 0 = tombstone. Other bits are reserved (written zero,
-/// ignored on read — FORMAT.md §2).
+/// Record flags: bit 0 = tombstone, bit 1 = superseded (S19, `docs/adr/0013`
+/// — previously reserved-zero, so older files decode as not-superseded).
+/// Other bits are reserved (written zero, ignored on read — FORMAT.md §2).
 const FLAG_TOMBSTONE: u8 = 1;
+const FLAG_SUPERSEDED: u8 = 1 << 1;
 
 const TAG_NULL: u8 = 0;
 const TAG_BOOL: u8 = 1;
@@ -179,7 +187,14 @@ impl MemoryRecord {
         }
         let mut out = Vec::with_capacity(64 + self.content.len());
         out.extend_from_slice(&self.id.to_bytes()); // big-endian per ULID spec
-        out.push(if self.tombstone { FLAG_TOMBSTONE } else { 0 });
+        let mut flags = 0u8;
+        if self.tombstone {
+            flags |= FLAG_TOMBSTONE;
+        }
+        if self.superseded {
+            flags |= FLAG_SUPERSEDED;
+        }
+        out.push(flags);
         put_str(&mut out, &self.content)?;
         let (page_no, slot) = match self.vec_ref {
             Some(v) => (v.page_no, v.slot),
@@ -238,6 +253,7 @@ impl MemoryRecord {
         );
         let flags = r.u8()?;
         let tombstone = flags & FLAG_TOMBSTONE != 0;
+        let superseded = flags & FLAG_SUPERSEDED != 0;
         // Reserved flag bits are ignored on read (FORMAT.md §2).
         let content = r.string("content")?;
         let page_no = r.u64()?;
@@ -285,6 +301,7 @@ impl MemoryRecord {
         Ok(MemoryRecord {
             id,
             tombstone,
+            superseded,
             content,
             vec_ref,
             project,
@@ -382,6 +399,7 @@ mod tests {
         MemoryRecord {
             id: Ulid::from_parts(1_700_000_000_000, 42),
             tombstone: false,
+            superseded: false,
             content: "the founder prefers explicit errors — memória número 1".to_owned(),
             vec_ref: Some(VecRef {
                 page_no: 12,
@@ -409,6 +427,7 @@ mod tests {
         let rec = MemoryRecord {
             id: Ulid::from_parts(0, 0),
             tombstone: true,
+            superseded: false,
             content: String::new(),
             vec_ref: None,
             project: None,
@@ -423,6 +442,29 @@ mod tests {
         let back = MemoryRecord::decode(&bytes).unwrap();
         assert_eq!(back, rec);
         assert!(back.tombstone);
+    }
+
+    #[test]
+    fn roundtrip_superseded_flag_and_old_encodings_decode_not_superseded() {
+        // Both flag bits round-trip independently (S19, docs/adr/0013).
+        let mut rec = sample();
+        rec.superseded = true;
+        let back = MemoryRecord::decode(&rec.encode().unwrap()).unwrap();
+        assert_eq!(back, rec);
+        assert!(back.superseded && !back.tombstone);
+
+        rec.tombstone = true;
+        let back = MemoryRecord::decode(&rec.encode().unwrap()).unwrap();
+        assert!(back.superseded && back.tombstone);
+
+        // Bit 1 was reserved-zero before S19: a record encoded without it
+        // (any pre-S19 file) must decode as not-superseded.
+        let old = sample(); // superseded: false ⇒ bit 1 written zero
+        assert!(
+            !MemoryRecord::decode(&old.encode().unwrap())
+                .unwrap()
+                .superseded
+        );
     }
 
     #[test]

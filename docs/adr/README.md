@@ -6,7 +6,7 @@ conforme convenção do [CLAUDE.md](../../CLAUDE.md).
 
 O [DESIGN.md](../DESIGN.md) §11 mantém a tabela-resumo; a versão completa de cada decisão
 vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvidas
-(próximos números: 0012+).
+(próximos números: 0014+).
 
 | # | Decisão | Status |
 |---|---|---|
@@ -22,5 +22,6 @@ vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvi
 | [0010](0010-teto-de-tamanho-governa-artefato-comprimido.md) | Teto de tamanho (< 40 MB) governa o artefato comprimido de release | Aceito |
 | [0011](0011-full-text-indice-invertido-proprio.md) | Full-text: índice invertido próprio nas páginas (BM25), não tantivy | Aceito |
 | [0012](0012-camada-de-grafo-paginada.md) | Grafo: entidades e relações em páginas próprias, explícitas no `remember` | Aceito |
+| [0013](0013-supersedes-flag-no-record.md) | `supersedes`: flag no record do alvo, exclusão re-verificada no registro | Aceito |
 
 Template: `Status · Contexto · Decisão · Alternativas rejeitadas · Consequências`.

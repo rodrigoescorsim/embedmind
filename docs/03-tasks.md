@@ -300,7 +300,7 @@ direção pré-launch) ao estado real do código. Nada não-entregue prometido c
   citadas com evidência de código/teste); `cargo test --workspace` verde (nenhum
   código de produção muda nesta task).
 
-### FR1. `supersedes` de primeira classe (story S19)
+### FR1. `supersedes` de primeira classe (story S19) [✅ ENTREGUE]
 
 Semântica de versão de conhecimento: `remember(supersedes: [id])` exclui o alvo de todo
 `recall` subsequente preservando-o como histórico navegável (`get` + `related` nos dois
@@ -312,7 +312,12 @@ aditiva, política G4); crash tests cobrindo as páginas tocadas.
 - **DoD:** story S19 verde em core, MCP e CLI; ADR escrito; `vacuum` preserva
   superseded; sem regressão na suite.
 - **Verificação:** `cargo test -p embedmind-core supersede` + testes de protocolo
-  (`embedmind-mcp`) + E2E CLI + `cargo test --workspace`.
+  (`embedmind-mcp`) + E2E CLI + `cargo test --workspace`. ✅
+- **Entrega (jul/2026):** flag no record (bit 1 de `flags`, sem bump de versão —
+  [ADR 0013](adr/0013-supersedes-flag-no-record.md)) + aresta `"supersedes"` no grafo,
+  mesma transação; exclusão re-verificada no registro em toda busca; `vacuum` preserva;
+  `forget` do substituto não ressuscita; crash harness `crash_supersede.rs`; MCP
+  `supersedes: [ids]`, CLI `--supersedes ID` repetível.
 
 ### FR2. Recência na fusão do recall (story S20)
 

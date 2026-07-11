@@ -52,6 +52,12 @@ enum Command {
         /// Navigate back with `embedmind related ID`.
         #[arg(long = "relation", value_name = "KIND=ID")]
         relations: Vec<String>,
+        /// Mark this memory as the new version of an existing one
+        /// (repeatable): the target disappears from every later recall but
+        /// stays readable as history via `embedmind related ID`. The target
+        /// must exist, be live, and belong to the same project.
+        #[arg(long = "supersedes", value_name = "ID")]
+        supersedes: Vec<String>,
     },
     /// Semantic search over everything remembered
     Recall {
@@ -130,7 +136,10 @@ fn run(cli: Cli) -> Result<(), String> {
             global,
             entities,
             relations,
-        } => remember(&file, content, project, global, entities, relations),
+            supersedes,
+        } => remember(
+            &file, content, project, global, entities, relations, supersedes,
+        ),
         Command::Recall {
             query,
             limit,
@@ -181,6 +190,7 @@ fn serve(file: &Path) -> Result<(), String> {
         .map_err(|e| format!("transport error: {e}"))
 }
 
+#[allow(clippy::too_many_arguments)] // one CLI flag each; a struct would just rename them
 fn remember(
     file: &Path,
     content: String,
@@ -188,8 +198,10 @@ fn remember(
     global: bool,
     entities: Vec<String>,
     relations: Vec<String>,
+    supersedes: Vec<String>,
 ) -> Result<(), String> {
     let relations = parse_relations(&relations)?;
+    let supersedes = parse_supersedes(&supersedes)?;
     let mut store = open(file)?;
     let project = if global {
         None
@@ -203,7 +215,8 @@ fn remember(
     let mut draft = MemoryDraft::new(content)
         .agent("cli")
         .entities(entities.clone())
-        .relations(relations.clone());
+        .relations(relations.clone())
+        .supersedes(supersedes.clone());
     if let Some(project) = &project {
         draft = draft.project(project.clone());
     }
@@ -220,6 +233,9 @@ fn remember(
     }
     for (kind, target) in &relations {
         println!("relation: {kind} -> {target}");
+    }
+    for target in &supersedes {
+        println!("supersedes: {target}");
     }
     Ok(())
 }
@@ -341,9 +357,11 @@ fn related(file: &Path, id: Option<String>, entity: Option<String>) -> Result<()
     for rel in &related {
         let project = rel.project.as_deref().unwrap_or("global");
         // `->` = this memory relates to the neighbor; `<-` = the neighbor
-        // relates to this memory.
+        // relates to this memory. A superseded neighbor is history (S19):
+        // readable here, excluded from recall — say so.
         let arrow = if rel.outgoing { "->" } else { "<-" };
-        println!("{arrow} {:<14} {}  ({project})", rel.kind, rel.id);
+        let marker = if rel.superseded { "  [superseded]" } else { "" };
+        println!("{arrow} {:<14} {}  ({project}){marker}", rel.kind, rel.id);
         println!("        {}", rel.content.replace('\n', "\n        "));
     }
     Ok(())
@@ -465,6 +483,19 @@ fn parse_relations(specs: &[String]) -> Result<Vec<(String, Ulid)>, String> {
         let target = Ulid::from_string(target.trim())
             .map_err(|_| format!("invalid --relation '{spec}': '{target}' is not a memory id"))?;
         out.push((kind.to_string(), target));
+    }
+    Ok(out)
+}
+
+/// Parses `--supersedes ID` arguments into memory ids (S19). Pure argument
+/// transport — existence/liveness/project checks are the engine's, inside
+/// the `remember` transaction.
+fn parse_supersedes(specs: &[String]) -> Result<Vec<Ulid>, String> {
+    let mut out = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let id = Ulid::from_string(spec.trim())
+            .map_err(|_| format!("invalid --supersedes '{spec}': not a memory id"))?;
+        out.push(id);
     }
     Ok(out)
 }

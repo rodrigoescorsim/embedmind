@@ -154,13 +154,17 @@ impl McpServer {
         })
     }
 
-    /// `remember(content, project?, metadata?, entities?, relations?)` →
-    /// `{id, project, entities, relations}` (DESIGN §8). `project` omitted =
-    /// the detected context (item 1.5); explicit `null` = force a global
-    /// memory; explicit string = that project. `entities`/`relations` are the
-    /// explicit graph layer (S13, `docs/adr/0012`): caller-provided, never
-    /// extracted — a relation whose target does not exist (or was forgotten)
-    /// is a tool error from the engine, so nothing is stored.
+    /// `remember(content, project?, metadata?, entities?, relations?,
+    /// supersedes?)` → `{id, project, entities, relations, supersedes}`
+    /// (DESIGN §8). `project` omitted = the detected context (item 1.5);
+    /// explicit `null` = force a global memory; explicit string = that
+    /// project. `entities`/`relations` are the explicit graph layer (S13,
+    /// `docs/adr/0012`): caller-provided, never extracted — a relation whose
+    /// target does not exist (or was forgotten) is a tool error from the
+    /// engine, so nothing is stored. `supersedes` (S19, `docs/adr/0013`)
+    /// marks each listed memory as the previous version of this one: hidden
+    /// from every later recall, still readable via `related`/history. The
+    /// shell only parses — target validation lives in the engine.
     #[allow(clippy::type_complexity)]
     fn tool_remember(&mut self, args: &Value) -> Result<Result<Value, String>, (i64, String)> {
         let content = args.get("content").and_then(Value::as_str).ok_or((
@@ -238,6 +242,27 @@ impl McpServer {
             }
             draft = draft.relations(relations.clone());
         }
+        let mut supersedes: Vec<Ulid> = Vec::new();
+        if let Some(value) = args.get("supersedes") {
+            let list = value.as_array().ok_or((
+                INVALID_PARAMS,
+                "remember: 'supersedes' must be an array of memory id strings".to_string(),
+            ))?;
+            for item in list {
+                let id = item.as_str().ok_or((
+                    INVALID_PARAMS,
+                    "remember: 'supersedes' must be an array of memory id strings".to_string(),
+                ))?;
+                let Ok(id) = Ulid::from_string(id) else {
+                    return Err((
+                        INVALID_PARAMS,
+                        "remember: a 'supersedes' id is not a valid ULID".to_string(),
+                    ));
+                };
+                supersedes.push(id);
+            }
+            draft = draft.supersedes(supersedes.clone());
+        }
         Ok(match self.store.remember(draft) {
             Ok(memory) => Ok(json!({
                 "id": memory.id.to_string(),
@@ -246,6 +271,10 @@ impl McpServer {
                 "relations": relations
                     .iter()
                     .map(|(kind, target)| json!({ "kind": kind, "target": target.to_string() }))
+                    .collect::<Vec<Value>>(),
+                "supersedes": supersedes
+                    .iter()
+                    .map(|id| Value::String(id.to_string()))
                     .collect::<Vec<Value>>(),
             })),
             Err(e) => Err(e.to_string()),
@@ -437,6 +466,10 @@ impl McpServer {
                     "id": rel.id.to_string(),
                     "kind": rel.kind,
                     "outgoing": rel.outgoing,
+                    // S19: a superseded neighbor is history — readable here,
+                    // excluded from recall. Surfaced so agents can tell a
+                    // previous version from current knowledge.
+                    "superseded": rel.superseded,
                     "content": rel.content,
                     "project": rel.project,
                     "provenance": {
@@ -642,6 +675,16 @@ fn tools_list() -> Value {
                                             existing ones. A target that does not exist \
                                             (or was forgotten) fails the whole remember. \
                                             Navigate back with related({id})."
+                        },
+                        "supersedes": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional ids of memories this one replaces \
+                                            (versioned knowledge): each target disappears \
+                                            from every later recall but stays readable as \
+                                            history via related({id}). Targets must exist, \
+                                            be live, and belong to the same project — \
+                                            otherwise the whole remember fails."
                         }
                     },
                     "required": ["content"]
