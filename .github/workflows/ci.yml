@@ -6,10 +6,37 @@ on:
   pull_request:
   schedule:
     # Nightly long fuzz pass (docs/TESTING.md §3): 1h per target.
+    # Only effective while the repo is PUBLIC (free minutes): on a private
+    # repo the nightly-gate job below skips it — a completed nightly bills
+    # ~420 min, a fifth of the free plan's 2,000 min/month.
     - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Full run even on a private repo (Windows+macOS matrix + fuzz short pass + python bindings)"
+        type: boolean
+        default: false
+
+# A newer push to the same ref supersedes the in-flight run — cancel it
+# instead of billing both (the 2026-07-10 red-push sequence paid every one).
+# Scheduled runs keep their own group and never cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
   CARGO_TERM_COLOR: always
+
+# ── Economy mode by repo visibility ─────────────────────────────────────────
+# PRIVATE repo → Actions minutes are metered (2,000/month; Windows bills 2×,
+# macOS 10×): PR/push tests shrink to ubuntu-only, the fuzz short pass is
+# skipped (the stable fuzz smoke inside `cargo test` still runs), python
+# bindings run only on pushes to main, and the nightly fuzz is skipped.
+# PUBLIC repo → minutes are free; everything runs exactly as designed, with
+# no workflow edit needed: detection is per-event via
+# github.event.repository.private (nightly uses an API gate — the schedule
+# payload has no reliable repository object).
+# Manual full run at any time:  gh workflow run ci.yml -f full=true
 
 jobs:
   test:
@@ -18,8 +45,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows is a first-class target (founder dogfoods there) — never drop it.
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Windows is a first-class target (founder dogfoods there) — never drop
+        # it from a PUBLIC run. While the repo is private, PR/push feedback is
+        # ubuntu-only (Windows bills 2×, macOS 10×); Windows coverage still
+        # comes from the founder's machine (panel verify_command gate mirrors
+        # fmt+clippy+test there) and from release.yml's full matrix, and the
+        # complete matrix is one `-f full=true` dispatch away.
+        os: ${{ fromJSON((github.event.repository.private == true && inputs.full != true) && '["ubuntu-latest"]' || '["ubuntu-latest", "windows-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -49,8 +81,34 @@ jobs:
   # The fuzz bodies also run a stable smoke pass inside `cargo test`
   # (embedmind-core::fuzz); the job below runs the same bodies
   # coverage-guided with libFuzzer.
+  # The schedule event payload carries no reliable repository object, so the
+  # nightly asks the API whether the repo is public before spending 7h of
+  # runner time. Costs ~1 billable min/night while private — vs ~420 for a
+  # completed nightly fuzz.
+  nightly-gate:
+    name: nightly gate (fuzz only when repo is public)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    outputs:
+      public: ${{ steps.vis.outputs.public }}
+    steps:
+      - id: vis
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "public=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private | not')" >> "$GITHUB_OUTPUT"
+
   fuzz:
     name: fuzz (${{ github.event_name == 'schedule' && 'nightly, 1h/target' || 'short pass' }})
+    needs: nightly-gate
+    # Nightly: only when the gate confirms the repo is public. Short pass
+    # (push/PR): public repo or explicit full dispatch — on a private repo the
+    # stable fuzz smoke inside `cargo test` still covers the fuzz bodies.
+    # !cancelled() lets the job run on push/PR where nightly-gate is skipped.
+    if: >-
+      ${{ !cancelled() && (
+        (github.event_name == 'schedule' && needs.nightly-gate.outputs.public == 'true') ||
+        (github.event_name != 'schedule' && (github.event.repository.private == false || inputs.full == true))
+      ) }}
     runs-on: ubuntu-latest
     env:
       # cargo-fuzz precisa de nightly (flags -Z), mas o rust-toolchain.toml da
@@ -97,7 +155,16 @@ jobs:
   # per-platform wheels + pytest live in the release workflow.
   python-bindings:
     name: python bindings
-    if: github.event_name != 'schedule'
+    # One of the most expensive ubuntu jobs here (release build of the CLI +
+    # wheel). While the repo is private, PR feedback is deferred to the push
+    # on main after merge (or a `-f full=true` dispatch); public repo runs it
+    # on every PR as designed.
+    if: >-
+      ${{ github.event_name != 'schedule' && (
+        github.event.repository.private == false ||
+        github.event_name == 'push' ||
+        inputs.full == true
+      ) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -49,6 +49,12 @@ on:
         type: boolean
         default: false
 
+# A newer push to the same ref supersedes the in-flight guard — cancel it
+# instead of billing both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -58,6 +64,13 @@ permissions:
 jobs:
   regression-guard:
     name: perf regression guard (BENCHMARKS.md §5)
+    # Economy mode while the repo is PRIVATE (metered Actions minutes): the
+    # guard skips PRs — nearly every agent PR touches embedmind-core, and a
+    # guard run is several ubuntu minutes — and still runs on every matching
+    # push to main, so the rolling baseline keeps advancing and a regression
+    # is caught at merge time. PUBLIC repo (free minutes) restores per-PR
+    # feedback automatically. Manual run: gh workflow run bench.yml
+    if: github.event_name != 'pull_request' || github.event.repository.private == false
     runs-on: ubuntu-latest
     # Materializing 10k memories (ONNX embedding, CPU-only) + the suite itself
     # is minutes on a shared runner; bound it well below the 6h default.
