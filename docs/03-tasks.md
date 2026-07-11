@@ -383,6 +383,22 @@ do Painel Agêntico (tail via SSE).
   com `isError: true` + campo `error`; falha de escrita só avisa em stderr
   (testado com sink que sempre falha); falha ao ABRIR o log é erro de startup.
 
+### FR5. Relatório de uso — `embedmind report` (story S23) [✅ ENTREGUE]
+
+`embedmind report [--op-log <path>] [--since N] [--json]` — a resposta de confiança
+ao usuário ("a memória está sendo usada?"): sessões, recalls servidos, contadores
+por memória (top recalladas + peso morto) e latências, agregados do op-log e
+juntados com o arquivo. `--json` = primeira saída estruturada do CLI.
+
+- **DoD:** story S23 verde; unit tests do agregador + E2E CLI/MCP.
+- **Verificação:** `cargo test --workspace`. ✅
+- **Entrega (jul/2026):** módulo `report` no `embedmind-mcp` (agregador ao lado do
+  escritor do formato, `oplog`); linha `{tool:"session"}` no initialize do serve
+  (conta sessões; testes de op-log atualizados para o novo contrato); subcomando
+  `report` no CLI (join com o store via `iter()`/preview; degrada sem op-log).
+  Decisão: contadores DERIVADOS do log, sem coluna nova no record — formato do
+  .mind intocado, recall segue leitura pura.
+
 ---
 
 ## Fase FT — Otimização do full-text (pré-launch — decisão do founder 2026-07-11)

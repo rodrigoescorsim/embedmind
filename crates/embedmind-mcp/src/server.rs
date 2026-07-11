@@ -124,6 +124,7 @@ impl McpServer {
         {
             self.agent = name.to_string();
         }
+        self.log_session();
         let requested = params.get("protocolVersion").and_then(Value::as_str);
         let version = match requested {
             Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v,
@@ -137,6 +138,28 @@ impl McpServer {
                 "version": env!("CARGO_PKG_VERSION"),
             },
         })
+    }
+
+    /// Appends one `"session"` op-log line when a client completes
+    /// `initialize` (S23): same shape as every tool line — one format for
+    /// readers — with the client name in `args`. This is what makes
+    /// "N sessions" countable in `embedmind report`; `"session"` cannot
+    /// collide with a real tool line because `tools/call` rejects the name
+    /// as unknown (and would log it with `isError: true`).
+    fn log_session(&mut self) {
+        let Some(op_log) = &mut self.op_log else {
+            return;
+        };
+        op_log.append(&json!({
+            "ts": now_micros(),
+            "tool": "session",
+            "args": { "client": self.agent },
+            "ids": [],
+            "scores": [],
+            "latency_ms": 0.0,
+            "project": self.project,
+            "isError": false,
+        }));
     }
 
     /// Dispatches one `tools/call`. Unknown tool / malformed arguments are
@@ -203,16 +226,10 @@ impl McpServer {
             Ok(Err(engine_error)) => (Vec::new(), Vec::new(), Some(engine_error.as_str())),
             Err((_, protocol_error)) => (Vec::new(), Vec::new(), Some(protocol_error.as_str())),
         };
-        // Same epoch-microseconds convention as `created_at_micros`; a clock
-        // before 1970 yields 0 rather than a panic (workspace lint).
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
-            .unwrap_or(0);
         // Milliseconds with microsecond precision — readable and sortable.
         let latency_ms = (elapsed.as_secs_f64() * 1_000_000.0).round() / 1000.0;
         let mut entry = json!({
-            "ts": ts,
+            "ts": now_micros(),
             "tool": tool,
             "args": summarize_args(args),
             "ids": ids,
@@ -650,6 +667,15 @@ impl McpServer {
             Err(e) => Err(e.to_string()),
         })
     }
+}
+
+/// Current time as epoch microseconds — the `created_at_micros` convention.
+/// A clock before 1970 yields 0 rather than a panic (workspace lint).
+fn now_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// Truncation cap for free-text arguments in op-log lines (S22): the log is

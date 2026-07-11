@@ -16,8 +16,10 @@
 
 pub mod oplog;
 pub mod project;
+pub mod report;
 pub mod server;
 
 pub use oplog::OpLog;
 pub use project::detect_project;
+pub use report::{UsageReport, aggregate};
 pub use server::McpServer;
