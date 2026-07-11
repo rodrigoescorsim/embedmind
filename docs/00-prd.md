@@ -58,7 +58,9 @@ Linha do tempo concreta (M1 iniciado em 07/jul/2026): **launch público dia 35 �
 11/ago/2026 (hard stop)** · alarme "repo ainda privado" dia 45 ≈ 21/ago · **go/no-go dia
 90 ≈ 05/out/2026**.
 
-Métricas do go/no-go (~7 semanas pós-launch):
+Métricas do go/no-go (~7 semanas pós-launch) — snapshot sob demanda com
+`./tools/go-no-go-report.sh [--launch-date YYYY-MM-DD]` (tabela + classificação +
+regra de decisão calculadas):
 
 | Métrica | 🔴 Fraco | 🟡 Bom | 🟢 Forte | O que mede |
 |---|---|---|---|---|
