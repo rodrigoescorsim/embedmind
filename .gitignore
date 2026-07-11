@@ -21,3 +21,5 @@ benches/data/
 # published only when a release is cut (docs/BENCHMARKS.md §4 rule 3) by
 # force-adding the specific file — the dev-run noise stays out of the tree.
 benches/results/
+# segredos locais (linha gravada pelo Painel Agentico)
+.env
