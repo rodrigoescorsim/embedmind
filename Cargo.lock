@@ -354,6 +354,7 @@ dependencies = [
  "embedmind-core",
  "libsqlite3-sys",
  "rusqlite",
+ "serde_json",
  "sysinfo",
  "ulid",
  "zvec-rust",

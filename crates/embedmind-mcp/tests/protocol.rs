@@ -948,6 +948,46 @@ fn recall_expand_related_pulls_connected_context() {
     );
 }
 
+/// S20: `recall` accepts `recency: bool` and plumbs it through to the engine
+/// — the tie-break math itself is covered exhaustively in
+/// `embedmind-core`'s `recall.rs` unit/property tests and `tests/recall.rs`
+/// end-to-end tests; this just proves the protocol shell doesn't swallow the
+/// parameter and rejects a non-boolean value.
+#[test]
+fn recall_recency_flag_is_accepted_and_type_checked() {
+    let responses = roundtrip(
+        embedding_store(),
+        &[
+            call(
+                1,
+                "remember",
+                json!({ "content": "the cat sat on the mat" }),
+            ),
+            call(
+                2,
+                "recall",
+                json!({ "query": "a feline resting", "recency": true }),
+            ),
+            call(
+                3,
+                "recall",
+                json!({ "query": "a feline resting", "recency": "yes" }),
+            ),
+        ],
+    );
+    let hits = responses[1]["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "recall with recency: true must still return hits"
+    );
+    assert!(
+        responses[2].get("error").is_some(),
+        "a non-boolean recency value must be a protocol error"
+    );
+}
+
 #[test]
 fn invalid_scope_is_a_protocol_error() {
     let responses = roundtrip(

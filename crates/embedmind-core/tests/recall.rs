@@ -256,6 +256,205 @@ fn recall_without_embedder_is_a_typed_error() {
     );
 }
 
+/// S20 golden case (`docs/01-spec.md`): a fact and its correction, phrased
+/// distinctly enough that each wins rank 0 in a different content list
+/// (vector vs. text) — a genuine content tie, since each has one rank-0 and
+/// one rank-1 contribution, identical either way. With `recency` on, the tie
+/// breaks toward the newer memory (the correction).
+#[test]
+fn recency_breaks_a_genuine_content_tie_toward_the_newer_memory() {
+    let (_vfs, mut store) = store();
+    let original = store
+        .remember(MemoryDraft::new(
+            "the deploy runbook says restart the worker process before the scheduler process",
+        ))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let correction = store
+        .remember(MemoryDraft::new(
+            "deploy runbook correction: restart the scheduler process before the worker process",
+        ))
+        .unwrap();
+
+    let hits = store
+        .recall(
+            Query::new("deploy runbook restart order worker scheduler process")
+                .recency(true)
+                .limit(5),
+        )
+        .unwrap();
+    assert!(hits.len() >= 2, "both memories must be recalled");
+    let without_recency = store
+        .recall(Query::new("deploy runbook restart order worker scheduler process").limit(5))
+        .unwrap();
+    // This golden case only holds when the two memories are a genuine content
+    // tie (equal fused score without recency) — assert the precondition so a
+    // future embedding-model change fails loudly here instead of silently
+    // testing the wrong scenario.
+    let score_of = |hits: &[_], id| {
+        hits.iter()
+            .find(|h: &&embedmind_core::api::Recalled| h.id == id)
+            .map(|h| h.score)
+    };
+    assert_eq!(
+        score_of(&without_recency, original.id),
+        score_of(&without_recency, correction.id),
+        "precondition: this golden case needs a genuine content-score tie"
+    );
+    assert_eq!(
+        hits[0].id, correction.id,
+        "a genuine content tie must break toward the newer memory when recency is on"
+    );
+    assert_eq!(hits[1].id, original.id);
+}
+
+/// S20 edge case (`docs/01-spec.md`): word-for-word identical content is *not*
+/// the "tied relevance" scenario recency is meant to break — with identical
+/// text, the store's own vector/BM25 indexes consistently rank the
+/// first-inserted memory at rank 0 in *both* content lists (two content
+/// contributions), which by the RRF property this story preserves must beat
+/// a rank-1-content-plus-rank-0-recency challenger (`recall.rs` module docs,
+/// `old_strong_match_beats_new_weak_match`). So identical re-statements are
+/// exactly the "strong old match must not be displaced" case, not the
+/// "genuine tie" case — this test locks in that observed, correct behavior.
+#[test]
+fn identical_restatement_does_not_displace_the_first_recorded_one() {
+    let (_vfs, mut store) = store();
+    let text = "the deploy runbook says restart the worker before the scheduler";
+    let original = store.remember(MemoryDraft::new(text)).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store.remember(MemoryDraft::new(text)).unwrap();
+
+    let hits = store
+        .recall(
+            Query::new("deploy runbook restart order worker scheduler")
+                .recency(true)
+                .limit(5),
+        )
+        .unwrap();
+    assert!(hits.len() >= 2, "both identical memories must be recalled");
+    assert_eq!(
+        hits[0].id, original.id,
+        "the memory ranked first in both content lists must not be displaced by recency alone"
+    );
+}
+
+/// S20 golden case: a strong old match (semantically on-topic, established)
+/// must not be displaced by a newer memory that is only weakly related — the
+/// recency list can break ties, never invent relevance.
+#[test]
+fn recency_never_displaces_a_strong_old_match_with_a_weak_new_one() {
+    let (_vfs, mut store) = store();
+    let strong_old = store
+        .remember(MemoryDraft::new(
+            "postgres connection pool exhaustion causes request timeouts under load",
+        ))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .remember(MemoryDraft::new(
+            "the office coffee machine was replaced last week",
+        ))
+        .unwrap();
+
+    let hits = store
+        .recall(
+            Query::new("postgres connection pool exhaustion timeouts")
+                .recency(true)
+                .limit(5),
+        )
+        .unwrap();
+    assert!(!hits.is_empty());
+    assert_eq!(
+        hits[0].id, strong_old.id,
+        "a strong content match must win regardless of a newer, unrelated memory"
+    );
+}
+
+/// S20: recency defaults off — enabling it must never change results for a
+/// query whose content ranking already has a clear winner (no tie to break).
+#[test]
+fn recency_defaults_off_and_is_a_pure_opt_in() {
+    let (_vfs, mut store) = store();
+    store
+        .remember(MemoryDraft::new("the cat sat quietly on the warm mat"))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .remember(MemoryDraft::new("quarterly corporate tax filing deadline"))
+        .unwrap();
+
+    let without = store
+        .recall(Query::new("a small feline resting").limit(5))
+        .unwrap();
+    let with = store
+        .recall(Query::new("a small feline resting").recency(true).limit(5))
+        .unwrap();
+    assert_eq!(
+        without.iter().map(|h| h.id).collect::<Vec<_>>(),
+        with.iter().map(|h| h.id).collect::<Vec<_>>(),
+        "recency only breaks ties; a clear content winner is unaffected"
+    );
+}
+
+/// S20 edge: the recency list must respect the superseded exclusion (S19/FR1)
+/// like every other list — a superseded memory never resurfaces via recency,
+/// no matter how the fusion reorders the candidates.
+#[test]
+fn recency_never_resurfaces_a_superseded_memory() {
+    let (_vfs, mut store) = store();
+    let old_fact = store
+        .remember(MemoryDraft::new(
+            "the api gateway timeout is thirty seconds",
+        ))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let correction = store
+        .remember(
+            MemoryDraft::new("the api gateway timeout is sixty seconds")
+                .supersedes(vec![old_fact.id]),
+        )
+        .unwrap();
+
+    let hits = store
+        .recall(Query::new("api gateway timeout").recency(true).limit(10))
+        .unwrap();
+    assert!(
+        hits.iter().all(|h| h.id != old_fact.id),
+        "a superseded memory must never come back through the recency list"
+    );
+    assert!(hits.iter().any(|h| h.id == correction.id));
+}
+
+/// S20 edge: the recency list must respect the same scope filter as the rest
+/// of recall — a memory excluded by project scope must never resurface just
+/// because it is the newest thing in the file.
+#[test]
+fn recency_respects_scope_and_never_reintroduces_an_excluded_memory() {
+    let (_vfs, mut store) = store();
+    let alpha = store
+        .remember(MemoryDraft::new("uses tokio for async runtime").project("alpha"))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .remember(MemoryDraft::new("uses tokio for async runtime").project("beta"))
+        .unwrap();
+
+    let hits = store
+        .recall(
+            Query::new("async runtime")
+                .scope(Scope::Project("alpha".into()))
+                .recency(true)
+                .limit(10),
+        )
+        .unwrap();
+    assert!(
+        hits.iter().all(|h| h.project.as_deref() == Some("alpha")),
+        "recency must not pull in the newer beta-scoped memory across scope"
+    );
+    assert!(hits.iter().any(|h| h.id == alpha.id));
+}
+
 #[test]
 fn reopening_with_mismatched_model_is_refused() -> Result<()> {
     // Header records model id + dims; opening the same file with a different

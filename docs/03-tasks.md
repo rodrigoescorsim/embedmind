@@ -216,7 +216,7 @@ técnico com diagramas se solicitado — publicação é do founder.
 > vetor pronto. Ambos ferem a credibilidade dos números que o README vai publicar
 > no launch — por isso esta fase precede o dia 35.
 
-### BQ1. `ef_search` proporcional ao tamanho do índice (story S16)
+### BQ1. `ef_search` proporcional ao tamanho do índice (story S16) [✅ ENTREGUE]
 
 Substituir o default fixo (`HNSW_DEFAULT_EF_SEARCH = 64` em `format.rs`) por um
 default que escala com o número de nós do índice — fórmula/patamares decididos por
@@ -259,7 +259,7 @@ zvec vence hoje legitimamente.
   metodologia atualizada em BENCHMARKS.md; regras de honestidade do §4 preservadas.
 - **Verificação:** `benches/run_all.sh` com as features `compare-*` habilitadas.
 
-### BQ4. Concorrente da categoria de produto: Chroma local (story S18)
+### BQ4. Concorrente da categoria de produto: Chroma local (story S18) [✅ ENTREGUE]
 
 Adaptador de comparação para o Chroma em modo local/embedded (versão pinada), medido
 na seção texto→resultado com o mesmo all-MiniLM-L6-v2 — a alternativa real que um dev
@@ -271,6 +271,17 @@ demais; sem toolchain, reporta "not measured".
 - **Verificação:** `benches/run_all.sh` num ambiente com Python + Chroma instalados.
 - **Dependência externa (founder):** Python 3.x disponível no ambiente de benchmark
   com `pip install chromadb` (versão a pinar na task).
+
+Entregue: `Competitor` "Chroma" pinado a `chromadb==1.5.9` em
+`benches/src/competitors.rs`, gated por `--features compare-chroma`. O adapter
+(`run_chroma`) invoca `benches/chroma_bench.py` como subprocess (protocolo JSON via
+stdin/stdout, sem servidor/rede), alimentando os mesmos vetores pré-computados que
+sqlite-vec/zvec recebem (Chroma nunca reembeda) e devolvendo os ids retornados por
+query; o recall@10 é calculado do lado Rust contra o mesmo baseline brute-force, igual
+aos outros dois adapters. Verificado ponta a ponta com `COMPARE="--features
+compare-chroma" ./benches/run_all.sh agent-mem-10k` num ambiente com Python 3.14 +
+chromadb 1.5.9 — linha do Chroma populada na tabela "vs. baselines" (recall@10 0.9936,
+p50 0.70 ms, p99 1.29 ms, 19.7 MiB em disco), com escopo declarado (§4 regra 6).
 
 ---
 
@@ -319,7 +330,7 @@ aditiva, política G4); crash tests cobrindo as páginas tocadas.
   `forget` do substituto não ressuscita; crash harness `crash_supersede.rs`; MCP
   `supersedes: [ids]`, CLI `--supersedes ID` repetível.
 
-### FR2. Recência na fusão do recall (story S20)
+### FR2. Recência na fusão do recall (story S20) [✅ ENTREGUE]
 
 Terceira lista na fusão RRF k=60: os candidatos de conteúdo (união vetor+texto)
 reordenados por `created_at` decrescente — desempata pelo mais novo sem derrubar match

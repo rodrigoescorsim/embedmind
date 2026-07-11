@@ -44,6 +44,18 @@ Pre-v0.1 — under active development, repo private until M1 completes
   verdicts (all passing: recall p99 15.5 ms, peak RAM 281 MiB @ 100k) still run.
   The zvec adapter's directory pre-creation bug (zvec rejects a pre-existing
   collection path) was fixed.
+- **Chroma comparison row (S18 / task BQ4)** — sqlite-vec/zvec are index-layer
+  baselines; Chroma (local/embedded mode) is the product-category competitor a
+  real agent developer weighs, since it also embeds. New `--features
+  compare-chroma` adapter (`benches/src/competitors.rs::run_chroma`) drives a
+  pinned `chromadb==1.5.9` through a Python subprocess
+  (`benches/chroma_bench.py`, JSON over stdin/stdout, no server/network) fed
+  the *same* pre-computed all-MiniLM-L6-v2 vectors every other system in the
+  comparison receives — Chroma's own embedding function is never called.
+  Measured on `agent-mem-10k`: recall@10 0.9936, query p50/p99 0.70/1.29 ms,
+  19.7 MiB on disk — beats EmbedMind on query p99 and on-disk size (recorded
+  in the losses list, BENCHMARKS.md §4). Without the toolchain (Python 3 +
+  `pip install chromadb==1.5.9`) the row honestly reports "not measured".
 - **Python bindings** (S12 / task B5, roadmap 2.5) — the multiplier that
   unlocks LangChain and custom agents. New `bindings/python` crate (PyO3 +
   maturin, its own workspace like `fuzz`) exposes `Store` with

@@ -208,6 +208,9 @@ fn render_metric_table(out: &mut String, results: &[SuiteResult]) {
     row(out, "recall@10 min (worst query)", results, |r| {
         format!("{:.4}", r.recall.min_recall)
     });
+    row(out, "recall@10 p10 / p50 (per query)", results, |r| {
+        format!("{:.4} / {:.4}", r.recall.p10_recall, r.recall.p50_recall)
+    });
     row(out, "query p50 (warm)", results, |r| {
         format!("{:.2} ms", r.query_p50_ms)
     });
@@ -468,6 +471,16 @@ pub fn render_json(
             "      \"recall_at_10_min\": {:.6},",
             r.recall.min_recall
         );
+        let _ = writeln!(
+            out,
+            "      \"recall_at_10_p10\": {:.6},",
+            r.recall.p10_recall
+        );
+        let _ = writeln!(
+            out,
+            "      \"recall_at_10_p50\": {:.6},",
+            r.recall.p50_recall
+        );
         let _ = writeln!(out, "      \"query_p50_ms\": {:.4},", r.query_p50_ms);
         let _ = writeln!(out, "      \"query_p99_ms\": {:.4},", r.query_p99_ms);
         let _ = writeln!(
@@ -661,6 +674,8 @@ mod tests {
                 queries: 200,
                 recall_at_k: 0.994,
                 min_recall: 0.9,
+                p10_recall: 0.95,
+                p50_recall: 1.0,
             },
             query_p50_ms: 1.2,
             query_p99_ms: p99,
@@ -812,6 +827,26 @@ mod tests {
         assert!(js.contains("\"query_engine_p99_ms\": 0.7000"));
         // Still parseable by the regression guard (which ignores the new
         // fields — older baselines without them must keep parsing too).
+        let parsed = crate::regression::parse_run_summary(&js).unwrap();
+        assert_eq!(parsed.datasets.len(), 1);
+    }
+
+    #[test]
+    fn markdown_and_json_carry_the_recall_distribution() {
+        // S16: the harness must report the per-query recall distribution
+        // (min/p10/p50), not just the mean — in both rendered outputs.
+        let env = RunEnv::capture("2026-07-10");
+        let r = fake_result("agent-mem-100k", 100_000, 40.0, 250.0);
+        let md = render_markdown(&env, std::slice::from_ref(&r), &[], None);
+        assert!(md.contains("recall@10 min (worst query)"));
+        assert!(md.contains("recall@10 p10 / p50 (per query)"));
+        assert!(md.contains("0.9500 / 1.0000"), "p10/p50 values rendered");
+
+        let js = render_json(&env, &[r], &[], None);
+        assert!(js.contains("\"recall_at_10_min\": 0.900000"));
+        assert!(js.contains("\"recall_at_10_p10\": 0.950000"));
+        assert!(js.contains("\"recall_at_10_p50\": 1.000000"));
+        // The regression guard still parses the extended JSON.
         let parsed = crate::regression::parse_run_summary(&js).unwrap();
         assert_eq!(parsed.datasets.len(), 1);
     }

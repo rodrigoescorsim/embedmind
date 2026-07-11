@@ -352,6 +352,45 @@ fn recall_filter_narrows_by_metadata() {
     assert!(stderr.contains("invalid --filter"), "{stderr}");
 }
 
+/// S20: `embedmind recall --recency` is accepted and doesn't drop a memory
+/// that content search already found — the tie-break math itself is
+/// exercised exhaustively in `embedmind-core`'s tests; this just proves the
+/// CLI flag reaches the engine end-to-end without breaking the flow.
+#[test]
+fn recall_recency_flag_still_finds_the_memory() {
+    let scratch = Scratch::new("recency");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    let (ok, _, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "remember",
+            "the deploy runbook says restart the worker before the scheduler",
+        ],
+    );
+    assert!(ok, "remember failed: {stderr}");
+
+    let (ok, stdout, stderr) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "recall",
+            "deploy runbook restart order",
+            "--all",
+            "--recency",
+        ],
+    );
+    assert!(ok, "recency recall failed: {stderr}");
+    assert!(
+        stdout.contains("deploy runbook"),
+        "recency must not drop a relevant memory: {stdout}"
+    );
+}
+
 /// S14: `embedmind recall --agent` narrows results by writing agent, and
 /// `embedmind stats` shows the per-agent breakdown of live memories. Two
 /// memories are stored under different agents via `serve` (whose agent is the

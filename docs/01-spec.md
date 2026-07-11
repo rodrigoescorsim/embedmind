@@ -226,7 +226,7 @@ Como usuário, adiciono uma linha no meu agente e ele ganha memória.
   §5) e o workflow `.github/workflows/bench.yml`, que roda em todo PR/push que toca
   engine ou harness e falha o job quando um limiar do §5 é cruzado.
 
-### S16. Recall estável em escala — `ef_search` proporcional ao índice [⬜ pendente]
+### S16. Recall estável em escala — `ef_search` proporcional ao índice [✅ implementada]
 
 Contexto medido (run 2026-07-09, `agent-mem-100k`): recall@10 médio caiu de 0,9953
 (@10k) para 0,9313 e a pior query para **0,20** — causa raiz: `ef_search` default fixo
@@ -267,7 +267,7 @@ compara coisas diferentes sem rotular — corrigir a medição, não o marketing
 - **Verificação:** `benches/run_all.sh` + revisão da tabela gerada; teste do renderer
   cobrindo a decomposição.
 
-### S18. Comparação com concorrente da categoria de produto [⬜ pendente]
+### S18. Comparação com concorrente da categoria de produto [✅ implementada]
 
 sqlite-vec/zvec são baselines de camada de índice; a alternativa que um dev de agente
 realmente considera é um vector store local que também embeda (Chroma em modo
@@ -279,6 +279,13 @@ local/embedded, com o mesmo all-MiniLM-L6-v2, é a briga justa).
   toolchain ausente reporta "not measured", nunca número inventado.
 - **Verificação:** `benches/run_all.sh` com a feature ligada num ambiente com Python
   disponível (dependência externa do founder, como as toolchains de sqlite-vec/zvec).
+
+Implementada: `--features compare-chroma`, adapter em `benches/src/competitors.rs`
+(`run_chroma`) driblando `benches/chroma_bench.py` via subprocess JSON (sem rede/servidor),
+Chroma pinado a `chromadb==1.5.9`. Recebe os mesmos vetores pré-computados que
+sqlite-vec/zvec (nunca reembeda); recall@10 calculado do lado Rust contra o baseline
+brute-force compartilhado. Verificado com `benches/run_all.sh agent-mem-10k` +
+`COMPARE="--features compare-chroma"`.
 
 ---
 
@@ -319,7 +326,7 @@ substitui a antiga no recall, mas a antiga continua navegável como versão ante
 - **Verificação:** `cargo test -p embedmind-core supersede` + testes de protocolo MCP
   + E2E CLI; crash test se tocar formato.
 
-### S20. Recência na fusão do recall [⬜ pendente]
+### S20. Recência na fusão do recall [✅ implementada]
 
 Como agente, quero que empate semântico penda para o conhecimento mais novo — sem que
 um match forte antigo seja derrubado por novidade irrelevante.

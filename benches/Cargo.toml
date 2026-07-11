@@ -13,6 +13,10 @@ publish = false
 [dependencies]
 embedmind-core = { workspace = true }
 ulid = { workspace = true }
+# Chroma adapter protocol only (subprocess JSON, docs/BENCHMARKS.md Sec1) — no
+# network, no product logic; a shell concern like the rest of this crate
+# (DESIGN.md Sec10 reserves that exception for shells, not the engine).
+serde_json = { workspace = true, optional = true }
 # Pure-Rust process introspection for peak-RSS sampling (docs/BENCHMARKS.md §3).
 # Pinned; needs no `unsafe` in our code, so the workspace's `unsafe_code =
 # forbid` stands even though we read OS memory counters.
@@ -61,6 +65,11 @@ default = []
 # comparison columns. See `src/competitors.rs`.
 compare-sqlite-vec = ["dep:rusqlite", "dep:libsqlite3-sys", "dep:cc"]
 compare-zvec = ["dep:zvec-rust"]
+# Chroma (local/embedded mode) via a pinned Python subprocess
+# (`benches/chroma_bench.py`, docs/BENCHMARKS.md Sec1, story S18) — needs
+# Python 3 + `pip install chromadb==<pinned>` on the box (external founder
+# dependency, same shape as the sqlite-vec/zvec native toolchains).
+compare-chroma = ["dep:serde_json"]
 
 # Cargo forbids mixing `lints.workspace = true` with a local `[lints.rust]`
 # override in the same manifest, so the workspace's clippy lints are repeated
