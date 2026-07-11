@@ -333,6 +333,17 @@ impl McpServer {
             query = query.expand_related(expand);
         }
 
+        // Optional recency as a third RRF list (S20, `docs/adr/0014`): ties
+        // among equally-relevant content matches break toward the newer
+        // memory. Absent = off (unchanged ranking).
+        if let Some(recency) = args.get("recency") {
+            let recency = recency.as_bool().ok_or((
+                INVALID_PARAMS,
+                "recall: 'recency' must be a boolean".to_string(),
+            ))?;
+            query = query.recency(recency);
+        }
+
         // Optional provenance filter by writing agent (S14): keep only memories
         // whose recorded agent equals this string. Absent = no agent filtering.
         if let Some(agent) = args.get("agent") {
@@ -755,6 +766,17 @@ fn tools_list() -> Value {
                                             appended as connected context with score 0, \
                                             after the ranked hits and without counting \
                                             against limit.",
+                            "default": false
+                        },
+                        "recency": {
+                            "type": "boolean",
+                            "description": "When true, fuses a third ranking list — the \
+                                            same content candidates reordered by newest \
+                                            first — so ties among equally-relevant \
+                                            matches break toward the newer memory. Never \
+                                            introduces a candidate content search didn't \
+                                            already find, and never displaces a strong \
+                                            older match.",
                             "default": false
                         }
                     },

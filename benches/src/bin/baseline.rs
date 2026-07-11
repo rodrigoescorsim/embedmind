@@ -93,8 +93,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         set.entries.len()
     );
     println!("  queries:      {}", report.queries);
-    println!("  recall@{}:    {:.4}", report.k, report.recall_at_k);
-    println!("  min recall:   {:.4}", report.min_recall);
+    println!("  recall@{}:    {:.4} (mean)", report.k, report.recall_at_k);
+    println!(
+        "  distribution: min {:.4} · p10 {:.4} · p50 {:.4}",
+        report.min_recall, report.p10_recall, report.p50_recall
+    );
     println!("  wall time:    {:.1}s", started.elapsed().as_secs_f64());
     Ok(ExitCode::SUCCESS)
 }

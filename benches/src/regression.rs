@@ -653,6 +653,8 @@ mod tests {
                 queries: 200,
                 recall_at_k: 0.9953,
                 min_recall: 0.9,
+                p10_recall: 0.95,
+                p50_recall: 1.0,
             },
             query_p50_ms: 10.4,
             query_p99_ms: 14.27,

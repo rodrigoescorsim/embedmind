@@ -87,6 +87,47 @@ impl Default for SearchParams {
     }
 }
 
+/// The **default** `ef_search` for an index holding `node_count` nodes
+/// (`docs/adr/0015`, story S16). A fixed `ef_search = 64` is fine at 10k but
+/// under-recalls at 100k: recall@10 fell to ~0.93 mean / 0.20 worst-query at
+/// 100k while query p99 sat far under the 50 ms ceiling — there is latency
+/// budget to buy recall with, but only where the index is actually big.
+///
+/// So the default *scales with the graph size* instead of staying flat. It is
+/// only the default: an explicit [`SearchParams::ef_search`] chosen by the
+/// caller (`Query::ef_search(n)`) is passed through untouched — the scaling
+/// governs solely the value used when the caller expressed no preference.
+///
+/// The shape is a step ladder keyed on `node_count`, not a continuous formula:
+/// the sweep (`benches/sweep_ef_*`, recorded in ADR 0015) showed recall@10 at
+/// 100k rising with `ef` up to a knee and then flattening, so a few measured
+/// plateaus are both simpler to reason about and cheaper to keep honest than a
+/// fitted curve pretending to a precision the noisy tail does not have. Small
+/// indexes keep the fast 64 (their recall is already ≥0.99); the value only
+/// climbs as the corpus grows into the regime where the flat default failed.
+///
+/// This sets the *starting* `ef`; the anti-under-return widening in [`search`]
+/// (×4 per round when a filter leaves the result short, DESIGN §5) still runs
+/// on top of whatever this returns, so a heavily-filtered query is unaffected.
+pub fn default_ef_search(node_count: u64) -> u16 {
+    // Thresholds (inclusive lower bound → ef) chosen from the ef sweep in ADR
+    // 0015. Ordered ascending; the last band whose bound `node_count` clears
+    // wins. Values stay well inside the p99 < 50 ms budget at each size.
+    const LADDER: &[(u64, u16)] = &[
+        (0, HNSW_DEFAULT_EF_SEARCH), // < 25k: the flat default already ≥0.99
+        (25_000, 96),                // 25k–50k: first modest bump
+        (50_000, 160),               // 50k–100k: climbing toward the knee
+        (100_000, 256),              // ≥100k: at/after the recall knee at 100k
+    ];
+    let mut ef = HNSW_DEFAULT_EF_SEARCH;
+    for &(bound, value) in LADDER {
+        if node_count >= bound {
+            ef = value;
+        }
+    }
+    ef
+}
+
 /// L2-normalizes `v` in place (cosine similarity becomes inner product on
 /// normalized vectors, `docs/FORMAT.md` §6). A zero vector is left as-is —
 /// its similarity to anything is then 0.0 by construction, never a NaN
@@ -675,6 +716,34 @@ mod tests {
             vectors.iter().map(|(id, v)| (*id, dot(v, query))).collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         scored.into_iter().take(k).map(|(id, _)| id).collect()
+    }
+
+    #[test]
+    fn default_ef_search_scales_up_with_node_count_and_is_monotonic() {
+        // Small indexes keep the fast flat default; the value climbs by band as
+        // the corpus grows into the regime where a flat 64 under-recalled (S16,
+        // docs/adr/0015). Exact band values are the tuned ADR ladder.
+        assert_eq!(default_ef_search(0), HNSW_DEFAULT_EF_SEARCH);
+        assert_eq!(default_ef_search(10_000), HNSW_DEFAULT_EF_SEARCH);
+        assert_eq!(default_ef_search(24_999), HNSW_DEFAULT_EF_SEARCH);
+        assert_eq!(default_ef_search(25_000), 96);
+        assert_eq!(default_ef_search(50_000), 160);
+        assert_eq!(default_ef_search(100_000), 256);
+        assert_eq!(default_ef_search(500_000), 256, "top band holds past 100k");
+
+        // Never decreases as the index grows — a bigger index must never get a
+        // smaller default beam.
+        let mut prev = 0u16;
+        for n in [
+            0u64, 24_999, 25_000, 49_999, 50_000, 99_999, 100_000, 1_000_000,
+        ] {
+            let ef = default_ef_search(n);
+            assert!(
+                ef >= prev,
+                "ef must be monotonic in node_count; {ef} < {prev} at n={n}"
+            );
+            prev = ef;
+        }
     }
 
     #[test]

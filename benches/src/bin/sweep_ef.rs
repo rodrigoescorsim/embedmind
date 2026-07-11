@@ -1,5 +1,6 @@
 //! `ef_search` sweep over the committed datasets — the measurement behind the
-//! adaptive-`ef_search` decision (story S16 / task BQ1; `docs/adr/0013`).
+//! size-scaled default-`ef_search` decision (story S16 / task BQ1;
+//! `docs/adr/0015`).
 //!
 //! `HNSW_DEFAULT_EF_SEARCH` is a fixed 64 today, and the 2026-07-09 run showed
 //! it does not scale: recall@10 @ 100k fell to 0.9313 mean / 0.20 worst query

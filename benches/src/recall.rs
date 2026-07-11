@@ -26,6 +26,11 @@ use crate::corpus;
 use crate::dataset::{DatasetSpec, VectorSet};
 
 /// A recall measurement over one query set.
+///
+/// The mean alone can hide a catastrophic tail (`docs/BENCHMARKS.md` §3, S16),
+/// so the per-query distribution is reported too: the worst query (`min`) and
+/// the low percentiles (`p10`, `p50`). A default that scales `ef_search` with
+/// index size (S16) is judged on this whole shape, not just the average.
 #[derive(Debug, Clone, Copy)]
 pub struct RecallReport {
     /// `k` in recall@k.
@@ -36,6 +41,13 @@ pub struct RecallReport {
     pub recall_at_k: f64,
     /// Worst single-query recall — surfaces tail misses an average hides.
     pub min_recall: f64,
+    /// 10th-percentile per-query recall (nearest-rank): the bad-but-not-worst
+    /// tail. A good mean with a low p10 means a meaningful slice of queries
+    /// recall poorly, not just one outlier.
+    pub p10_recall: f64,
+    /// Median per-query recall (nearest-rank): the typical query, unmoved by a
+    /// few tail misses in either direction.
+    pub p50_recall: f64,
 }
 
 /// Derives `n` query texts for `spec`, deterministic and disjoint-in-seed from
@@ -68,7 +80,7 @@ pub fn measure(
     k: usize,
 ) -> embedmind_core::Result<RecallReport> {
     let mut total = 0.0f64;
-    let mut min_recall = 1.0f64;
+    let mut per_query: Vec<f64> = Vec::with_capacity(queries.len());
     for text in queries {
         let mut qv = embedder.embed(text)?;
         normalize(&mut qv);
@@ -78,6 +90,9 @@ pub fn measure(
             .map(|h| h.record_id)
             .collect();
 
+        // No explicit `ef_search` here: the recall metric grades the *default*,
+        // which scales with index size (S16, `docs/adr/0015`) — the value a
+        // caller who tunes nothing actually gets.
         let approx: HashSet<Ulid> = store
             .recall_vector(Query::new(text.clone()).limit(k))?
             .into_iter()
@@ -90,13 +105,29 @@ pub fn measure(
         let overlap = exact.intersection(&approx).count();
         let q_recall = overlap as f64 / denom as f64;
         total += q_recall;
-        min_recall = min_recall.min(q_recall);
+        per_query.push(q_recall);
     }
     let queries_n = queries.len().max(1);
     Ok(RecallReport {
         k,
         queries: queries.len(),
         recall_at_k: total / queries_n as f64,
-        min_recall,
+        min_recall: per_query.iter().copied().fold(1.0f64, f64::min),
+        p10_recall: percentile(&per_query, 10.0),
+        p50_recall: percentile(&per_query, 50.0),
     })
+}
+
+/// Nearest-rank percentile of a per-query recall sample, in `[0, 1]`. Same
+/// method as [`crate::metrics::Latencies::percentile_ms`]: the reported value
+/// is always one a query actually scored (no interpolation), the honest choice
+/// for a fixed, modest query set. Empty input yields 0.0.
+fn percentile(samples: &[f64], p: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = ((p / 100.0) * sorted.len() as f64).ceil().max(1.0) as usize;
+    sorted[rank.min(sorted.len()) - 1]
 }

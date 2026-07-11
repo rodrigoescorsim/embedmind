@@ -423,6 +423,10 @@ impl Store {
         let mut vector = embedder.embed(&query.text)?;
         index::normalize(&mut vector);
         let hnsw_meta_page = self.pager.header().hnsw_meta_page;
+        // Resolve the effective ef_search here, where the live node count is
+        // cheap to read: the caller's explicit override wins, else the default
+        // scales with the graph size (S16, `docs/adr/0015`).
+        let node_count = index::node_count(&self.pager, hnsw_meta_page)?;
         let vec_hits = index::search(
             &self.pager,
             hnsw_meta_page,
@@ -430,7 +434,7 @@ impl Store {
             &vector,
             query.limit,
             SearchParams {
-                ef_search: query.ef_search,
+                ef_search: query.effective_ef_search(node_count),
             },
             // Re-check liveness/scope/filters against the record itself: the
             // HNSW graph stores only record ids, never tombstone/project/
@@ -466,8 +470,39 @@ impl Store {
             text_hits.iter().map(|h| h.record_id).collect()
         };
 
+        // --- Optional recency list (S20, `docs/adr/0014`) -----------------
+        // The exact same content candidates (union of vector + text, each
+        // already live/in-scope/filter-checked by `keep`), reordered by
+        // `created_at_micros` descending. This can only *break ties* among
+        // candidates content search already found — it never introduces an
+        // id outside the union, so it can't manufacture a hit out of pure
+        // novelty (RRF's own math backs this: a single list's max
+        // contribution is `1/(RRF_K + 1)`, always less than two content
+        // lists agreeing — `recall.rs` module docs).
+        let recency_ids: Vec<Ulid> = if query.recency {
+            let mut union: Vec<Ulid> = vec_ids
+                .iter()
+                .copied()
+                .chain(text_ids.iter().copied())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            union.sort_by_key(|id| {
+                std::cmp::Reverse(
+                    load(*id)
+                        .ok()
+                        .flatten()
+                        .map(|rec| rec.provenance.created_at_micros)
+                        .unwrap_or(i64::MIN),
+                )
+            });
+            union
+        } else {
+            Vec::new()
+        };
+
         // --- Fuse (RRF k=60, union) --------------------------------------
-        let fused = crate::recall::fuse(&vec_ids, &text_ids, query.limit);
+        let fused = crate::recall::fuse_lists(&[&vec_ids, &text_ids, &recency_ids], query.limit);
         let mut hits = Vec::with_capacity(fused.len());
         for f in fused {
             // Every fused id came from a list whose closure already loaded and
@@ -574,6 +609,7 @@ impl Store {
         let mut vector = embedder.embed(&query.text)?;
         index::normalize(&mut vector);
         let hnsw_meta_page = self.pager.header().hnsw_meta_page;
+        let node_count = index::node_count(&self.pager, hnsw_meta_page)?;
         let vec_hits = index::search(
             &self.pager,
             hnsw_meta_page,
@@ -581,7 +617,7 @@ impl Store {
             &vector,
             query.limit,
             SearchParams {
-                ef_search: query.ef_search,
+                ef_search: query.effective_ef_search(node_count),
             },
             &keep,
         )?;
@@ -1229,12 +1265,23 @@ pub struct Query {
     /// applied in the same `in_scope`/`keep` predicate as scope and tombstone,
     /// so filtered recall keeps the S2 anti-under-return guarantee.
     agent: Option<String>,
-    /// HNSW candidate list size at layer 0 (`docs/adr/0002`): higher trades
-    /// latency for recall.
-    ef_search: u16,
+    /// HNSW candidate list size at layer 0 (`docs/adr/0002`). `None` (the
+    /// default) means "let the index pick": the effective `ef_search` then
+    /// scales with the graph size ([`index::default_ef_search`], S16 /
+    /// `docs/adr/0015`) so recall holds up as the corpus grows. `Some(n)` is a
+    /// caller's explicit override and is honored verbatim — the scaling
+    /// governs only the default, never a value the caller set.
+    ef_search: Option<u16>,
     /// Optional 1-hop graph expansion (S13): when set, each direct hit's
     /// relation neighbors are appended to the results as connected context.
     expand_related: bool,
+    /// Recency as a third RRF list (S20, `docs/adr/0014`): when set, the
+    /// content candidates (union of vector + text) are also ranked by
+    /// `created_at` descending and fused in as a third list, breaking ties
+    /// toward the newer memory without ever displacing a stronger old match
+    /// (RRF property, `recall.rs` module docs). Default and rationale
+    /// decided by measurement — see `docs/adr/0014`.
+    recency: bool,
 }
 
 impl Query {
@@ -1247,8 +1294,9 @@ impl Query {
             scope: Scope::All,
             filters: BTreeMap::new(),
             agent: None,
-            ef_search: crate::format::HNSW_DEFAULT_EF_SEARCH,
+            ef_search: None,
             expand_related: false,
+            recency: false,
         }
     }
 
@@ -1270,11 +1318,23 @@ impl Query {
         self
     }
 
-    /// Overrides the HNSW `ef_search` for this query (default
-    /// [`crate::format::HNSW_DEFAULT_EF_SEARCH`]).
+    /// Overrides the HNSW `ef_search` for this query, sovereign over the
+    /// size-scaled default (S16): once set, the given `ef_search` is used
+    /// verbatim regardless of index size. Left unset, the effective value is
+    /// chosen by [`index::default_ef_search`] from the graph's node count.
     pub fn ef_search(mut self, ef_search: u16) -> Self {
-        self.ef_search = ef_search;
+        self.ef_search = Some(ef_search);
         self
+    }
+
+    /// The `ef_search` to run this query with, given an index of `node_count`
+    /// nodes: the caller's explicit override if set, else the size-scaled
+    /// default ([`index::default_ef_search`], S16 / `docs/adr/0015`). Callers
+    /// in `Store::recall`/`recall_vector` resolve it right before the HNSW
+    /// search, where the live node count is on hand.
+    fn effective_ef_search(&self, node_count: u64) -> u16 {
+        self.ef_search
+            .unwrap_or_else(|| index::default_ef_search(node_count))
     }
 
     /// Adds one metadata filter (S10): a memory is kept only if the value it
@@ -1313,6 +1373,20 @@ impl Query {
     /// graph layer this is a silent no-op.
     pub fn expand_related(mut self, expand: bool) -> Self {
         self.expand_related = expand;
+        self
+    }
+
+    /// Enables recency as a third RRF list (S20, `docs/adr/0014`): the
+    /// content candidates (union of vector + text) are also ranked by
+    /// `created_at` descending and fused in, so ties among equally-relevant
+    /// matches break toward the newer memory. Never introduces a candidate
+    /// content search didn't already find, and — by RRF's own math — a
+    /// single list can't outweigh two content lists agreeing, so a strong
+    /// old match is never displaced by novelty alone. Only affects
+    /// [`Store::recall`]/[`Store::recall_detailed`]; [`Store::recall_vector`]
+    /// (the pure HNSW half) ignores this flag.
+    pub fn recency(mut self, recency: bool) -> Self {
+        self.recency = recency;
         self
     }
 
@@ -1520,6 +1594,30 @@ mod tests {
         )
         .unwrap();
         (vfs, store)
+    }
+
+    #[test]
+    fn explicit_ef_search_is_sovereign_over_the_scaled_default() {
+        // No override: the effective ef is the size-scaled default, so it
+        // changes with node count (S16).
+        let q = Query::new("x");
+        assert_eq!(q.effective_ef_search(0), index::default_ef_search(0));
+        assert_eq!(
+            q.effective_ef_search(100_000),
+            index::default_ef_search(100_000)
+        );
+        assert_ne!(
+            q.effective_ef_search(0),
+            q.effective_ef_search(100_000),
+            "the default must scale with index size"
+        );
+
+        // With an explicit override, the value is honored verbatim regardless
+        // of index size — the scaling governs only the default.
+        let q = Query::new("x").ef_search(48);
+        assert_eq!(q.effective_ef_search(0), 48);
+        assert_eq!(q.effective_ef_search(100_000), 48);
+        assert_eq!(q.effective_ef_search(10_000_000), 48);
     }
 
     /// A tiny deterministic [`Embedder`] for the hybrid-recall golden tests.

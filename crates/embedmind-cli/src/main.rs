@@ -86,6 +86,10 @@ enum Command {
         /// directions), appended after the ranked hits as connected context
         #[arg(long)]
         expand_related: bool,
+        /// Break ties among equally-relevant matches toward the newer
+        /// memory (a third RRF list, never displaces a stronger old match)
+        #[arg(long)]
+        recency: bool,
     },
     /// Navigate the explicit memory graph: neighbors of one memory, or
     /// every memory tagged with an entity
@@ -148,6 +152,7 @@ fn run(cli: Cli) -> Result<(), String> {
             filters,
             agent,
             expand_related,
+            recency,
         } => recall(
             &file,
             query,
@@ -157,6 +162,7 @@ fn run(cli: Cli) -> Result<(), String> {
             filters,
             agent,
             expand_related,
+            recency,
         ),
         Command::Related { id, entity } => related(&file, id, entity),
         Command::Forget { id } => forget(&file, &id),
@@ -250,9 +256,13 @@ fn recall(
     filters: Vec<String>,
     agent: Option<String>,
     expand_related: bool,
+    recency: bool,
 ) -> Result<(), String> {
     let store = open(file)?;
-    let mut query = Query::new(text).limit(limit).expand_related(expand_related);
+    let mut query = Query::new(text)
+        .limit(limit)
+        .expand_related(expand_related)
+        .recency(recency);
     if !filters.is_empty() {
         query = query.filters(parse_filters(&filters)?);
     }
