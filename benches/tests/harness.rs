@@ -111,6 +111,7 @@ fn warm_queries_decompose_into_embed_plus_engine() {
     assert_eq!(warm.total.len(), queries.len());
     assert_eq!(warm.embed.len(), queries.len());
     assert_eq!(warm.engine.len(), queries.len());
+    assert_eq!(warm.vector.len(), queries.len());
 
     // The real model spends measurable time on every query embed.
     assert!(
@@ -125,6 +126,19 @@ fn warm_queries_decompose_into_embed_plus_engine() {
     assert!(
         (total - parts).abs() < 1e-6,
         "embed + engine must reconstruct the total (total {total} ms, parts {parts} ms)"
+    );
+
+    // `vector` (Store::recall_vector) re-embeds through the same `timing`
+    // store — regression guard for a real bug found in this measurement: the
+    // vector-only call's embed slice leaked into the *next* loop iteration's
+    // `take_embed_elapsed()` read, corrupting `embed`/`engine` (the equality
+    // above failed with the leak still present). It must never exceed the
+    // hybrid engine time (same index, strictly less work: no FTS, no fusion).
+    let engine_mean = warm.engine.mean_ms().unwrap();
+    let vector_mean = warm.vector.mean_ms().unwrap();
+    assert!(
+        vector_mean < engine_mean,
+        "vector-only ({vector_mean} ms) must be faster than the hybrid engine ({engine_mean} ms) — it does strictly less work"
     );
 }
 

@@ -664,6 +664,8 @@ mod tests {
             query_embed_p99_ms: 11.0,
             query_engine_p50_ms: 2.3,
             query_engine_p99_ms: 3.4,
+            query_vector_p50_ms: 6.1,
+            query_vector_p99_ms: 8.3,
             cold_open_ms: 0.37,
             cold_first_query_ms: 10.56,
             remember_p50_ms: 7.49,
