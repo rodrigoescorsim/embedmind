@@ -365,7 +365,7 @@ a resposta sugere o fluxo supersedes e o filtro exclui superseded.
 - **Verificação:** `cargo test --workspace` + E2E MCP/CLI + `benches/run_all.sh`
   (p99 do remember).
 
-### FR4. Op-log estruturado no `serve` (story S22)
+### FR4. Op-log estruturado no `serve` (story S22) [✅ ENTREGUE]
 
 `embedmind serve --op-log <path>` — 1 linha JSON (JSONL) por tool call: `{ts, tool,
 args resumidos/truncados ~200 chars, ids, scores, latency_ms, project, isError}`.
@@ -375,7 +375,13 @@ do Painel Agêntico (tail via SSE).
 
 - **DoD:** story S22 verde; E2E MCP com `--op-log` validando cada linha como JSON
   independente, incluindo caso `isError: true`.
-- **Verificação:** `cargo test --workspace` (E2E dos crates mcp/cli).
+- **Verificação:** `cargo test --workspace` (E2E dos crates mcp/cli). ✅
+- **Entrega (jul/2026):** módulo `oplog` no `embedmind-mcp` (`OpLog`: sink
+  append-only + flush por linha, `McpServer::with_op_log`); flag `--op-log` no
+  `embedmind serve` E no binário `embedmind-mcp`; `content`/`query` truncados a
+  200 chars; erro de engine e erro de protocolo em tool despachada ambos logados
+  com `isError: true` + campo `error`; falha de escrita só avisa em stderr
+  (testado com sink que sempre falha); falha ao ABRIR o log é erro de startup.
 
 ---
 

@@ -14,8 +14,10 @@
 //! domain logic — parse request → call `embedmind_core::api` → serialize
 //! response. Replacing MCP with another protocol must stay a ~300-line job.
 
+pub mod oplog;
 pub mod project;
 pub mod server;
 
+pub use oplog::OpLog;
 pub use project::detect_project;
 pub use server::McpServer;

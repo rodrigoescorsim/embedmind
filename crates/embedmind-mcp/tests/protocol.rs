@@ -1319,3 +1319,216 @@ fn remember_similar_is_empty_on_a_kv_only_store() {
         assert!(similar.is_empty(), "{r}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// S22: structured op-log — one JSONL line per tool call.
+
+/// A `Write` handle over a shared buffer: the test hands one clone to the
+/// server as the op-log sink and reads the logged lines from the other.
+#[derive(Clone)]
+struct SharedBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl SharedBuf {
+    fn new() -> SharedBuf {
+        SharedBuf(Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+    fn contents(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl std::io::Write for SharedBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A sink whose every write fails — the disk-full stand-in for the "a log
+/// failure never fails the tool call" contract.
+struct FailingSink;
+
+impl std::io::Write for FailingSink {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("disk full"))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("disk full"))
+    }
+}
+
+/// The S22 story end to end, in-memory: a session with an op-log attached
+/// appends exactly one line per tool call; every line parses as its own JSON
+/// value and carries `{ts, tool, args, ids, scores, latency_ms, project,
+/// isError}`; free-text arguments are truncated; both an engine error and a
+/// protocol error on a dispatched call are logged with `isError: true`.
+#[test]
+fn op_log_appends_one_parseable_json_line_per_tool_call() {
+    use embedmind_mcp::OpLog;
+
+    let long_content = "the launch decision considered many alternatives ".repeat(20);
+    assert!(
+        long_content.chars().count() > 300,
+        "content must exceed the cap"
+    );
+    let requests = [
+        initialize_request(1),
+        call(2, "remember", json!({ "content": long_content })),
+        call(
+            3,
+            "recall",
+            json!({ "query": "launch decision", "scope": "all" }),
+        ),
+        call(4, "stats", json!({})),
+        // Engine error: a well-formed but unknown id — tool result isError.
+        call(5, "related", json!({ "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV" })),
+        // Protocol error on a dispatched call: unknown tool.
+        call(6, "explode", json!({})),
+    ];
+    let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
+    let mut output = Vec::new();
+    let sink = SharedBuf::new();
+    McpServer::new(embedding_store(), Some("demo".to_string()))
+        .with_op_log(OpLog::from_writer(sink.clone(), "test-buffer"))
+        .serve(input.as_bytes(), &mut output)
+        .unwrap();
+
+    // stdout stays pure protocol: every line is a JSON-RPC response.
+    let responses: Vec<Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 6);
+    let remembered_id = responses[1]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(responses[4]["result"]["isError"], true, "{}", responses[4]);
+    assert_eq!(responses[5]["error"]["code"], -32602, "{}", responses[5]);
+
+    // One line per tool call (initialize is not a tool call), each its own
+    // independently parseable JSON value — the tail-from-anywhere contract.
+    let logged = sink.contents();
+    let entries: Vec<Value> = logged
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("every op-log line parses alone"))
+        .collect();
+    assert_eq!(entries.len(), 5, "one line per tool call:\n{logged}");
+    let tools: Vec<&str> = entries
+        .iter()
+        .map(|e| e["tool"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["remember", "recall", "stats", "related", "explode"]);
+
+    for entry in &entries {
+        assert!(entry["ts"].as_u64().unwrap() > 0, "{entry}");
+        assert!(entry["latency_ms"].as_f64().unwrap() >= 0.0, "{entry}");
+        assert_eq!(entry["project"], "demo", "{entry}");
+        assert!(entry["args"].is_object(), "{entry}");
+        assert!(entry["ids"].is_array(), "{entry}");
+        assert!(entry["scores"].is_array(), "{entry}");
+        assert!(entry["isError"].is_boolean(), "{entry}");
+    }
+
+    // remember: the stored id is logged; the content is truncated to ~200
+    // chars (199 + the `…` cut marker at most 201).
+    let remember = &entries[0];
+    assert_eq!(remember["isError"], false);
+    assert_eq!(remember["ids"][0], remembered_id.as_str(), "{remember}");
+    let logged_content = remember["args"]["content"].as_str().unwrap();
+    assert!(
+        logged_content.chars().count() <= 201,
+        "content must be truncated, got {} chars",
+        logged_content.chars().count()
+    );
+    assert!(logged_content.ends_with('…'), "{logged_content}");
+
+    // recall: hit ids and their scores are logged, query short = untouched.
+    let recall = &entries[1];
+    assert_eq!(recall["isError"], false);
+    assert_eq!(recall["args"]["query"], "launch decision");
+    let ids = recall["ids"].as_array().unwrap();
+    let scores = recall["scores"].as_array().unwrap();
+    assert!(
+        ids.iter().any(|id| id == remembered_id.as_str()),
+        "{recall}"
+    );
+    assert_eq!(ids.len(), scores.len(), "{recall}");
+    assert!(scores.iter().all(|s| s.as_f64().unwrap() > 0.0), "{recall}");
+
+    // stats: no ids, no scores, still one line.
+    assert_eq!(entries[2]["isError"], false);
+    assert_eq!(entries[2]["ids"].as_array().unwrap().len(), 0);
+
+    // Engine error: logged, isError true, message carried.
+    let engine_error = &entries[3];
+    assert_eq!(engine_error["isError"], true, "{engine_error}");
+    assert!(
+        engine_error["error"]
+            .as_str()
+            .unwrap()
+            .contains("no live memory"),
+        "{engine_error}"
+    );
+
+    // Protocol error on a dispatched call: also logged, isError true.
+    let protocol_error = &entries[4];
+    assert_eq!(protocol_error["isError"], true, "{protocol_error}");
+    assert!(
+        protocol_error["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool"),
+        "{protocol_error}"
+    );
+}
+
+/// The inviolable rule: an op-log write failure NEVER fails the tool call —
+/// the client gets its normal response and the loop keeps serving.
+#[test]
+fn op_log_write_failure_never_fails_the_tool_call() {
+    use embedmind_mcp::OpLog;
+
+    let requests = [
+        initialize_request(1),
+        call(
+            2,
+            "remember",
+            json!({ "content": "fact under a broken log" }),
+        ),
+        call(3, "stats", json!({})),
+    ];
+    let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
+    let mut output = Vec::new();
+    McpServer::new(kv_store(), None)
+        .with_op_log(OpLog::from_writer(FailingSink, "broken-disk"))
+        .serve(input.as_bytes(), &mut output)
+        .unwrap();
+
+    let responses: Vec<Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 3);
+    // Both tool calls succeeded normally despite every log write failing.
+    assert!(
+        responses[1]["result"]["structuredContent"]["id"].is_string(),
+        "{}",
+        responses[1]
+    );
+    assert!(
+        responses[1]["result"].get("isError").is_none(),
+        "{}",
+        responses[1]
+    );
+    assert!(
+        responses[2]["result"]["structuredContent"]["live_memories"].is_number(),
+        "{}",
+        responses[2]
+    );
+}

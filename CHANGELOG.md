@@ -15,6 +15,17 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Structured op-log on `serve`** (story S22) — `embedmind serve --op-log
+  <path>` (also on the standalone `embedmind-mcp` binary) appends one JSON
+  line (JSONL) per tool call: `{ts (epoch µs), tool, args (content/query
+  truncated to 200 chars), ids, scores, latency_ms, project, isError}`, plus
+  `error` (the message) on failures — both engine errors and protocol errors
+  on a dispatched call. Pure observability for operators (immediate consumer:
+  the Agentic Panel's memory card, tailing via SSE): append-only, flushed per
+  line, every line independently parseable so a reader can tail from any
+  point. Without the flag: zero cost, no file created. A write failure NEVER
+  fails the tool call — warning on stderr, normal response to the client;
+  stdout remains the exclusive MCP protocol channel.
 - **`ef_search` default scaled by index size** (story S16, ADR 0015) —
   `HNSW_DEFAULT_EF_SEARCH = 64` no longer applies unconditionally: the
   default now grows in measured steps with the live `node_count` (64 below

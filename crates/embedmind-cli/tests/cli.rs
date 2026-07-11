@@ -783,3 +783,118 @@ fn remember_warns_about_near_duplicates_but_still_stores() {
         "unrelated content must not warn: {stdout}"
     );
 }
+
+/// S22 end to end: `embedmind serve --op-log <path>` appends one JSON line
+/// per tool call — each line parseable on its own (the tail-from-anywhere
+/// contract), the engine-error case logged with `isError: true` — while
+/// stdout stays the pure MCP protocol channel.
+#[test]
+fn serve_op_log_appends_one_json_line_per_tool_call() {
+    let scratch = Scratch::new("oplog");
+    let store = scratch.store();
+    let op_log = scratch.path().join("ops.jsonl");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_embedmind"))
+        .args([
+            "--file",
+            store.to_str().unwrap(),
+            "serve",
+            "--op-log",
+            op_log.to_str().unwrap(),
+        ])
+        .current_dir(scratch.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("serve must spawn");
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin
+            .write_all(
+                concat!(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"oplog-test","version":"0"}}}"#,
+                    "\n",
+                    r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"remember","arguments":{"content":"the deploy runs on github actions"}}}"#,
+                    "\n",
+                    r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recall","arguments":{"query":"where does the deploy run?","scope":"all"}}}"#,
+                    "\n",
+                    // Engine error: well-formed but unknown id -> isError: true.
+                    r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"related","arguments":{"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}}}"#,
+                    "\n",
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+    drop(child.stdin.take()); // EOF ends the serve loop cleanly
+
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "serve must exit 0 on EOF: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // stdout carried only JSON-RPC responses, all four of them.
+    let responses: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 4);
+    let id = responses[1]["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(responses[3]["result"]["isError"], true, "{}", responses[3]);
+
+    // The op-log: one line per tool call, each one an independent JSON value.
+    let logged = fs::read_to_string(&op_log).expect("op-log file must exist");
+    let entries: Vec<serde_json::Value> = logged
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("every op-log line parses alone"))
+        .collect();
+    assert_eq!(entries.len(), 3, "one line per tool call:\n{logged}");
+
+    for entry in &entries {
+        assert!(entry["ts"].as_u64().unwrap() > 0, "{entry}");
+        assert!(entry["latency_ms"].as_f64().unwrap() >= 0.0, "{entry}");
+        assert!(entry["isError"].is_boolean(), "{entry}");
+        assert!(entry["args"].is_object(), "{entry}");
+    }
+    assert_eq!(entries[0]["tool"], "remember");
+    assert_eq!(entries[0]["isError"], false);
+    assert_eq!(entries[0]["ids"][0], id.as_str(), "{}", entries[0]);
+    assert_eq!(entries[1]["tool"], "recall");
+    assert!(
+        entries[1]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i == id.as_str()),
+        "{}",
+        entries[1]
+    );
+    assert!(
+        !entries[1]["scores"].as_array().unwrap().is_empty(),
+        "recall scores must be logged: {}",
+        entries[1]
+    );
+    // The engine-error call is logged, isError: true, with the message.
+    assert_eq!(entries[2]["tool"], "related");
+    assert_eq!(entries[2]["isError"], true, "{}", entries[2]);
+    assert!(
+        entries[2]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no live memory"),
+        "{}",
+        entries[2]
+    );
+
+    // Without the flag nothing was ever created here (the serve test above
+    // runs flagless); and this run created exactly the file asked for.
+    assert!(op_log.exists());
+}
