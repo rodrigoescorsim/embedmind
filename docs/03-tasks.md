@@ -379,6 +379,91 @@ do Painel Agêntico (tail via SSE).
 
 ---
 
+## Fase FT — Otimização do full-text (pré-launch — decisão do founder 2026-07-11)
+
+> Origem: a task BQ1 (`ef_search` escalonado) isolou que o NFR `recall p99 @ 100k
+> < 50 ms` (medido 1.224,62 ms — 24x acima) NÃO vem da busca vetorial
+> (`Store::recall_vector` mede 19,32 ms no mesmo run — dentro do orçamento) e sim do
+> meio full-text da fusão híbrida: o scan de BM25 decodifica a postings list inteira
+> de cada termo, sem corte antecipado, custo O(tamanho da lista) que domina a 100k.
+> Ver [ADR 0017](adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) para o escopo
+> completo — **profiling obrigatório antes de qualquer otimização estrutural**, bump
+> de `format_version` liberado quando a otimização exigir (aditivo, arquivo antigo
+> continua legível). Stories: S23–S25 da [spec](01-spec.md). **Ordem estritamente
+> sequencial** (ao contrário de BQ/FR): FT2 e FT3 dependem do resultado de FT1; nenhuma
+> task de otimização deve ser derivada/executada antes do relatório de profiling
+> existir — a derivação deve marcar FT2/FT3 com "DEPENDÊNCIA AUSENTE" se rodada fora
+> de ordem.
+
+### FT1. Profiling do meio full-text @ 100k (story S23)
+
+Isolar, com evidência de profiling (não leitura de código), a fração do tempo do
+`recall` híbrido @ 100k gasta em cada fase do full-text: decodificação de postings,
+I/O de página, hashing do `HashMap<Ulid, f32>` de scores, recarga de registro pela
+closure `keep`/`doc_len`. Ferramenta nativa da plataforma (flamegraph via
+`perf`/`samply`/equivalente) sobre `agent-mem-100k` já aquecido; se profiling não
+estiver disponível no ambiente, instrumentação manual com `Instant` ao redor de cada
+fase de `fts::search` é aceitável — o que importa é o número, não a ferramenta.
+Resultado registrado no ADR 0017 (seção "Resultado do profiling") ou arquivo próprio
+referenciado por ele: números concretos por fase.
+
+- **DoD:** story S23 verde — relatório existe, cita números concretos, e ou aponta
+  uma fração dominante (> 60% do tempo do meio full-text) ou registra explicitamente
+  "sem causa dominante clara" (resultado válido que muda a estratégia das próximas
+  tasks — ver ADR 0017 §3).
+- **Verificação:** revisão do relatório contra os números do harness
+  (`query_engine_p50/p99_ms` menos `query_vector_p50/p99_ms` = o alvo do profiling,
+  métrica introduzida no PR #9); `cargo test --workspace` verde (profiling não deve
+  alterar comportamento de produção nesta task).
+- **Atenção:** esta task é SOMENTE leitura/medição — nenhuma otimização entra aqui,
+  mesmo que a causa pareça óbvia durante a investigação. Anotar candidatos para as
+  próximas tasks, não implementar.
+
+### FT2. Early termination no scan de postings (story S24) — depende de FT1
+
+Cortar o scan de BM25 antes de decodificar/pontuar a postings list inteira de um
+termo, quando já há candidatos suficientes para o top-k final. Critério exato do
+corte (limiar de score, contagem de candidatos, ou equivalente) decidido por medição,
+registrado em ADR novo (0018) que referencia o resultado do FT1. Sem mudança de
+`format_version` — só o algoritmo de scan sobre a estrutura já existente. Resultado
+DEVE ser byte-idêntico ao scan completo em qualquer regime (early termination só
+reduz trabalho, nunca muda quais documentos retornam ou sua ordem).
+
+- **Pré-requisito:** ler o relatório da FT1 antes de implementar. Se o profiling
+  apontou outra causa dominante (ex.: I/O de página, não decodificação/scoring), esta
+  task deve ser reavaliada antes de prosseguir — parar com "DEPENDÊNCIA AUSENTE" se o
+  relatório não existir ou não sustentar esta abordagem.
+- **DoD:** story S24 verde; teste de equivalência (resultado idêntico com/sem early
+  termination, corpus pequeno e grande); ADR 0018 escrito com o critério de corte e a
+  justificativa; `benches/run_all.sh --full` mostrando o ganho de
+  `query_engine_p50/p99_ms` @ 100k.
+- **Verificação:** `cargo test --workspace` + `benches/run_all.sh --full` (comparar
+  contra o baseline pré-FT2, não sobrescrever sem registrar o antes/depois).
+
+### FT3. Compressão delta+varint e/ou skip lists nas postings (story S25) — depende de FT1/FT2
+
+Se o profiling (FT1) apontou I/O de página ou volume de bytes decodificados como
+causa relevante, OU o early termination (FT2) sozinho não fechar o NFR
+`recall p99 @ 100k < 50 ms`: comprimir `record_id` como delta+varint nas postings
+(a lista já é ordenada por id) e/ou introduzir uma estrutura de skip (blocos de
+tamanho fixo, pulável sem decodificar) dentro de uma postings list grande. Muda a
+codificação de `FTS_POSTINGS` — bump de `format_version` (aditivo, ADR 0017 §2): um
+arquivo de versão anterior continua legível pelo layout antigo, nunca erro.
+
+- **Pré-requisito:** ler os relatórios/resultados de FT1 e FT2. Se FT2 já fechou o
+  NFR, esta task pode ser adiada (registrar a decisão) — não é obrigatória por
+  princípio, só se o NFR continuar reprovado.
+- **DoD:** story S25 verde; round-trip de leitura/escrita entre `format_version`
+  antigo e novo (arquivo antigo abre normalmente, sem skip list/compressão); crash
+  test cobrindo as páginas `FTS_POSTINGS` no novo layout; `benches/run_all.sh --full`
+  confirmando o NFR `recall p99 @ 100k < 50 ms` — OU, se ainda não fechar, ADR 0017
+  atualizado com os números finais e a decisão do founder (prosseguir vs. aceitar
+  limitação documentada).
+- **Verificação:** `cargo test --workspace` incluindo fuzz do parser novo de
+  `FTS_POSTINGS`; `benches/run_all.sh --full` nos dois datasets.
+
+---
+
 ## Fase C — M3: profundidade — semanas 9–12
 
 ### C1. Camada de grafo simples (item 3.1) [✅ ENTREGUE]
