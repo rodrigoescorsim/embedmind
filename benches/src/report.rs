@@ -229,6 +229,17 @@ fn render_metric_table(out: &mut String, results: &[SuiteResult]) {
             r.query_engine_p50_ms, r.query_engine_p99_ms
         )
     });
+    row(
+        out,
+        "↳ query vector-only p50 / p99 (no FTS/fusion)",
+        results,
+        |r| {
+            format!(
+                "{:.2} / {:.2} ms",
+                r.query_vector_p50_ms, r.query_vector_p99_ms
+            )
+        },
+    );
     row(out, "query first (cold-open)", results, |r| {
         format!("{:.2} ms", r.cold_first_query_ms)
     });
@@ -261,6 +272,10 @@ fn render_metric_table(out: &mut String, results: &[SuiteResult]) {
     let _ = writeln!(
         out,
         "_`remember` latency is end-to-end and includes embedding — the baselines below don't embed, so their ingest is vectors-only and not comparable to this row (BENCHMARKS.md §1)._\n"
+    );
+    let _ = writeln!(
+        out,
+        "_`query vector-only` is `Store::recall_vector` (HNSW half only, no BM25/RRF fusion) on the same query set, timed right after the hybrid call for cache parity — comparable to `engine` above (both exclude embed time). The delta between the two isolates the FTS+fusion cost from everything the vector half pays too._\n"
     );
 }
 
@@ -503,6 +518,16 @@ pub fn render_json(
             "      \"query_engine_p99_ms\": {:.4},",
             r.query_engine_p99_ms
         );
+        let _ = writeln!(
+            out,
+            "      \"query_vector_p50_ms\": {:.4},",
+            r.query_vector_p50_ms
+        );
+        let _ = writeln!(
+            out,
+            "      \"query_vector_p99_ms\": {:.4},",
+            r.query_vector_p99_ms
+        );
         let _ = writeln!(out, "      \"cold_open_ms\": {:.4},", r.cold_open_ms);
         let _ = writeln!(
             out,
@@ -685,6 +710,8 @@ mod tests {
             query_embed_p99_ms: 1.8,
             query_engine_p50_ms: 0.3,
             query_engine_p99_ms: 0.7,
+            query_vector_p50_ms: 0.8,
+            query_vector_p99_ms: p99 * 0.6,
             cold_open_ms: 12.0,
             cold_first_query_ms: 30.0,
             remember_p50_ms: 40.0,

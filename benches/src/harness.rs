@@ -75,6 +75,17 @@ pub struct SuiteResult {
     pub query_engine_p50_ms: f64,
     pub query_engine_p99_ms: f64,
 
+    /// Warm **vector-only** query latency (`Store::recall_vector` — HNSW half,
+    /// no BM25 fusion), over the same `recall_texts` as `query_p50/p99_ms`. Not
+    /// an NFR by itself; it isolates whether a query-latency miss traces to the
+    /// vector half or the full-text half of the hybrid `recall` (BQ, S16
+    /// follow-up: the FTS postings-list scan was found to dominate `query_p99_ms`
+    /// at 100k — this metric proves/disproves that per run instead of by code
+    /// inspection alone). Comparable to `query_engine_p50/p99_ms` (both exclude
+    /// embed time): the delta between the two is exactly the FTS+fusion cost.
+    pub query_vector_p50_ms: f64,
+    pub query_vector_p99_ms: f64,
+
     /// Cold-open: time to `Store::open` the file, and the latency of the very
     /// first `recall` against the freshly opened store.
     pub cold_open_ms: f64,
@@ -139,12 +150,15 @@ pub fn run_suite(
         query_vectors.push(v);
     }
 
-    // --- warm query latency, decomposed embed vs. engine (S17) ---
+    // --- warm query latency, decomposed embed vs. engine vs. vector-only (S17
+    // + BQ/S16 follow-up) ---
     // The engine embeds the query text *inside* `recall`, so a single
     // stopwatch would mix embed + search while the vector-in baselines only
     // pay search. Reopen the store with a [`TimingEmbedder`] so each timed
     // recall splits into its embed half (recorded by the wrapper, nested
-    // inside the timed call) and its engine half (the exact remainder).
+    // inside the timed call) and its engine half (the exact remainder);
+    // `measure_warm_queries` also times a same-query `recall_vector` call
+    // right after, isolating the FTS+fusion cost from the vector half's.
     // Closing the benchmarked store first is required anyway: the engine is
     // single-writer (`docs/adr/0006`), only one handle may hold the file.
     store.close()?;
@@ -183,6 +197,8 @@ pub fn run_suite(
         query_embed_p99_ms: warm.embed.p99_ms().unwrap_or(0.0),
         query_engine_p50_ms: warm.engine.p50_ms().unwrap_or(0.0),
         query_engine_p99_ms: warm.engine.p99_ms().unwrap_or(0.0),
+        query_vector_p50_ms: warm.vector.p50_ms().unwrap_or(0.0),
+        query_vector_p99_ms: warm.vector.p99_ms().unwrap_or(0.0),
         cold_open_ms,
         cold_first_query_ms,
         remember_p50_ms: remember.p50_ms().unwrap_or(0.0),
@@ -266,6 +282,14 @@ pub struct WarmQueryLatencies {
     pub total: Latencies,
     pub embed: Latencies,
     pub engine: Latencies,
+    /// `Store::recall_vector` (HNSW half only, no BM25/RRF fusion) timed right
+    /// after the hybrid call for the same query text, so both hit an equally
+    /// warm page cache. Comparable to `engine` (both exclude embed time): the
+    /// delta isolates the FTS+fusion cost from everything the vector half pays
+    /// too (BQ, S16 follow-up — the FTS postings-list scan was found to
+    /// dominate `engine` at 100k; this proves/disproves that per run instead
+    /// of by code inspection alone).
+    pub vector: Latencies,
     /// Peak RSS observed during the query load, MiB.
     pub peak_rss_mib: f64,
 }
@@ -301,6 +325,7 @@ pub fn measure_warm_queries(
         total: Latencies::with_capacity(texts.len()),
         embed: Latencies::with_capacity(texts.len()),
         engine: Latencies::with_capacity(texts.len()),
+        vector: Latencies::with_capacity(texts.len()),
         peak_rss_mib: 0.0,
     };
     let mut rss = RssSampler::new();
@@ -316,6 +341,21 @@ pub fn measure_warm_queries(
         out.engine
             .push(total.checked_sub(embed).unwrap_or(Duration::ZERO));
         rss.sample();
+
+        // Vector-only half of the same query, right after the hybrid call so
+        // both hit an equally warm page cache — isolates the FTS/fusion cost
+        // that `engine` includes and this does not. `recall_vector` re-embeds
+        // the text through the same `timing`-wrapped store, so subtract that
+        // embed slice the same way `engine` does above — otherwise `vector`
+        // would include embed time twice (once already in the total it's
+        // compared against) and the accumulator would leak into the next
+        // loop iteration's `embed`/`engine` reading.
+        let v_started = Instant::now();
+        let _ = store.recall_vector(Query::new(t.clone()).limit(k))?;
+        let v_total = v_started.elapsed();
+        let v_embed = timing.take_embed_elapsed();
+        out.vector
+            .push(v_total.checked_sub(v_embed).unwrap_or(Duration::ZERO));
     }
     out.peak_rss_mib = rss.peak_mib();
     Ok(out)
