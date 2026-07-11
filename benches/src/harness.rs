@@ -100,26 +100,34 @@ pub struct SuiteResult {
     pub query_vectors: Vec<Vec<f32>>,
 }
 
+/// Tunables for [`run_suite`] that aren't derived from the dataset or store.
+#[derive(Debug, Clone, Copy)]
+pub struct SuiteOptions {
+    /// Fixed query count for the warm latency percentiles (BENCHMARKS.md §3
+    /// asks for ~1k).
+    pub warm_queries: usize,
+    /// Bounds the one-at-a-time `remember` timing so a 100k run stays a few
+    /// seconds of extra ingest.
+    pub remember_samples: usize,
+    /// Whether warm queries run with `Query::recency` on (S20, `docs/adr/0014`).
+    pub recency: bool,
+}
+
 /// Runs the full metric suite for `spec` against an already-materialized
 /// dataset: `store` opened from `spec.mind_path`, `set` its parallel vectors.
-///
-/// `warm_queries` is the fixed query count for the warm latency percentiles
-/// (BENCHMARKS.md §3 asks for ~1k); `remember_samples` bounds the one-at-a-time
-/// `remember` timing so a 100k run stays a few seconds of extra ingest.
 pub fn run_suite(
     spec: &DatasetSpec,
     data_dir: &Path,
     store: Store,
     set: &VectorSet,
     embedder: &Arc<dyn Embedder>,
-    warm_queries: usize,
-    remember_samples: usize,
+    opts: SuiteOptions,
 ) -> embedmind_core::Result<SuiteResult> {
     let stats = store.stats()?;
     let model_id = stats.embedding_model_id.clone().unwrap_or_default();
 
     // --- recall@10 (fixed query set, same as Part 1's baseline binary) ---
-    let recall_texts = recall::query_texts(spec, warm_queries);
+    let recall_texts = recall::query_texts(spec, opts.warm_queries);
     let recall_report = recall::measure(&store, set, embedder.as_ref(), &recall_texts, K)?;
 
     // Pre-embed the query set once; both the warm-latency loop and the
@@ -146,7 +154,7 @@ pub fn run_suite(
         ..StoreOptions::default()
     };
     let warm_store = Store::open_with(Arc::new(RealVfs), &spec.mind_path(data_dir), warm_opts)?;
-    let warm = measure_warm_queries(&warm_store, &timing, &recall_texts, K)?;
+    let warm = measure_warm_queries(&warm_store, &timing, &recall_texts, K, opts.recency)?;
 
     // --- cold-open: close the warm store, then open the file fresh and time
     // open + first query — releasing the handle also drops the pager cache,
@@ -159,7 +167,7 @@ pub fn run_suite(
     // Ingest a fresh sample corpus into a scratch store so we never mutate the
     // benchmarked dataset. Deterministic but seed-disjoint from the corpus.
     let (remember, ingest_per_sec, rss_ingest_mib) =
-        measure_ingest(data_dir, embedder, remember_samples)?;
+        measure_ingest(data_dir, embedder, opts.remember_samples)?;
 
     Ok(SuiteResult {
         dataset: spec.name,
@@ -269,17 +277,23 @@ pub struct WarmQueryLatencies {
 /// decomposition subtracts the wrapper's recorded embed time from the timed
 /// call, so with a different embedder the engine half would silently equal
 /// the total. `run_suite` constructs the pair that way.
+///
+/// `recency` toggles `Query::recency` (S20, `docs/adr/0014`) on every timed
+/// query — the ADR's latency measurement runs this function once with each
+/// value and diffs the `engine` percentiles, isolating the extra list's cost
+/// from everything else (embedding, cache warmth, dataset).
 pub fn measure_warm_queries(
     store: &Store,
     timing: &TimingEmbedder,
     texts: &[String],
     k: usize,
+    recency: bool,
 ) -> embedmind_core::Result<WarmQueryLatencies> {
     // Warm the cache with a throwaway pass so p50/p99 reflect steady state,
     // not first-touch page faults (the cold-open metric captures those
     // separately).
     for t in texts.iter().take(texts.len().min(32)) {
-        let _ = store.recall(Query::new(t.clone()).limit(k))?;
+        let _ = store.recall(Query::new(t.clone()).limit(k).recency(recency))?;
     }
     let _ = timing.take_embed_elapsed(); // discard the warm-up's embeds
 
@@ -292,7 +306,7 @@ pub fn measure_warm_queries(
     let mut rss = RssSampler::new();
     for t in texts {
         let started = Instant::now();
-        let _ = store.recall(Query::new(t.clone()).limit(k))?;
+        let _ = store.recall(Query::new(t.clone()).limit(k).recency(recency))?;
         let total = started.elapsed();
         let embed = timing.take_embed_elapsed();
         out.total.push(total);
