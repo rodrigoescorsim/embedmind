@@ -3,19 +3,24 @@
 > **Your agent forgets everything between sessions. This fixes that.**
 > One file, local, fast, no server. Rust.
 
-**Status: v0.1** — semantic (vector) memory, crash-safe single file, MCP server + CLI.
-Full-text search and metadata filters are next (M2); a graph layer follows (M3). See
-[ROADMAP.md](ROADMAP.md).
+**Status: v0.1** — hybrid (vector + full-text) memory with metadata filters, a graph
+layer (entities/relations, `supersedes` for versioned knowledge) and basic provenance,
+crash-safe single file, MCP server + CLI. See [ROADMAP.md](ROADMAP.md) for what shipped
+and what's next.
 
-EmbedMind is **persistent memory for AI agents** — an embedded storage engine (vector search today; full-text and graph on the roadmap) packaged as an **MCP memory server + CLI**. Think *SQLite for agent memory*: a single crash-safe file on your machine, no server process, no cloud, no Python environment.
+EmbedMind is **persistent memory for AI agents** — an embedded storage engine (vector +
+full-text search, metadata filters, and a graph layer, all shipped) packaged as an **MCP
+memory server + CLI**. Think *SQLite for agent memory*: a single crash-safe file on your
+machine, no server process, no cloud, no Python environment.
 
 ```
 ┌─────────────────────────────────────────────────┐
 │  Your agent (Claude Code, Cursor, custom, ...)  │
-│        │ MCP: remember / recall / forget        │
+│   │ MCP: remember / recall / related / forget   │
 │  ┌─────▼─────────────────────────────────────┐  │
 │  │  EmbedMind engine (Rust, in-process)      │  │
-│  │  vector (HNSW) now · full-text + graph →  │  │
+│  │  vector (HNSW) + full-text (BM25, RRF     │  │
+│  │  fusion) + graph (entities/relations)     │  │
 │  │  → one file: project.mind                 │  │
 │  └───────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────┘
@@ -29,7 +34,9 @@ EmbedMind's answer:
 
 - **Single file** — your agent's entire memory is one portable, crash-safe file (WAL-backed).
 - **In-process** — no server, no Docker, no ports. The engine lives inside the MCP server binary.
-- **Semantic retrieval today, hybrid on the roadmap** — vector similarity (paged HNSW) with automatic chunking of long memories now; full-text + metadata filters next (M2), then a lightweight graph layer (entities and relations, M3).
+- **Hybrid retrieval, shipped** — vector similarity (paged HNSW, automatic chunking of long memories) fused with full-text BM25 via Reciprocal Rank Fusion, plus metadata filters on `recall`.
+- **Graph layer, shipped** — explicit entities and typed relations between memories, `related` navigation, 1-hop expansion in `recall`, and `supersedes` for first-class versioned knowledge (a correction retires the old memory from recall while keeping it navigable as history).
+- **Basic provenance, shipped** — every memory records which agent/session wrote it; `recall` can filter by agent and `stats` breaks counts down by agent.
 - **Local by default** — nothing ever leaves your machine. Built for the local-first wave, usable in air-gapped environments.
 - **Rust** — predictable memory footprint, one static binary per platform.
 
@@ -79,10 +86,11 @@ Your agent now has these tools:
 
 | Tool | What it does |
 |---|---|
-| `remember` | Store a memory (text + metadata; embedded and indexed automatically, long text chunked transparently). Optionally tag explicit `entities` and typed `relations` to earlier memories |
-| `recall` | Semantic search over everything remembered, best match first with scores (full-text + filters join in M2); `expand_related: true` also pulls each hit's explicitly related memories as connected context |
-| `related` | Navigate the explicit memory graph: one memory's relations (both directions, with kind), or every memory tagged with an entity |
+| `remember` | Store a memory (text + metadata; embedded and indexed automatically, long text chunked transparently). Optionally tag explicit `entities` and typed `relations` to earlier memories, or `supersedes: [id]` to retire an older memory as a correction |
+| `recall` | Hybrid search (vector + full-text, RRF-fused) over everything remembered, best match first with scores; `filters: {key: value}` narrows by metadata, `agent` by writing agent, and `expand_related: true` also pulls each hit's explicitly related memories as connected context |
+| `related` | Navigate the explicit memory graph: one memory's relations (both directions, with kind, including `supersedes`), or every memory tagged with an entity |
 | `forget` | Delete one memory by id (delete by query/age is planned) |
+| `stats` | File size, live/forgotten counts, index health, and a per-agent provenance breakdown |
 
 Plus **automatic project-context memory**: EmbedMind detects the project from the agent's working directory (git root, or a `.embedmind.toml` with `project = "name"`), stamps it on every memory, and scopes `recall` to it by default — with `scope: "all"` as the explicit way out.
 
@@ -108,7 +116,11 @@ connected context along with the hits.
 - **Embedded embedding model** (ONNX, quantized, CPU-only) — no API key required; bring-your-own-embeddings supported.
 - No Python, no GPU, no external database, no network access required.
 
-Bindings (Python, TypeScript) are planned once the engine API stabilizes — see [ROADMAP.md](ROADMAP.md).
+Python bindings (`remember`/`recall`/`forget`/`stats`, same `.mind` files, byte-for-byte
+compatible with the Rust store) ship via PyO3 + maturin — see
+[bindings/python](bindings/python); not yet published to PyPI. They don't cover the graph
+tools (`related`, `entities`/`relations`, `supersedes`) yet. TypeScript bindings are
+planned next — see [ROADMAP.md](ROADMAP.md).
 
 ## Benchmarks
 
@@ -175,15 +187,15 @@ for `sqlite-vec` (or a server-based vector DB) instead when:
   end-to-end (embed-included) ingest. If you already have vectors and insert in bulk,
   that's its lane.
 - **You need SQL** — joins, arbitrary `WHERE` filters, aggregates — over the same rows as
-  your vectors. EmbedMind gives you `recall` + project scoping, not a query language
-  (metadata filters land in M2).
+  your vectors. EmbedMind gives you `recall` with metadata filters, agent filters and
+  project scoping, not a general query language.
 - **You want a battle-tested, widely deployed dependency today.** sqlite-vec is built on
   SQLite; EmbedMind is pre-1.0.
 
 Reach for EmbedMind when you want *agent memory* specifically: a single crash-safe file,
 in-process with no server, embedding built in (no API key, nothing leaves the machine),
-automatic project scoping, and — on the roadmap — a graph layer over your memories that a
-vector table alone doesn't give you.
+automatic project scoping, and a graph layer over your memories (entities, relations,
+versioned knowledge via `supersedes`) that a vector table alone doesn't give you.
 
 ## Documentation
 
