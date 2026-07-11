@@ -63,6 +63,15 @@ Hardware: one fixed reference machine (the founder's Windows dev box — specs p
 + one pinned GitHub Actions Linux runner class. Every results table states machine, OS,
 versions, date.
 
+Engine constants that gate behavior on a similarity score are calibrated here too, not
+guessed: `benches/src/bin/calibrate_near_dup.rs` (fixed seeds, deterministic) measures
+the cosine distributions of synthetic duplicate pairs vs. unrelated corpus pairs with
+the shipped model and sweeps candidate thresholds; the chosen value ships as a constant
+with the numbers recorded in an ADR (S21's `NEAR_DUP_THRESHOLD`: ADR 0016). Re-run is
+mandatory whenever the embedded model changes. Since S21 the ingest measurement drives
+`remember_detailed` — the MCP tool's real write path — so the published `remember`
+latency includes the near-duplicate scan.
+
 ## 4. Reporting rules (the honesty contract)
 
 1. **Publish every metric we measure, including losses.** Expected example: sqlite-vec

@@ -351,7 +351,7 @@ um match forte antigo seja derrubado por novidade irrelevante.
   forte antigo vs. novo fraco: o antigo segue primeiro) + property tests da fusão de
   3 listas + `benches/run_all.sh` antes/depois.
 
-### S21. Curadoria na escrita — near-duplicates no `remember` [⬜ pendente]
+### S21. Curadoria na escrita — near-duplicates no `remember` [✅ implementada]
 
 Como agente, quero saber NA HORA DE GRAVAR que já existe memória parecida, para
 decidir forget/supersedes/manter — higiene de conflito onde há contexto para julgar.
