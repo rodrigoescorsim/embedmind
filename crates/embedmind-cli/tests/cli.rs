@@ -850,13 +850,18 @@ fn serve_op_log_appends_one_json_line_per_tool_call() {
         .to_string();
     assert_eq!(responses[3]["result"]["isError"], true, "{}", responses[3]);
 
-    // The op-log: one line per tool call, each one an independent JSON value.
+    // The op-log: the "session" marker from initialize (S23) plus one line
+    // per tool call, each one an independent JSON value.
     let logged = fs::read_to_string(&op_log).expect("op-log file must exist");
     let entries: Vec<serde_json::Value> = logged
         .lines()
         .map(|l| serde_json::from_str(l).expect("every op-log line parses alone"))
         .collect();
-    assert_eq!(entries.len(), 3, "one line per tool call:\n{logged}");
+    assert_eq!(
+        entries.len(),
+        4,
+        "session marker + one line per tool call:\n{logged}"
+    );
 
     for entry in &entries {
         assert!(entry["ts"].as_u64().unwrap() > 0, "{entry}");
@@ -864,37 +869,154 @@ fn serve_op_log_appends_one_json_line_per_tool_call() {
         assert!(entry["isError"].is_boolean(), "{entry}");
         assert!(entry["args"].is_object(), "{entry}");
     }
-    assert_eq!(entries[0]["tool"], "remember");
-    assert_eq!(entries[0]["isError"], false);
-    assert_eq!(entries[0]["ids"][0], id.as_str(), "{}", entries[0]);
-    assert_eq!(entries[1]["tool"], "recall");
+    assert_eq!(entries[0]["tool"], "session");
     assert!(
-        entries[1]["ids"]
+        entries[0]["args"]["client"].is_string(),
+        "session line carries the client name: {}",
+        entries[0]
+    );
+    assert_eq!(entries[1]["tool"], "remember");
+    assert_eq!(entries[1]["isError"], false);
+    assert_eq!(entries[1]["ids"][0], id.as_str(), "{}", entries[1]);
+    assert_eq!(entries[2]["tool"], "recall");
+    assert!(
+        entries[2]["ids"]
             .as_array()
             .unwrap()
             .iter()
             .any(|i| i == id.as_str()),
         "{}",
-        entries[1]
+        entries[2]
     );
     assert!(
-        !entries[1]["scores"].as_array().unwrap().is_empty(),
+        !entries[2]["scores"].as_array().unwrap().is_empty(),
         "recall scores must be logged: {}",
-        entries[1]
+        entries[2]
     );
     // The engine-error call is logged, isError: true, with the message.
-    assert_eq!(entries[2]["tool"], "related");
-    assert_eq!(entries[2]["isError"], true, "{}", entries[2]);
+    assert_eq!(entries[3]["tool"], "related");
+    assert_eq!(entries[3]["isError"], true, "{}", entries[3]);
     assert!(
-        entries[2]["error"]
+        entries[3]["error"]
             .as_str()
             .unwrap()
             .contains("no live memory"),
         "{}",
-        entries[2]
+        entries[3]
     );
 
     // Without the flag nothing was ever created here (the serve test above
     // runs flagless); and this run created exactly the file asked for.
     assert!(op_log.exists());
+}
+
+/// S23: `report` joins the op-log aggregation with the store — top recalled
+/// memories get previews, live memories never served in the window surface
+/// as dead weight, and without an op-log the report degrades instructively.
+#[test]
+fn report_aggregates_op_log_and_flags_dead_weight() {
+    let scratch = Scratch::new("report");
+    let store = scratch.store();
+    let file = store.to_str().unwrap();
+
+    // Two memories: the op-log below serves one twice, the other never.
+    let (ok, out, err) = run(
+        scratch.path(),
+        &["--file", file, "remember", "hot fact: tokio for async"],
+    );
+    assert!(ok, "{err}");
+    let hot_id = out.split_whitespace().next().unwrap().to_string();
+    let (ok, out, err) = run(
+        scratch.path(),
+        &["--file", file, "remember", "cold fact: nobody asks"],
+    );
+    assert!(ok, "{err}");
+    let cold_id = out.split_whitespace().next().unwrap().to_string();
+
+    // Hand-written op-log in the writer's exact line shape: one session,
+    // two recalls serving the hot memory, one remember.
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let entry = |ts: u64, tool: &str, ids: Vec<&str>| {
+        serde_json::json!({
+            "ts": ts, "tool": tool, "args": {}, "ids": ids, "scores": [],
+            "latency_ms": 4.2, "project": null, "isError": false,
+        })
+        .to_string()
+    };
+    let op_log = scratch.path().join("ops.jsonl");
+    fs::write(
+        &op_log,
+        [
+            entry(now - 3, "session", vec![]),
+            entry(now - 2, "recall", vec![&hot_id]),
+            entry(now - 1, "recall", vec![&hot_id]),
+            entry(now, "remember", vec![&cold_id]),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let (ok, out, err) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "report",
+            "--op-log",
+            op_log.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(ok, "report failed: {err}");
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("--json output parses");
+    assert_eq!(v["sessions"], 1, "{v}");
+    assert_eq!(v["recalls"]["count"], 2, "{v}");
+    assert_eq!(v["remembers"]["count"], 1, "{v}");
+    assert_eq!(v["liveMemories"], 2, "{v}");
+    assert_eq!(v["topMemories"][0]["id"], hot_id.as_str(), "{v}");
+    assert_eq!(v["topMemories"][0]["recalls"], 2, "{v}");
+    assert!(
+        v["topMemories"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("hot fact"),
+        "{v}"
+    );
+    assert_eq!(v["neverRecalled"]["count"], 1, "{v}");
+    assert_eq!(
+        v["neverRecalled"]["sample"][0]["id"],
+        cold_id.as_str(),
+        "{v}"
+    );
+
+    // Human print with the same op-log carries the headline numbers.
+    let (ok, out, err) = run(
+        scratch.path(),
+        &[
+            "--file",
+            file,
+            "report",
+            "--op-log",
+            op_log.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("sessions:          1"), "{out}");
+    assert!(out.contains("top recalled memories:"), "{out}");
+    assert!(
+        out.contains("never recalled in window: 1 of 2 live"),
+        "{out}"
+    );
+
+    // No op-log: degrade to store totals and say how to get usage.
+    let (ok, out, err) = run(scratch.path(), &["--file", file, "report"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("live memories:     2"), "{out}");
+    assert!(out.contains("usage needs the op-log"), "{out}");
 }

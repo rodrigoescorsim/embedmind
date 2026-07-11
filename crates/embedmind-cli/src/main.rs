@@ -113,6 +113,23 @@ enum Command {
     Forget { id: String },
     /// Show file size, counts and index health
     Stats,
+    /// Usage report: is the memory actually being used? Aggregates the
+    /// op-log written by `serve --op-log` (sessions, recalls served,
+    /// per-memory counters, latency) and joins it with the store (top
+    /// recalled memories, memories never recalled in the window)
+    Report {
+        /// Op-log JSONL written by `serve --op-log` — the usage source.
+        /// Without it (or if the file does not exist yet) the report
+        /// degrades to store totals only
+        #[arg(long = "op-log", value_name = "PATH")]
+        op_log: Option<PathBuf>,
+        /// Window in days
+        #[arg(long, default_value_t = 7)]
+        since: u64,
+        /// Machine-readable JSON instead of the human print
+        #[arg(long)]
+        json: bool,
+    },
     /// Reclaim space from forgotten memories and rebuild indexes
     Vacuum,
 }
@@ -175,6 +192,11 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Related { id, entity } => related(&file, id, entity),
         Command::Forget { id } => forget(&file, &id),
         Command::Stats => stats(&file),
+        Command::Report {
+            op_log,
+            since,
+            json,
+        } => report(&file, op_log, since, json),
         Command::Vacuum => vacuum(&file),
     }
 }
@@ -464,6 +486,190 @@ fn stats(file: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `embedmind report` (S23): the trust answer — "what did the memory do for
+/// me this week?". Two sources joined here, no domain logic: the op-log
+/// aggregation lives in `embedmind_mcp::report` (next to the writer that
+/// owns the line format) and the store supplies previews + the live set for
+/// dead-weight detection. Missing/absent op-log degrades to store totals —
+/// a user who never passed `--op-log` still gets a useful (and instructive)
+/// print, never an error.
+fn report(
+    file: &Path,
+    op_log: Option<PathBuf>,
+    since_days: u64,
+    json_out: bool,
+) -> Result<(), String> {
+    let store = open(file)?;
+
+    // Live memories in id order = time order (ULIDs): previews for the top
+    // list and the base set for "never recalled". Superseded memories are
+    // history (S19) — readable for previews, excluded from dead weight.
+    struct Live {
+        id: String,
+        content: String,
+        created_at_micros: i64,
+        superseded: bool,
+    }
+    let mut live: Vec<Live> = Vec::new();
+    for memory in store.iter() {
+        let m = memory.map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+        live.push(Live {
+            id: m.id.to_string(),
+            content: m.content,
+            created_at_micros: m.provenance.created_at_micros,
+            superseded: m.superseded,
+        });
+    }
+    let active: Vec<&Live> = live.iter().filter(|m| !m.superseded).collect();
+
+    let since_micros = epoch_micros_now().saturating_sub(since_days * 24 * 3600 * 1_000_000);
+    let usage = match &op_log {
+        Some(path) if path.exists() => {
+            let reader = std::fs::File::open(path)
+                .map(std::io::BufReader::new)
+                .map_err(|e| format!("cannot open op-log {}: {e}", path.display()))?;
+            Some(embedmind_mcp::aggregate(reader, since_micros))
+        }
+        _ => None,
+    };
+
+    // Top recalled: usage counters joined with previews. A served id no
+    // longer in the store was forgotten meanwhile — say so, don't hide it.
+    let mut top: Vec<(&String, &u64)> = usage.iter().flat_map(|u| u.served.iter()).collect();
+    top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    top.truncate(5);
+    let preview_of = |id: &str| -> String {
+        live.iter()
+            .find(|m| m.id == id)
+            .map(|m| preview(&m.content))
+            .unwrap_or_else(|| "(forgotten since)".to_string())
+    };
+
+    // Dead weight: live, non-superseded memories no successful recall served
+    // inside the window. Oldest first — the most likely stale.
+    let never: Vec<&&Live> = usage
+        .as_ref()
+        .map(|u| {
+            active
+                .iter()
+                .filter(|m| !u.served.contains_key(&m.id))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if json_out {
+        let value = serde_json::json!({
+            "sinceDays": since_days,
+            "opLog": op_log.as_ref().filter(|p| p.exists()).map(|p| p.display().to_string()),
+            "liveMemories": active.len(),
+            "sessions": usage.as_ref().map(|u| u.sessions),
+            "recalls": usage.as_ref().map(|u| serde_json::json!({
+                "count": u.recalls,
+                "empty": u.recalls_empty,
+                "errors": u.recall_errors,
+                "latencyP50Ms": u.recall_latency_p50_ms,
+                "latencyP99Ms": u.recall_latency_p99_ms,
+            })),
+            "remembers": usage.as_ref().map(|u| serde_json::json!({
+                "count": u.remembers,
+                "errors": u.remember_errors,
+            })),
+            "forgets": usage.as_ref().map(|u| u.forgets),
+            "relatedCalls": usage.as_ref().map(|u| u.related_calls),
+            "skippedLines": usage.as_ref().map(|u| u.skipped_lines),
+            "topMemories": top.iter().map(|(id, count)| serde_json::json!({
+                "id": id, "recalls": count, "content": preview_of(id),
+            })).collect::<Vec<_>>(),
+            "neverRecalled": usage.as_ref().map(|_| serde_json::json!({
+                "count": never.len(),
+                "sample": never.iter().take(5).map(|m| serde_json::json!({
+                    "id": m.id,
+                    "createdAtMicros": m.created_at_micros,
+                    "content": preview(&m.content),
+                })).collect::<Vec<_>>(),
+            })),
+        });
+        println!("{value}");
+        return Ok(());
+    }
+
+    println!("usage report: last {since_days} days");
+    let Some(usage) = usage.as_ref() else {
+        match &op_log {
+            Some(path) => println!("op-log:            {} (not found)", path.display()),
+            None => println!("op-log:            none"),
+        }
+        println!("live memories:     {}", active.len());
+        println!();
+        println!(
+            "usage needs the op-log: run `embedmind serve --op-log <file>.jsonl` \
+             and pass --op-log here"
+        );
+        return Ok(());
+    };
+    // `op_log` is Some(existing) whenever `usage` is Some — same match arm.
+    if let Some(path) = &op_log {
+        println!("op-log:            {}", path.display());
+    }
+    println!("sessions:          {}", usage.sessions);
+    let latency = match (usage.recall_latency_p50_ms, usage.recall_latency_p99_ms) {
+        (Some(p50), Some(p99)) => format!(" · latency p50 {p50:.1} ms · p99 {p99:.1} ms"),
+        _ => String::new(),
+    };
+    println!(
+        "recalls:           {} ({} empty, {} errors){latency}",
+        usage.recalls, usage.recalls_empty, usage.recall_errors
+    );
+    println!(
+        "remembers:         {} ({} errors)",
+        usage.remembers, usage.remember_errors
+    );
+    println!("forgets:           {}", usage.forgets);
+    println!("related:           {}", usage.related_calls);
+    if usage.skipped_lines > 0 {
+        println!("skipped log lines: {}", usage.skipped_lines);
+    }
+    if !top.is_empty() {
+        println!();
+        println!("top recalled memories:");
+        for (id, count) in &top {
+            println!("  {count}×  {id}  {}", preview_of(id));
+        }
+    }
+    println!();
+    println!(
+        "never recalled in window: {} of {} live",
+        never.len(),
+        active.len()
+    );
+    for m in never.iter().take(5) {
+        println!("  {}  {}", m.id, preview(&m.content));
+    }
+    if never.len() > 5 {
+        println!("  … and {} more", never.len() - 5);
+    }
+    Ok(())
+}
+
+/// First line of `content`, capped at 96 chars (`…` marks either cut) — the
+/// report is a summary, never a second copy of the data.
+fn preview(content: &str) -> String {
+    let first = content.lines().next().unwrap_or("");
+    let mut out: String = first.chars().take(96).collect();
+    if first.chars().count() > 96 || content.lines().count() > 1 {
+        out.push('…');
+    }
+    out
+}
+
+/// Current time as epoch microseconds — the `created_at_micros` convention.
+fn epoch_micros_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 fn vacuum(file: &Path) -> Result<(), String> {

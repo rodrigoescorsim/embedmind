@@ -23,8 +23,8 @@ embedmind-core = { workspace = true }
 # Pinned via workspace.dependencies so the published crate carries a version.
 embedmind-mcp = { workspace = true }
 clap = { workspace = true }
-
-[dev-dependencies]
+# `report --json`: the CLI's first machine-readable output (S23) — consumed
+# by the Agentic Panel without scraping the human print.
 serde_json = { workspace = true }
 
 [lints]

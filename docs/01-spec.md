@@ -387,6 +387,32 @@ tocar no arquivo `.mind` (lock exclusivo) e sem poluir o protocolo.
 - **Verificação:** E2E MCP dirigindo sessão com `--op-log` e validando linhas
   parseáveis uma a uma, incluindo caso de erro de engine (`isError: true` logado).
 
+### S23. Relatório de uso — `embedmind report` [✅ implementada]
+
+Como usuário do EmbedMind, quero saber se a memória está sendo USADA — quantas
+sessões conectaram, quanto os agentes buscaram, quais memórias são reaproveitadas
+e quais nunca foram servidas — para confiar no valor do produto.
+
+- **Dado** `embedmind report --op-log <path> [--since N]`, **então** imprime a
+  agregação da janela: sessões, recalls (vazios/erros/latência p50-p99), remembers,
+  forgets, top memórias recalladas (contador por memória + preview) e "nunca
+  recalladas na janela" (peso morto) sobre as memórias vivas.
+- **Dado** `--json`, **então** a MESMA agregação sai como um objeto JSON — primeira
+  saída estruturada do CLI (consumidor imediato: card de memória do Painel Agêntico).
+- **Dado** op-log ausente/inexistente, **então** degrada para totais do arquivo com
+  instrução de como capturar uso — nunca erro.
+- **Decisão de design — contadores derivados, não estado:** os contadores por
+  memória vêm da agregação do op-log, NÃO de colunas no record (formato do .mind
+  intocado; `recall` continua leitura pura). O `initialize` do serve appenda a linha
+  `{tool:"session"}` no op-log (mesmo shape das demais — um leitor, um formato) para
+  tornar sessões contáveis.
+- **Borda:** linha que não parseia (escrita parcial/corrupção) conta em
+  `skipped_lines` e é pulada — cauda rasgada nunca falha o relatório. Supersedidas
+  são história (S19): fora do peso morto, preview disponível no top.
+- **Verificação:** unit tests do agregador (report.rs) + E2E CLI (`report --json`
+  contra op-log real: top, peso morto, degradação sem log) + E2E MCP/CLI da linha
+  "session" no initialize.
+
 ---
 
 ## P1 — FT: otimização do full-text (pré-launch — decisão do founder 2026-07-11)

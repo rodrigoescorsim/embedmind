@@ -15,6 +15,19 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Usage report: `embedmind report`** (story S23) — the trust answer to "is
+  the memory actually being used?". Aggregates the op-log written by `serve
+  --op-log` over a window (`--since N`, default 7 days): sessions, recalls
+  (empty/errors/latency p50-p99), remembers, forgets, per-memory recall
+  counters (top recalled, with content previews) and live memories never
+  recalled in the window (dead weight, curation candidates). `--json` emits
+  the same aggregation as one JSON object — the CLI's first machine-readable
+  output (immediate consumer: the Agentic Panel's memory card). Without an
+  op-log the report degrades to store totals plus instructions, never an
+  error. Design decision: counters are DERIVED from the log, not new record
+  columns — the `.mind` format is untouched and `recall` stays a pure read.
+  To make sessions countable, `serve` now appends a `{tool: "session"}` line
+  (same shape as tool lines, client name in `args`) on each `initialize`.
 - **Structured op-log on `serve`** (story S22) — `embedmind serve --op-log
   <path>` (also on the standalone `embedmind-mcp` binary) appends one JSON
   line (JSONL) per tool call: `{ts (epoch µs), tool, args (content/query

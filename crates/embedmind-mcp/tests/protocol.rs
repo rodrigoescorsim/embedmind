@@ -1410,19 +1410,36 @@ fn op_log_appends_one_parseable_json_line_per_tool_call() {
     assert_eq!(responses[4]["result"]["isError"], true, "{}", responses[4]);
     assert_eq!(responses[5]["error"]["code"], -32602, "{}", responses[5]);
 
-    // One line per tool call (initialize is not a tool call), each its own
-    // independently parseable JSON value — the tail-from-anywhere contract.
+    // One line per tool call plus the "session" marker from `initialize`
+    // (S23 — what `embedmind report` counts sessions from), each line its
+    // own independently parseable JSON value — the tail-from-anywhere
+    // contract.
     let logged = sink.contents();
     let entries: Vec<Value> = logged
         .lines()
         .map(|l| serde_json::from_str(l).expect("every op-log line parses alone"))
         .collect();
-    assert_eq!(entries.len(), 5, "one line per tool call:\n{logged}");
+    assert_eq!(
+        entries.len(),
+        6,
+        "session marker + one line per tool call:\n{logged}"
+    );
     let tools: Vec<&str> = entries
         .iter()
         .map(|e| e["tool"].as_str().unwrap())
         .collect();
-    assert_eq!(tools, ["remember", "recall", "stats", "related", "explode"]);
+    assert_eq!(
+        tools,
+        [
+            "session", "remember", "recall", "stats", "related", "explode"
+        ]
+    );
+
+    // The session marker carries the client name and the uniform line shape.
+    let session = &entries[0];
+    assert_eq!(session["args"]["client"], "test-agent", "{session}");
+    assert_eq!(session["isError"], false, "{session}");
+    assert_eq!(session["latency_ms"], 0.0, "{session}");
 
     for entry in &entries {
         assert!(entry["ts"].as_u64().unwrap() > 0, "{entry}");
@@ -1436,7 +1453,7 @@ fn op_log_appends_one_parseable_json_line_per_tool_call() {
 
     // remember: the stored id is logged; the content is truncated to ~200
     // chars (199 + the `…` cut marker at most 201).
-    let remember = &entries[0];
+    let remember = &entries[1];
     assert_eq!(remember["isError"], false);
     assert_eq!(remember["ids"][0], remembered_id.as_str(), "{remember}");
     let logged_content = remember["args"]["content"].as_str().unwrap();
@@ -1448,7 +1465,7 @@ fn op_log_appends_one_parseable_json_line_per_tool_call() {
     assert!(logged_content.ends_with('…'), "{logged_content}");
 
     // recall: hit ids and their scores are logged, query short = untouched.
-    let recall = &entries[1];
+    let recall = &entries[2];
     assert_eq!(recall["isError"], false);
     assert_eq!(recall["args"]["query"], "launch decision");
     let ids = recall["ids"].as_array().unwrap();
@@ -1461,11 +1478,11 @@ fn op_log_appends_one_parseable_json_line_per_tool_call() {
     assert!(scores.iter().all(|s| s.as_f64().unwrap() > 0.0), "{recall}");
 
     // stats: no ids, no scores, still one line.
-    assert_eq!(entries[2]["isError"], false);
-    assert_eq!(entries[2]["ids"].as_array().unwrap().len(), 0);
+    assert_eq!(entries[3]["isError"], false);
+    assert_eq!(entries[3]["ids"].as_array().unwrap().len(), 0);
 
     // Engine error: logged, isError true, message carried.
-    let engine_error = &entries[3];
+    let engine_error = &entries[4];
     assert_eq!(engine_error["isError"], true, "{engine_error}");
     assert!(
         engine_error["error"]
@@ -1476,7 +1493,7 @@ fn op_log_appends_one_parseable_json_line_per_tool_call() {
     );
 
     // Protocol error on a dispatched call: also logged, isError true.
-    let protocol_error = &entries[4];
+    let protocol_error = &entries[5];
     assert_eq!(protocol_error["isError"], true, "{protocol_error}");
     assert!(
         protocol_error["error"]
