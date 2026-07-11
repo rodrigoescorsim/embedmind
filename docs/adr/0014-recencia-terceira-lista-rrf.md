@@ -35,9 +35,9 @@ posições de rank, somada com as outras duas por `1/(k + rank + 1)`.
   determinismo total: empate de score fundido quebra pela primeira
   `(índice da lista, rank)` em que o id apareceu — property tests cobrem a
   fusão de N listas; o `fuse` de 2 listas vira um wrapper.
-- **Default: «DEFAULT_DECISAO»** — decidido por medição (abaixo), como a spec
+- **Default: desligado (opt-in)** — decidido por medição (abaixo), como a spec
   S20 manda. `Query::recency(bool)` no core, `recency` (boolean) no MCP e
-  «CLI_FLAG» no CLI dão controle explícito nos dois sentidos.
+  `--recency` no CLI dão controle explícito nos dois sentidos.
 
 ## Medição (harness `benches/run_all.sh --full`, 2026-07-10)
 
@@ -48,16 +48,27 @@ A spec condiciona o default ao recall@10 vs. brute-force do harness
    métrica compara o índice vetorial (`recall_vector`) com o brute-force
    exato — a recência não toca a busca vetorial, só a fusão do `recall`
    híbrido. Medido para confirmar: idêntico com e sem recência
-   (10k «10K_RECALL» · 100k «100K_RECALL»).
+   (10k 0.9953 · 100k 0.9360, bit a bit iguais nas duas execuções).
 2. **Latência do `recall` híbrido** (o custo real da lista extra — recarregar
    `created_at` dos ≤ 2·limit candidatos e ordenar):
 
 | dataset | query p99 sem recência | query p99 com recência | Δ |
 |---|---|---|---|
-| agent-mem-10k | «10K_P99_OFF» ms | «10K_P99_ON» ms | «10K_DELTA» |
-| agent-mem-100k | «100K_P99_OFF» ms | «100K_P99_ON» ms | «100K_DELTA» |
+| agent-mem-10k | 103.09 ms | 103.13 ms | +0.04 ms (+0.04%) |
+| agent-mem-100k | 1224.62 ms | 2063.94 ms | +839.32 ms (+68.5%) |
 
-«VEREDITO_MEDICAO»
+O recall@10 confirma a primeira observação — a fusão de 3 listas não muda
+*quais* ids voltam vs. brute-force, só a ordem entre candidatos já relevantes,
+exatamente o contrato do ADR. Mas a latência no `agent-mem-100k` estoura o
+limiar de regressão do §5 do BENCHMARKS.md (p99 não pode regredir > 15%
+vs. baseline) por larga margem: +68.5%, mais de 4× o limiar. O custo é o
+esperado pela análise (recarregar `created_at` de até `2·limit` candidatos e
+ordenar), mas nesta escala ele não é desprezível — em 10k passa despercebido
+(+0.04%), em 100k mais que dobra o p99. **Decisão: `recency` fica opt-in,
+default desligado.** Quem quiser o desempate por frescor liga explicitamente
+sabendo do custo em bases grandes; o caminho default (maioria dos recalls)
+não paga essa latência. Reavaliar se o `remember` de `created_at` ganhar um
+índice dedicado que evite a releitura de record por candidato.
 
 ## Alternativas rejeitadas
 
@@ -79,7 +90,8 @@ A spec condiciona o default ao recall@10 vs. brute-force do harness
 ## Consequências
 
 - `Query::recency(bool)`; MCP `recall` aceita `recency` (boolean, erro tipado
-  se não-boolean); CLI ganha «CLI_FLAG_CONS».
+  se não-boolean); CLI ganha a flag `--recency`. Default desligado nos três —
+  quem quer o desempate por frescor pede explicitamente.
 - Casos de ouro nos testes E2E (`crates/embedmind-core/tests/recall.rs`):
   fato+correção em empate genuíno de conteúdo → a correção vem primeiro;
   match forte antigo vs. novidade fraca → o antigo segue primeiro; recência

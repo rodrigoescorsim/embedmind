@@ -38,6 +38,34 @@ Pre-v0.1 — under active development, repo private until M1 completes
   ladder or index-build tuning for the recall tail; a paginated postings
   index for the FTS latency; RSS investigation at 100k) — none in scope for
   this task.
+- **`supersedes` — first-class versioned knowledge** (story S19, ADR 0013) —
+  `remember` accepts an optional `supersedes: <id>` pointing at a prior
+  memory; the old memory is tombstoned atomically with the new write (same
+  WAL transaction — a crash mid-write leaves either both live or neither
+  applied, never a half-superseded state) and `recall` never returns a
+  superseded memory even when its content would otherwise rank first. `recall`
+  results carry `superseded_by` when applicable so callers can see the chain.
+  Core, MCP, and CLI all expose the field; a corrective write is now a normal
+  operation instead of requiring a separate `forget`.
+- **Recency as a third list in the recall RRF fusion** (story S20, ADR 0014) —
+  `recall::fuse_lists` generalizes the RRF k=60 fusion from 2 to N ranked
+  lists; a third list reorders the *same* content candidates (the vector+text
+  union, already filtered by scope/tombstone/`supersedes`/metadata/agent) by
+  `created_at_micros` descending, so a genuine content tie breaks toward the
+  newer memory without ever pulling in an irrelevant item or displacing a
+  strong old match (RRF's own bound: a list's max contribution is
+  `1/(k+1)`). Golden cases cover fact+correction (the correction wins a real
+  tie) and old-strong-match-vs-new-weak-match (the old one still wins), plus
+  property tests over 3-list fusion determinism. **Opt-in, default off**
+  (`Query::recency(bool)`, MCP `recency`, CLI `--recency`) — measured on
+  `benches/run_all.sh --full` with `EMBEDMIND_BENCH_RECENCY`: recall@10 is
+  identical with and without it (10k 0.9953, 100k 0.9360, confirming the
+  extra list only reorders, never changes, the result set), but hybrid query
+  p99 on `agent-mem-100k` goes from 1224.62 ms to 2063.94 ms (+68.5%, over 4×
+  the §5 CI regression guard's 15% threshold) from re-reading `created_at` on
+  up to `2·limit` candidates per query; on `agent-mem-10k` the cost is
+  negligible (103.09 → 103.13 ms, +0.04%). The regression is recorded in the
+  ADR rather than hidden behind a default flip.
 - **Write-time near-duplicate hints on `remember`** (story S21) — the response
   now carries `similar: [{id, content (truncated to 160 chars), score,
   created_at_micros}]`: existing live, non-superseded memories in the same
