@@ -1,0 +1,130 @@
+# ADR 0017 — Otimização do full-text: escopo e método (profiling antes de estrutura)
+
+**Status:** Aceito (jul/2026). Abre a fase FT (`03-tasks.md`), motivada pelo NFR
+reprovado da story S16/BQ1 ([ADR 0015](0015-ef-search-default-escalado-pelo-indice.md)):
+`recall` p99 @ 100k medido em 1.224,62 ms contra o teto de 50 ms — 24x acima.
+
+## Contexto
+
+A task BQ1 (`ef_search` escalonado) isolou a causa: a busca vetorial pura
+(`Store::recall_vector`) mede **19,32 ms** de p99 @ 100k — dentro do NFR com
+folga —, enquanto o `recall` híbrido completo mede **1.224,62 ms** no mesmo
+run. A comparação lado a lado (medida com a métrica de
+`query_vector_p50/p99_ms` introduzida no PR #9, comparável a
+`query_engine_p50/p99_ms` — ambas excluem o tempo de embed):
+
+| dataset | engine (híbrido, sem embed) p99 | vector-only p99 | razão |
+|---|---:|---:|---:|
+| agent-mem-10k | ~115 ms | ~10 ms | ~11x |
+| agent-mem-100k | 1.215,34 ms | 19,32 ms | ~63x |
+
+A degradação **não é do HNSW** (O(log N) por construção, comportamento
+observado condiz) — é do meio full-text da fusão híbrida. Leitura do código
+(`crates/embedmind-core/src/index/fts.rs::search`) mostra o mecanismo: para
+cada termo da query, o BM25 varre **a lista de postings inteira daquele
+termo** (`for p in &postings.entries`, sem corte antecipado, sem estrutura de
+salto) — custo O(tamanho da postings list), que cresce linear com o corpus. A
+10k o custo é imperceptível; a 100k, dominante.
+
+O ADR 0011 (decisão original do full-text) rejeitou embutir `tantivy`
+precisamente porque um motor de busca de terceiros escreve fora do arquivo
+único e tem durabilidade própria fora do WAL — isso continua valendo. **Esta
+fase não reabre essa decisão**: o full-text continua sendo um índice
+invertido próprio, persistido nas páginas do `.mind`, integrado ao WAL. O que
+esta fase resolve é a *forma de scan* dentro dessa estrutura, que o ADR 0011
+nunca precisou especificar em detalhe (o `remember` que grava postings e o
+`recall` que as varre são preocupações distintas).
+
+## Decisão
+
+### 1. Profiling antes de qualquer otimização estrutural
+
+Nenhuma task de otimização entra em execução antes de uma task de
+**profiling dedicado** produzir evidência de onde o tempo do `recall` híbrido
+@ 100k é gasto dentro do meio full-text. Hipóteses candidatas, nenhuma
+assumida a priori:
+
+- Decodificação de postings (bytes → `Vec<Entry>`, alocação por termo).
+- I/O de página (cache miss, leitura de disco da cadeia `FTS_POSTINGS`).
+- Custo do `HashMap<Ulid, f32>` de scores (hashing de ULID por candidato).
+- A closure `keep`/`doc_len` recarregando o registro inteiro por candidato
+  para re-tokenizar (decisão do ADR 0011: `doc_len` não é persistido).
+
+**Por quê:** otimizar sem medir arrisca gastar a fase inteira na causa
+errada — cada hipótese acima tem uma correção diferente e nenhuma foi
+descartada por medição, só por leitura de código. Decisão do founder
+(2026-07-11): profiling primeiro é inegociável para esta fase.
+
+### 2. Bump de `format_version` liberado quando a otimização exigir
+
+`FORMAT_VERSION` está em 3 hoje. As otimizações estruturais reais de scan
+(compressão delta/varint dos `record_id` nas postings, skip lists dentro de
+uma postings list grande) mudam a codificação em disco das páginas
+`FTS_POSTINGS`/`FTS_DICT` — exigem bump aditivo, no mesmo padrão que o ADR
+0011 já previu ("um arquivo v1 não tem índice full-text... bump aditivo não
+quebra: nenhum byte pré-existente muda de significado"). Decisão do founder
+(2026-07-11): aceitar o bump quando a otimização exigir, **desde que**
+aditivo — um arquivo `.mind` de `format_version` anterior continua legível
+(degrada, na pior hipótese, para o scan antigo sobre postings não
+comprimidas/sem skip list; nunca para erro).
+
+### 3. Ordem de risco crescente
+
+Depois do profiling apontar a causa dominante, as otimizações candidatas
+entram na ordem que preserva o formato por mais tempo:
+
+1. **Early termination / top-k sem materializar a lista inteira** — mudança
+   de algoritmo de scan (loop `for p in &postings.entries` vira uma varredura
+   que para cedo dado um limiar), sem tocar o formato em disco.
+2. **Compressão delta+varint dos `record_id`** — reduz bytes decodificados
+   por página; muda a codificação de `FTS_POSTINGS`, exige bump.
+3. **Skip lists dentro de uma postings list grande** — o corte assintótico de
+   verdade (pular blocos sem decodificar); estrutura de página nova, bump
+   maior.
+4. **Cache/pré-computação de `doc_len` ou IDF** — só entra se o profiling
+   apontar a re-tokenização como custo relevante; reabre o trade-off que o
+   ADR 0011 descartou deliberadamente ("um dado a menos que pode divergir em
+   disco"), então exige justificativa própria, não é default.
+
+Cada otimização é avaliada e aceita/rejeitada **pelo dado que o profiling e o
+harness produzem**, não pela ordem — a lista acima é a sequência de
+investigação, não um compromisso de implementar todas as quatro.
+
+### 4. Critério de saída da fase
+
+A fase fecha quando o NFR `recall p99 @ 100k < 50 ms` passa medido pelo
+harness (`benches/run_all.sh --full`), **ou** quando o founder decide
+conscientemente aceitar uma limitação de escala documentada (não é decisão
+default desta fase — ver "Alternativas rejeitadas").
+
+## Alternativas rejeitadas
+
+- **Modo `vector_only` opcional exposto ao usuário, sem otimizar o FTS**:
+  cogitado e descartado. O diferencial de posicionamento do produto
+  (`00-prd.md` §3: "híbrido de verdade... nenhum embarcado tem o trio
+  completo") depende do full-text estar disponível por padrão; empurrar a
+  escolha para o usuário dilui esse diferencial e não resolve o NFR, só o
+  contorna. Fica registrado como fallback se o profiling mostrar que a causa
+  dominante não é corrigível dentro do prazo do launch — não como plano A.
+- **Substituir por `tantivy` ou outro motor externo**: já rejeitado pelo ADR
+  0011 pelos mesmos motivos (quebra "um arquivo", quebra o WAL único); nada
+  mudou desde então que reabra essa decisão.
+- **Aceitar a limitação de escala sem investigar**: rejeitado pelo founder —
+  a diferença de 63x entre vetor-only e híbrido a 100k é grande demais para
+  descartar sem profiling; pode ser um bug barato de corrigir (ex.: uma
+  alocação óbvia), não necessariamente um limite estrutural genuíno.
+
+## Consequências
+
+- A fase FT não é uma task, é uma sequência: profiling → decisão de causa →
+  otimização(ões) na ordem de risco → validação do NFR pelo harness. Tasks
+  subsequentes (`03-tasks.md`) dependem do resultado da anterior — a
+  derivação registra isso como pré-requisito de leitura, não como grafo
+  formal (mesmo padrão de "DEPENDÊNCIA AUSENTE" já usado no projeto).
+- Se o profiling apontar mais de uma causa relevante, cada uma vira sua
+  própria story/task — não empacotar num "otimizar tudo de uma vez" que
+  dificulta validar o que efetivamente comprou o ganho.
+- Falhas de dataset pré-existentes (o `.mind` de `format_version` 1/2 sem
+  índice full-text) continuam degradando para vetor-only com aviso — nenhuma
+  otimização desta fase pode remover essa rota de degradação existente
+  (ADR 0011).

@@ -389,6 +389,92 @@ tocar no arquivo `.mind` (lock exclusivo) e sem poluir o protocolo.
 
 ---
 
+## P1 — FT: otimização do full-text (pré-launch — decisão do founder 2026-07-11)
+
+> Origem: a task BQ1 (`ef_search` escalonado, [ADR 0015](adr/0015-ef-search-default-escalado-pelo-indice.md))
+> isolou que o NFR `recall p99 @ 100k < 50 ms` (medido 1.224,62 ms — 24x acima) NÃO é
+> causado pela busca vetorial (`Store::recall_vector` mede 19,32 ms no mesmo run, dentro
+> do orçamento) — é o meio full-text da fusão híbrida que domina o tempo. Ver
+> [ADR 0017](adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) para o escopo completo
+> e o porquê de profiling vir antes de qualquer otimização estrutural.
+
+### S23. Profiling do meio full-text do `recall` @ 100k [⬜ pendente]
+
+Como mantenedor, quero saber ONDE dentro do full-text o tempo é gasto antes de
+escolher a otimização — sem isso, corrigir a estrutura errada é possível.
+
+- **Dado** o dataset `agent-mem-100k` materializado, **quando** rodo o profiling
+  dedicado desta story, **então** o resultado aponta, com evidência (não suposição), a
+  fração do tempo de `Store::search_text`/`fts::search` gasta em: decodificação de
+  postings (bytes → `Vec<Entry>`), I/O de página (cache miss / leitura de disco),
+  hashing do `HashMap<Ulid, f32>` de scores, e recarga de registro pela closure
+  `keep`/`doc_len` (re-tokenização).
+- **Método:** ferramenta de profiling nativa da plataforma de desenvolvimento
+  (flamegraph via `perf`/`samply`/equivalente Windows, ou instrumentação manual com
+  `Instant` ao redor de cada fase de `fts::search` se a ferramenta de profiling não
+  estiver disponível no ambiente) rodando uma sessão de queries repetidas sobre
+  `agent-mem-100k` já aquecido (mesma metodologia do harness — `BENCHMARKS.md §3`).
+- **Saída obrigatória:** relatório em `docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md`
+  (seção nova, "Resultado do profiling") ou arquivo próprio referenciado por ele —
+  números concretos por fase, não texto qualitativo ("parece que é a decodificação").
+  As tasks seguintes desta fase leem esse resultado antes de escolher o que
+  implementar.
+- **Borda:** se o profiling não conseguir isolar uma causa dominante clara (custo
+  distribuído sem um pico óbvio), registrar isso também — é um resultado válido que
+  muda a estratégia (early termination generic ataca todas as fases ao mesmo tempo).
+- **Verificação:** o relatório existe, cita números, e a fração dominante soma > 60%
+  do tempo total do meio full-text (ou o achado de "sem causa dominante" está
+  explicitamente registrado).
+
+### S24. Early termination no scan de postings [⬜ pendente — condicionada à S23]
+
+Como agente que busca em corpus grande, quero que o `recall` não pague o custo de
+decodificar/pontuar toda a postings list de um termo comum quando só os top-k
+resultados importam.
+
+- **Pré-requisito:** S23 concluída e aponta a decodificação/scoring do scan como
+  fração relevante do tempo (se o profiling apontar outra causa dominante, esta story
+  é reordenada ou substituída — ver ADR 0017 §3).
+- **Dado** uma query cujo termo tem postings list grande, **quando** `fts::search`
+  processa esse termo, **então** o scan corta cedo quando já há candidatos
+  suficientes para o top-k final com confiança (critério exato — limiar de score,
+  contagem de candidatos, ou heurística equivalente — decidido por medição e
+  registrado em ADR, não escolhido a priori).
+- **Dado** um corpus pequeno (early termination nunca dispara), **então** o resultado
+  é IDÊNTICO ao scan completo — esta otimização não pode mudar quais documentos são
+  retornados nem sua ordem em nenhum regime, só reduzir trabalho.
+- **Formato:** sem mudança de `format_version` — é só o algoritmo de scan sobre a
+  estrutura de postings já existente.
+- **Verificação:** teste de equivalência (resultado com/sem early termination é
+  idêntico byte a byte, corpus pequeno e grande) + `benches/run_all.sh --full` medindo
+  o ganho de `query_engine_p50/p99_ms` @ 100k antes/depois.
+
+### S25. Compressão delta+varint e/ou skip lists nas postings [⬜ pendente — condicionada à S23/S24]
+
+Como mantenedor, quero reduzir o custo de I/O e decodificação por página quando o
+scan em si (S24) não for suficiente para cumprir o NFR.
+
+- **Pré-requisito:** S23 aponta I/O de página ou volume de bytes decodificados como
+  fração relevante, OU S24 sozinha não fecha o NFR `recall p99 @ 100k < 50 ms`.
+- **Dado** uma postings list persistida, **quando** o arquivo é escrito por este
+  build, **então** os `record_id` (u128/ULID) são codificados como delta entre
+  entradas consecutivas (a lista já é ordenada por id — S9/FORMAT.md §11) + varint,
+  reduzindo bytes por entrada sem perder informação.
+- **Dado** uma postings list grande o bastante para valer o overhead, **então** uma
+  estrutura de skip (blocos de tamanho fixo com ponteiro/offset) permite pular blocos
+  inteiros sem decodificá-los quando o scan (S24) já sabe que pode descartá-los.
+- **Formato:** muda a codificação de `FTS_POSTINGS` — `format_version` sobe (bump
+  aditivo, ADR 0017 §2). Um arquivo de versão anterior continua legível: decodificado
+  pelo layout antigo, sem skip list nem compressão (degrada em desempenho, nunca em
+  corretude ou em erro).
+- **Verificação:** round-trip de leitura/escrita entre builds de `format_version`
+  diferentes (arquivo antigo abre normalmente); crash test cobrindo as páginas
+  `FTS_POSTINGS` no novo layout; `benches/run_all.sh --full` confirmando o NFR
+  `recall p99 @ 100k < 50 ms` OU, se ainda não fechar, o ADR 0017 é atualizado com os
+  números e a decisão do founder sobre prosseguir vs. documentar limitação.
+
+---
+
 ## Requisitos não-funcionais consolidados
 
 | Requisito | Alvo | Verificação |
