@@ -10,9 +10,12 @@
 //! crash.
 
 use std::io::{BufRead, Write};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use embedmind_core::{Filter, MemoryDraft, Query, Scalar, Store, Ulid};
 use serde_json::{Value, json};
+
+use crate::oplog::OpLog;
 
 /// Protocol revisions this server knows; the handshake echoes the client's
 /// requested version when it is one of these, otherwise answers the latest.
@@ -35,6 +38,11 @@ pub struct McpServer {
     /// `remember` and used as the default `recall` scope. `None` = no
     /// context; memories are global, recall searches everything.
     project: Option<String>,
+    /// Structured op-log (S22, `crate::oplog`): when present, every
+    /// `tools/call` appends one JSON line. `None` = the `--op-log` flag is
+    /// absent — no file, no timing, no summarizing; the call path is the
+    /// pre-S22 one.
+    op_log: Option<OpLog>,
 }
 
 impl McpServer {
@@ -45,7 +53,16 @@ impl McpServer {
             store,
             agent: "mcp".to_string(),
             project,
+            op_log: None,
         }
+    }
+
+    /// Attaches a structured op-log (S22): from here on, every `tools/call`
+    /// appends one JSON line describing the call and its outcome.
+    #[must_use]
+    pub fn with_op_log(mut self, op_log: OpLog) -> Self {
+        self.op_log = Some(op_log);
+        self
     }
 
     /// Serves until EOF on `reader`. Only transport failures (I/O on the
@@ -131,15 +148,21 @@ impl McpServer {
             .and_then(Value::as_str)
             .ok_or((INVALID_PARAMS, "missing tool name".to_string()))?;
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
-        let outcome = match name {
-            "remember" => self.tool_remember(&args)?,
-            "recall" => self.tool_recall(&args)?,
-            "related" => self.tool_related(&args)?,
-            "stats" => self.tool_stats(&args)?,
-            "forget" => self.tool_forget(&args)?,
-            _ => return Err((INVALID_PARAMS, format!("unknown tool: {name}"))),
+        // Timing exists only when the op-log does (S22): with the flag
+        // absent this whole path is the pre-S22 one, at zero cost.
+        let started = self.op_log.as_ref().map(|_| Instant::now());
+        let dispatch = match name {
+            "remember" => self.tool_remember(&args),
+            "recall" => self.tool_recall(&args),
+            "related" => self.tool_related(&args),
+            "stats" => self.tool_stats(&args),
+            "forget" => self.tool_forget(&args),
+            _ => Err((INVALID_PARAMS, format!("unknown tool: {name}"))),
         };
-        Ok(match outcome {
+        if let Some(started) = started {
+            self.log_op(name, &args, &dispatch, started.elapsed());
+        }
+        Ok(match dispatch? {
             Ok(structured) => {
                 let text = structured.to_string();
                 json!({
@@ -152,6 +175,56 @@ impl McpServer {
                 "isError": true,
             }),
         })
+    }
+
+    /// Appends one op-log line (S22) for a dispatched tool call:
+    /// `{ts, tool, args, ids, scores, latency_ms, project, isError}` plus
+    /// `error` (the message) on failures. Both failure flavors are logged
+    /// with `isError: true` — an engine error (tool result) and a protocol
+    /// error on a known dispatch (unknown tool / bad arguments) — the
+    /// operator sees every call the client made. Never fails the call:
+    /// [`OpLog::append`] reports write errors on stderr only.
+    #[allow(clippy::type_complexity)]
+    fn log_op(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        dispatch: &Result<Result<Value, String>, (i64, String)>,
+        elapsed: Duration,
+    ) {
+        let Some(op_log) = &mut self.op_log else {
+            return;
+        };
+        let (ids, scores, error) = match dispatch {
+            Ok(Ok(structured)) => {
+                let (ids, scores) = ids_and_scores(structured);
+                (ids, scores, None)
+            }
+            Ok(Err(engine_error)) => (Vec::new(), Vec::new(), Some(engine_error.as_str())),
+            Err((_, protocol_error)) => (Vec::new(), Vec::new(), Some(protocol_error.as_str())),
+        };
+        // Same epoch-microseconds convention as `created_at_micros`; a clock
+        // before 1970 yields 0 rather than a panic (workspace lint).
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        // Milliseconds with microsecond precision — readable and sortable.
+        let latency_ms = (elapsed.as_secs_f64() * 1_000_000.0).round() / 1000.0;
+        let mut entry = json!({
+            "ts": ts,
+            "tool": tool,
+            "args": summarize_args(args),
+            "ids": ids,
+            "scores": scores,
+            "latency_ms": latency_ms,
+            "project": self.project,
+            "isError": error.is_some(),
+        });
+        if let Some(error) = error {
+            entry["error"] = json!(error);
+        }
+        op_log.append(&entry);
     }
 
     /// `remember(content, project?, metadata?, entities?, relations?,
@@ -577,6 +650,56 @@ impl McpServer {
             Err(e) => Err(e.to_string()),
         })
     }
+}
+
+/// Truncation cap for free-text arguments in op-log lines (S22): the log is
+/// an operational trace of *what happened*, not a second copy of the data.
+const OP_LOG_TEXT_CAP: usize = 200;
+
+/// Copies the call arguments with the free-text fields (`content`, `query`)
+/// cut to [`OP_LOG_TEXT_CAP`] chars (`…` marks the cut), so one giant
+/// `remember` cannot bloat the log. Everything else — ids, filters, flags —
+/// is short and passes through verbatim.
+fn summarize_args(args: &Value) -> Value {
+    let mut summary = args.clone();
+    if let Some(map) = summary.as_object_mut() {
+        for key in ["content", "query"] {
+            if let Some(Value::String(text)) = map.get_mut(key)
+                && text.chars().count() > OP_LOG_TEXT_CAP
+            {
+                let mut truncated: String = text.chars().take(OP_LOG_TEXT_CAP).collect();
+                truncated.push('…');
+                *text = truncated;
+            }
+        }
+    }
+    summary
+}
+
+/// Pulls the returned memory ids and scores out of one tool's structured
+/// result, shape by shape: the top-level `id` (remember / related-by-id) and
+/// the `hits` / `related` / `members` lists. Scores exist only where the
+/// engine ranked (recall hits); tools with neither (stats, forget) log empty
+/// lists.
+fn ids_and_scores(structured: &Value) -> (Vec<Value>, Vec<Value>) {
+    let mut ids = Vec::new();
+    let mut scores = Vec::new();
+    if let Some(id) = structured.get("id") {
+        ids.push(id.clone());
+    }
+    for list in ["hits", "related", "members"] {
+        if let Some(items) = structured.get(list).and_then(Value::as_array) {
+            for item in items {
+                if let Some(id) = item.get("id") {
+                    ids.push(id.clone());
+                }
+                if let Some(score) = item.get("score") {
+                    scores.push(score.clone());
+                }
+            }
+        }
+    }
+    (ids, scores)
 }
 
 fn error_response(id: Value, code: i64, message: &str) -> Value {

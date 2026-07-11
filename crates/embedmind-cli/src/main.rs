@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
 
 use embedmind_core::{Filter, MemoryDraft, Query, Scalar, Store, Ulid};
-use embedmind_mcp::{McpServer, detect_project};
+use embedmind_mcp::{McpServer, OpLog, detect_project};
 
 #[derive(Parser)]
 #[command(
@@ -31,7 +31,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run as an MCP server over stdio (what agents connect to)
-    Serve,
+    Serve {
+        /// Append one JSON line (JSONL) per tool call to this file:
+        /// {ts, tool, args (content/query truncated), ids, scores,
+        /// latency_ms, project, isError}. A write failure never fails the
+        /// tool call (warning on stderr); without the flag nothing is
+        /// created.
+        #[arg(long = "op-log", value_name = "PATH")]
+        op_log: Option<PathBuf>,
+    },
     /// Store a memory
     Remember {
         content: String,
@@ -133,7 +141,7 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 
     match cli.command {
-        Command::Serve => serve(&file),
+        Command::Serve { op_log } => serve(&file, op_log),
         Command::Remember {
             content,
             project,
@@ -173,8 +181,12 @@ fn run(cli: Cli) -> Result<(), String> {
 
 /// `embedmind serve`: the MCP server over stdio, identical to running the
 /// `embedmind-mcp` binary (README: `claude mcp add embedmind -- embedmind
-/// serve`). Logs on stderr; stdout is the protocol channel.
-fn serve(file: &Path) -> Result<(), String> {
+/// serve`). Logs on stderr; stdout is the protocol channel. `--op-log`
+/// (S22) appends one JSON line per tool call to the given file — pure
+/// observability, opened here and handed to the server; failing to open it
+/// is a startup error (the operator would silently lose the log they asked
+/// for), while later write failures only warn on stderr.
+fn serve(file: &Path, op_log: Option<PathBuf>) -> Result<(), String> {
     let store = open(file)?;
     let project = std::env::current_dir()
         .ok()
@@ -189,9 +201,16 @@ fn serve(file: &Path) -> Result<(), String> {
             file.display()
         ),
     }
+    let mut server = McpServer::new(store, project);
+    if let Some(path) = op_log {
+        let op_log = OpLog::create(&path)
+            .map_err(|e| format!("cannot open op-log {}: {e}", path.display()))?;
+        eprintln!("embedmind: op-log appending to {}", path.display());
+        server = server.with_op_log(op_log);
+    }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    McpServer::new(store, project)
+    server
         .serve(stdin.lock(), stdout.lock())
         .map_err(|e| format!("transport error: {e}"))
 }

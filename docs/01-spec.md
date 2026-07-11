@@ -370,7 +370,7 @@ decidir forget/supersedes/manter — higiene de conflito onde há contexto para 
 - **Verificação:** testes core (limiar, escopo, truncamento) + protocolo MCP + E2E
   CLI + benchmark do `remember` (p99 dentro do NFR).
 
-### S22. Op-log estruturado do servidor [⬜ pendente]
+### S22. Op-log estruturado do servidor [✅ implementada]
 
 Como operador (painel/founder), quero observar o que o agente grava e busca — sem
 tocar no arquivo `.mind` (lock exclusivo) e sem poluir o protocolo.
