@@ -424,7 +424,7 @@ e quais nunca foram servidas — para confiar no valor do produto.
 > [ADR 0017](adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) para o escopo completo
 > e o porquê de profiling vir antes de qualquer otimização estrutural.
 
-### S23. Profiling do meio full-text do `recall` @ 100k [⬜ pendente]
+### S24. Profiling do meio full-text do `recall` @ 100k [⬜ pendente]
 
 Como mantenedor, quero saber ONDE dentro do full-text o tempo é gasto antes de
 escolher a otimização — sem isso, corrigir a estrutura errada é possível.
@@ -452,13 +452,13 @@ escolher a otimização — sem isso, corrigir a estrutura errada é possível.
   do tempo total do meio full-text (ou o achado de "sem causa dominante" está
   explicitamente registrado).
 
-### S24. Early termination no scan de postings [⬜ pendente — condicionada à S23]
+### S25. Early termination no scan de postings [⬜ pendente — condicionada à S24]
 
 Como agente que busca em corpus grande, quero que o `recall` não pague o custo de
 decodificar/pontuar toda a postings list de um termo comum quando só os top-k
 resultados importam.
 
-- **Pré-requisito:** S23 concluída e aponta a decodificação/scoring do scan como
+- **Pré-requisito:** S24 concluída e aponta a decodificação/scoring do scan como
   fração relevante do tempo (se o profiling apontar outra causa dominante, esta story
   é reordenada ou substituída — ver ADR 0017 §3).
 - **Dado** uma query cujo termo tem postings list grande, **quando** `fts::search`
@@ -475,20 +475,20 @@ resultados importam.
   idêntico byte a byte, corpus pequeno e grande) + `benches/run_all.sh --full` medindo
   o ganho de `query_engine_p50/p99_ms` @ 100k antes/depois.
 
-### S25. Compressão delta+varint e/ou skip lists nas postings [⬜ pendente — condicionada à S23/S24]
+### S26. Compressão delta+varint e/ou skip lists nas postings [⬜ pendente — condicionada à S24/S25]
 
 Como mantenedor, quero reduzir o custo de I/O e decodificação por página quando o
-scan em si (S24) não for suficiente para cumprir o NFR.
+scan em si (S25) não for suficiente para cumprir o NFR.
 
-- **Pré-requisito:** S23 aponta I/O de página ou volume de bytes decodificados como
-  fração relevante, OU S24 sozinha não fecha o NFR `recall p99 @ 100k < 50 ms`.
+- **Pré-requisito:** S24 aponta I/O de página ou volume de bytes decodificados como
+  fração relevante, OU S25 sozinha não fecha o NFR `recall p99 @ 100k < 50 ms`.
 - **Dado** uma postings list persistida, **quando** o arquivo é escrito por este
   build, **então** os `record_id` (u128/ULID) são codificados como delta entre
   entradas consecutivas (a lista já é ordenada por id — S9/FORMAT.md §11) + varint,
   reduzindo bytes por entrada sem perder informação.
 - **Dado** uma postings list grande o bastante para valer o overhead, **então** uma
   estrutura de skip (blocos de tamanho fixo com ponteiro/offset) permite pular blocos
-  inteiros sem decodificá-los quando o scan (S24) já sabe que pode descartá-los.
+  inteiros sem decodificá-los quando o scan (S25) já sabe que pode descartá-los.
 - **Formato:** muda a codificação de `FTS_POSTINGS` — `format_version` sobe (bump
   aditivo, ADR 0017 §2). Um arquivo de versão anterior continua legível: decodificado
   pelo layout antigo, sem skip list nem compressão (degrada em desempenho, nunca em
