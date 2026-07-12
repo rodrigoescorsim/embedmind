@@ -2,8 +2,13 @@
 //! (`docs/BENCHMARKS.md` §3).
 //!
 //! HNSW is *approximate*: its top-k is not guaranteed to equal the exact
-//! top-k, so it is graded as a **set overlap** — of the exact top-k the
-//! baseline returns, what fraction did HNSW also return? Averaged over a fixed
+//! top-k, so it is graded against the baseline's exact top-k. The grading is
+//! **tie-aware** (`docs/adr/0019`, story S27): a returned hit counts when its
+//! exact cosine score ties or beats the k-th exact score
+//! ([`baseline::tie_aware_overlap`]), because the agent-memory corpus holds
+//! exact duplicate texts by design — identical text embeds to a bit-identical
+//! vector, so the exact top-k boundary is often a plateau of tied scores and
+//! *which* tied ids an index returns is arbitrary. Averaged over a fixed
 //! query set, that is `recall@k`. Both systems are handed the *same query
 //! vector* (embedded once by the shipped model) and the *same eligible
 //! population*, so the only variable measured is the index's approximation
@@ -14,7 +19,7 @@
 //! traffic without being verbatim copies of stored memories (which would make
 //! recall trivially 1.0 and measure nothing).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use embedmind_core::api::{Query, Store};
 use embedmind_core::embed::Embedder;
@@ -71,7 +76,9 @@ pub fn query_texts(spec: &DatasetSpec, n: usize) -> Vec<String> {
 /// quality (`docs/BENCHMARKS.md` §3), which fusing in BM25 keyword hits would
 /// contaminate. Both sides use the identical query vector because
 /// `recall_vector` embeds the text with the same model this harness embeds it
-/// with. Overlap / k is that query's recall; the mean is the report.
+/// with. Each returned hit is then re-scored against that query vector and
+/// graded tie-aware ([`baseline::tie_aware_overlap`], `docs/adr/0019`);
+/// overlap / k is that query's recall, and the mean is the report.
 pub fn measure(
     store: &Store,
     set: &VectorSet,
@@ -79,30 +86,39 @@ pub fn measure(
     queries: &[String],
     k: usize,
 ) -> embedmind_core::Result<RecallReport> {
+    // Vector lookup by record id, to re-score whatever the store returns with
+    // the same dot product the exact baseline scored with.
+    let by_id: HashMap<Ulid, &[f32]> = set
+        .entries
+        .iter()
+        .map(|e| (e.id, e.vector.as_slice()))
+        .collect();
+
     let mut total = 0.0f64;
     let mut per_query: Vec<f64> = Vec::with_capacity(queries.len());
     for text in queries {
         let mut qv = embedder.embed(text)?;
         normalize(&mut qv);
 
-        let exact: HashSet<Ulid> = baseline::top_k(set, &qv, k, |_| true)
-            .into_iter()
-            .map(|h| h.record_id)
-            .collect();
+        let exact = baseline::top_k(set, &qv, k, |_| true);
 
         // No explicit `ef_search` here: the recall metric grades the *default*,
         // which scales with index size (S16, `docs/adr/0015`) — the value a
         // caller who tunes nothing actually gets.
-        let approx: HashSet<Ulid> = store
-            .recall_vector(Query::new(text.clone()).limit(k))?
-            .into_iter()
-            .map(|r| r.id)
-            .collect();
+        let approx = store.recall_vector(Query::new(text.clone()).limit(k))?;
+
+        // A hit the set does not know (impossible today — the store holds
+        // exactly the set's records) would score -inf, an honest miss.
+        let scores = approx.iter().map(|r| {
+            by_id
+                .get(&r.id)
+                .map_or(f32::NEG_INFINITY, |v| baseline::dot(v, &qv))
+        });
+        let overlap = baseline::tie_aware_overlap(&exact, scores);
 
         // Guard the degenerate case where the baseline itself returned fewer
         // than k (tiny sets): recall is overlap over what *could* be recalled.
         let denom = exact.len().max(1);
-        let overlap = exact.intersection(&approx).count();
         let q_recall = overlap as f64 / denom as f64;
         total += q_recall;
         per_query.push(q_recall);

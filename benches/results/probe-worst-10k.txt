@@ -1,0 +1,13 @@
+# worst-query recall diagnosis — k=10, 1000 queries, tie_eps=0.00001
+
+## agent-mem-10k (10000 memories)
+corpus: 10000 memories, 842 exact duplicate texts (8.4%)
+
+### default ef (harness conditions)
+| grading | mean | min | p10 | p50 |
+|---|---|---|---|---|
+| id overlap (current metric) | 0.9953 | 0.90 | 1.00 | 1.00 |
+| score parity (tie-aware) | 1.0000 | 1.00 | 1.00 | 1.00 |
+
+### queries with id-overlap recall < 0.7 at default ef: 0
+

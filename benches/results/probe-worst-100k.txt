@@ -1,0 +1,503 @@
+# worst-query recall diagnosis — k=10, 1000 queries, tie_eps=0.00001
+
+## agent-mem-100k (100000 memories)
+corpus: 100000 memories, 23015 exact duplicate texts (23.0%)
+
+### default ef (harness conditions)
+| grading | mean | min | p10 | p50 |
+|---|---|---|---|---|
+| id overlap (current metric) | 0.9360 | 0.20 | 0.70 | 1.00 |
+| score parity (tie-aware) | 1.0000 | 1.00 | 1.00 | 1.00 |
+
+### queries with id-overlap recall < 0.7 at default ef: 70
+
+- **query 1**: "TODO: refatorar Rust para não depender de reflection."
+  id-recall 0.50, score-recall 1.00, kth exact score 1.000000, plateau 20 vectors tie it
+  ef=384: id-recall 0.90, score-recall 1.00, 72.35 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 109.36 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 186.05 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 316.95 ms
+
+- **query 32**: "TODO: refatorar WAL para não depender de a cloud service."
+  id-recall 0.40, score-recall 1.00, kth exact score 1.000000, plateau 19 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 48.71 ms
+  ef=512: id-recall 0.40, score-recall 1.00, 78.98 ms
+  ef=1024: id-recall 0.40, score-recall 1.00, 126.11 ms
+  ef=2048: id-recall 0.40, score-recall 1.00, 384.96 ms
+
+- **query 41**: "Prefiro Rust a o formato antigo sempre que possível."
+  id-recall 0.40, score-recall 1.00, kth exact score 1.000000, plateau 22 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 92.67 ms
+  ef=512: id-recall 0.40, score-recall 1.00, 101.39 ms
+  ef=1024: id-recall 0.40, score-recall 1.00, 178.85 ms
+  ef=2048: id-recall 0.40, score-recall 1.00, 294.41 ms
+
+- **query 47**: "TODO: refatorar sqlite-vec para não depender de an external database."
+  id-recall 0.40, score-recall 1.00, kth exact score 1.000000, plateau 19 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 87.27 ms
+  ef=512: id-recall 0.40, score-recall 1.00, 119.71 ms
+  ef=1024: id-recall 0.40, score-recall 1.00, 220.35 ms
+  ef=2048: id-recall 0.40, score-recall 1.00, 381.24 ms
+
+- **query 60**: "The founder prefers WAL over the old format. Never use the old format; standardize on ONNX. The founder prefers WAL over o formato antigo."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.823167, plateau 14 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 123.24 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 121.53 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 215.03 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 434.32 ms
+
+- **query 65**: "HNSW is deployed in the a camada de rede environment."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000001, plateau 17 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 119.26 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 138.15 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 226.73 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 375.84 ms
+
+- **query 89**: "Always test the the MCP server before shipping."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 17 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 46.07 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 84.40 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 150.64 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 195.80 ms
+
+- **query 91**: "Rust is deployed in the benchmark environment. O a camada de rede usa o cache de páginas e depende de a cloud service. O crash recovery usa MiniLM e depende de reflection."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.820791, plateau 21 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 112.64 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 157.43 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 197.45 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 406.35 ms
+
+- **query 113**: "o cache de páginas está em produção no ambiente de benchmark."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.999999, plateau 16 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 73.66 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 99.69 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 161.89 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 227.78 ms
+
+- **query 119**: "Regra do projeto: flush o indexação antes de qualquer release."
+  id-recall 0.50, score-recall 1.00, kth exact score 1.000000, plateau 26 vectors tie it
+  ef=384: id-recall 0.40, score-recall 1.00, 35.43 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 36.66 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 60.45 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 101.33 ms
+
+- **query 122**: "The o índice service talks to uma fila over the internal network."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 15 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 62.78 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 70.57 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 175.10 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 300.98 ms
+
+- **query 151**: "HNSW está em produção no ambiente de o CLI."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 15 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 41.42 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 49.78 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 127.81 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 209.44 ms
+
+- **query 160**: "Prefiro MiniLM a panics sempre que possível."
+  id-recall 0.30, score-recall 1.00, kth exact score 1.000000, plateau 24 vectors tie it
+  ef=384: id-recall 0.30, score-recall 1.00, 66.15 ms
+  ef=512: id-recall 0.30, score-recall 1.00, 60.60 ms
+  ef=1024: id-recall 0.30, score-recall 1.00, 133.49 ms
+  ef=2048: id-recall 0.30, score-recall 1.00, 178.00 ms
+
+- **query 161**: "o cache de páginas está em produção no ambiente de o CLI. The storage runs on MiniLM and depends on panics."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.893303, plateau 19 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 53.47 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 87.38 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 127.15 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 191.51 ms
+
+- **query 162**: "Regra do projeto: flush o staging antes de qualquer release."
+  id-recall 0.50, score-recall 1.00, kth exact score 1.000000, plateau 23 vectors tie it
+  ef=384: id-recall 0.40, score-recall 1.00, 35.64 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 46.77 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 64.45 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 111.35 ms
+
+- **query 166**: "O storage usa the embedder e depende de uma API de rede. The the embedder service talks to reflection over the internal network."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.836054, plateau 22 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 120.75 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 174.21 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 311.21 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 553.42 ms
+
+- **query 175**: "Regra do projeto: test o recall antes de qualquer release."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000001, plateau 16 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 71.92 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 82.81 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 98.53 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 145.35 ms
+
+- **query 189**: "Always maintain the benchmark before shipping."
+  id-recall 0.30, score-recall 1.00, kth exact score 1.000000, plateau 24 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 70.24 ms
+  ef=512: id-recall 0.30, score-recall 1.00, 91.74 ms
+  ef=1024: id-recall 0.30, score-recall 1.00, 135.50 ms
+  ef=2048: id-recall 0.30, score-recall 1.00, 239.53 ms
+
+- **query 193**: "HNSW está em produção no ambiente de crash recovery."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.999999, plateau 16 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 58.19 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 90.55 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 144.70 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 317.78 ms
+
+- **query 194**: "HNSW está em produção no ambiente de indexação."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000001, plateau 15 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 81.06 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 94.82 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 167.38 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 261.63 ms
+
+- **query 259**: "Always vacuum the benchmark before shipping. Never use the old format; standardize on o índice."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.782909, plateau 23 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 94.08 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 126.46 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 232.11 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 415.51 ms
+
+- **query 263**: "Prefiro ONNX a a background thread sempre que possível."
+  id-recall 0.50, score-recall 1.00, kth exact score 1.000001, plateau 17 vectors tie it
+  ef=384: id-recall 1.00, score-recall 1.00, 80.68 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 90.40 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 145.21 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 245.99 ms
+
+- **query 288**: "Prefiro WAL a a cloud service sempre que possível."
+  id-recall 0.40, score-recall 1.00, kth exact score 1.000000, plateau 16 vectors tie it
+  ef=384: id-recall 0.90, score-recall 1.00, 62.68 ms
+  ef=512: id-recall 0.40, score-recall 1.00, 57.54 ms
+  ef=1024: id-recall 0.40, score-recall 1.00, 121.96 ms
+  ef=2048: id-recall 0.40, score-recall 1.00, 213.51 ms
+
+- **query 317**: "o índice está em produção no ambiente de the MCP server."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 15 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 58.52 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 69.53 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 143.87 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 239.44 ms
+
+- **query 360**: "Always maintain the a camada de rede before shipping. Always vacuum the indexação before shipping."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.866434, plateau 26 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 47.87 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 51.32 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 103.86 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 176.77 ms
+
+- **query 365**: "Always test the recall before shipping."
+  id-recall 0.40, score-recall 1.00, kth exact score 1.000000, plateau 22 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 42.05 ms
+  ef=512: id-recall 0.40, score-recall 1.00, 51.89 ms
+  ef=1024: id-recall 0.40, score-recall 1.00, 90.44 ms
+  ef=2048: id-recall 0.40, score-recall 1.00, 182.73 ms
+
+- **query 375**: "TODO: refatorar Rust para não depender de an external database. O módulo MiniLM encapsula panics; ver crash recovery."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.859898, plateau 27 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 87.74 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 145.49 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 199.12 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 332.40 ms
+
+- **query 394**: "Note: auditar the o CLI cache when o cache de páginas changes. TODO: refatorar ONNX para não depender de unwrap()."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.866327, plateau 14 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 77.75 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 88.56 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 173.71 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 281.78 ms
+
+- **query 413**: "Always manter the staging before shipping."
+  id-recall 0.50, score-recall 1.00, kth exact score 1.000000, plateau 18 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 49.74 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 51.88 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 134.60 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 232.32 ms
+
+- **query 435**: "sqlite-vec está em produção no ambiente de storage."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 18 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 65.49 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 76.06 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 172.19 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 312.40 ms
+
+- **query 439**: "The founder prefers WAL over an external database. Prefiro Rust a the old format sempre que possível."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.873390, plateau 19 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 97.67 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 114.76 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 196.13 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 295.55 ms
+
+- **query 443**: "Never use panics; standardize on sqlite-vec."
+  id-recall 0.40, score-recall 1.00, kth exact score 1.000000, plateau 22 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 70.44 ms
+  ef=512: id-recall 0.40, score-recall 1.00, 85.69 ms
+  ef=1024: id-recall 0.40, score-recall 1.00, 148.96 ms
+  ef=2048: id-recall 0.40, score-recall 1.00, 246.43 ms
+
+- **query 501**: "Regra do projeto: flush o crash recovery antes de qualquer release. Prefiro tokio a reflection sempre que possível."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.953729, plateau 21 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 51.48 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 72.45 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 100.28 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 214.88 ms
+
+- **query 511**: "Always test the the MCP server before shipping."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 17 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 60.51 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 67.01 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 127.58 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 212.25 ms
+
+- **query 512**: "Regra do projeto: testar o benchmark antes de qualquer release."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 18 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 33.70 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 56.76 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 64.86 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 130.02 ms
+
+- **query 526**: "Regra do projeto: auditar o o CLI antes de qualquer release."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000001, plateau 20 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 36.78 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 40.71 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 76.11 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 114.32 ms
+
+- **query 541**: "Regra do projeto: reproduce o the MCP server antes de qualquer release."
+  id-recall 0.50, score-recall 1.00, kth exact score 1.000000, plateau 15 vectors tie it
+  ef=384: id-recall 0.90, score-recall 1.00, 47.40 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 68.13 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 101.90 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 182.58 ms
+
+- **query 543**: "o índice is deployed in the crash recovery environment."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 15 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 126.59 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 172.71 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 305.16 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 542.66 ms
+
+- **query 544**: "Never use o formato antigo; standardize on Rust."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 14 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 107.39 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 122.65 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 241.47 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 485.52 ms
+
+- **query 550**: "The HNSW service talks to uma API de rede over the internal network."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 17 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 95.31 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 115.18 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 188.98 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 452.33 ms
+
+- **query 594**: "Regra do projeto: testar o the MCP server antes de qualquer release."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 14 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 78.12 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 96.28 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 166.23 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 342.39 ms
+
+- **query 606**: "TODO: refatorar tokio para não depender de uma fila."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 17 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 101.96 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 118.64 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 208.08 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 411.18 ms
+
+- **query 607**: "The the pager service talks to a background thread over the internal network. o índice está em produção no ambiente de a camada de rede."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.854562, plateau 24 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 137.72 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 168.83 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 303.05 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 459.72 ms
+
+- **query 612**: "TODO: refatorar HNSW para não depender de o formato antigo."
+  id-recall 0.50, score-recall 1.00, kth exact score 1.000000, plateau 21 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 80.80 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 107.53 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 194.94 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 408.18 ms
+
+- **query 614**: "The founder prefers ONNX over panics. Never use o formato antigo; standardize on o índice."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.891823, plateau 24 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 126.26 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 146.19 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 263.06 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 457.42 ms
+
+- **query 620**: "Always testar the the MCP server before shipping."
+  id-recall 0.30, score-recall 1.00, kth exact score 1.000000, plateau 20 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 70.82 ms
+  ef=512: id-recall 0.30, score-recall 1.00, 89.37 ms
+  ef=1024: id-recall 0.30, score-recall 1.00, 179.51 ms
+  ef=2048: id-recall 0.30, score-recall 1.00, 337.61 ms
+
+- **query 634**: "O crash recovery usa o cache de páginas e depende de panics. o cache de páginas está em produção no ambiente de a camada de rede."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.932927, plateau 16 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 135.72 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 149.74 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 261.43 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 438.20 ms
+
+- **query 643**: "Never use unwrap(); standardize on HNSW. Never use a cloud service; standardize on the embedder."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.836152, plateau 21 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 131.40 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 138.33 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 256.32 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 400.83 ms
+
+- **query 659**: "Never use o formato antigo; standardize on o índice. Regra do projeto: maintain o storage antes de qualquer release. Never use a background thread; standardize on Rust."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.868624, plateau 16 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 76.80 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 121.17 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 273.73 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 516.78 ms
+
+- **query 660**: "The founder prefers ONNX over a cloud service. The founder prefers HNSW over panics. Always test the a camada de rede before shipping."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.852181, plateau 16 vectors tie it
+  ef=384: id-recall 0.90, score-recall 1.00, 130.51 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 163.96 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 239.15 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 360.46 ms
+
+- **query 661**: "The founder prefers WAL over a cloud service. Prefiro ONNX a panics sempre que possível."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.884473, plateau 19 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 60.39 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 127.93 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 260.99 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 430.24 ms
+
+- **query 664**: "The founder prefers Rust over unwrap()."
+  id-recall 0.50, score-recall 1.00, kth exact score 1.000000, plateau 22 vectors tie it
+  ef=384: id-recall 0.40, score-recall 1.00, 97.63 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 123.71 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 251.18 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 430.71 ms
+
+- **query 672**: "TODO: refatorar the pager para não depender de the old format."
+  id-recall 0.20, score-recall 1.00, kth exact score 1.000000, plateau 18 vectors tie it
+  ef=384: id-recall 0.90, score-recall 1.00, 122.20 ms
+  ef=512: id-recall 0.20, score-recall 1.00, 155.11 ms
+  ef=1024: id-recall 0.20, score-recall 1.00, 276.89 ms
+  ef=2048: id-recall 0.20, score-recall 1.00, 468.80 ms
+
+- **query 701**: "The founder prefers o índice over panics. Always flush the o CLI before shipping."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.779993, plateau 29 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 90.80 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 145.46 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 299.49 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 522.49 ms
+
+- **query 716**: "Regra do projeto: maintain o indexação antes de qualquer release."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.999999, plateau 22 vectors tie it
+  ef=384: id-recall 0.10, score-recall 1.00, 60.65 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 76.73 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 113.12 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 167.25 ms
+
+- **query 750**: "a B-tree is deployed in the produção environment. The storage runs on the embedder and depends on reflection. The o CLI runs on o índice and depends on panics."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.831465, plateau 19 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 127.63 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 166.02 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 241.78 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 435.72 ms
+
+- **query 800**: "Always vacuum the indexação before shipping."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 14 vectors tie it
+  ef=384: id-recall 0.90, score-recall 1.00, 73.89 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 90.85 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 172.37 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 298.45 ms
+
+- **query 817**: "WAL is deployed in the storage environment. The the MCP server runs on tokio and depends on uma API de rede."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.865268, plateau 17 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 138.15 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 144.94 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 283.59 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 473.87 ms
+
+- **query 837**: "o cache de páginas is deployed in the indexação environment. O o CLI usa o cache de páginas e depende de uma fila. The staging runs on ONNX and depends on a cloud service."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.867643, plateau 24 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 122.75 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 156.56 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 246.26 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 366.18 ms
+
+- **query 843**: "ONNX está em produção no ambiente de the MCP server."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 20 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 115.86 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 142.00 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 179.93 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 229.11 ms
+
+- **query 853**: "TODO: refatorar the pager para não depender de the old format."
+  id-recall 0.20, score-recall 1.00, kth exact score 1.000000, plateau 18 vectors tie it
+  ef=384: id-recall 0.90, score-recall 1.00, 83.28 ms
+  ef=512: id-recall 0.20, score-recall 1.00, 125.98 ms
+  ef=1024: id-recall 0.20, score-recall 1.00, 254.26 ms
+  ef=2048: id-recall 0.20, score-recall 1.00, 429.73 ms
+
+- **query 866**: "The founder prefers a B-tree over panics. Never use the old format; standardize on o índice."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.849714, plateau 20 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 131.09 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 146.22 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 256.19 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 416.22 ms
+
+- **query 889**: "Never use uma API de rede; standardize on o índice. Prefiro a B-tree a reflection sempre que possível."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.894137, plateau 15 vectors tie it
+  ef=384: id-recall 1.00, score-recall 1.00, 133.48 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 148.71 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 265.71 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 453.75 ms
+
+- **query 904**: "The founder prefers a B-tree over uma fila."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 15 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 88.45 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 120.91 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 258.14 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 463.02 ms
+
+- **query 913**: "The founder prefers a B-tree over uma fila."
+  id-recall 0.60, score-recall 1.00, kth exact score 1.000000, plateau 15 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 91.57 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 106.89 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 228.35 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 462.31 ms
+
+- **query 925**: "The o cache de páginas service talks to a cloud service over the internal network."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.999999, plateau 14 vectors tie it
+  ef=384: id-recall 0.80, score-recall 1.00, 101.64 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 116.70 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 200.49 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 265.68 ms
+
+- **query 931**: "Always maintain the recall before shipping. Always manter the storage before shipping."
+  id-recall 0.50, score-recall 1.00, kth exact score 0.928970, plateau 26 vectors tie it
+  ef=384: id-recall 0.60, score-recall 1.00, 74.33 ms
+  ef=512: id-recall 0.50, score-recall 1.00, 93.71 ms
+  ef=1024: id-recall 0.50, score-recall 1.00, 162.80 ms
+  ef=2048: id-recall 0.50, score-recall 1.00, 359.92 ms
+
+- **query 961**: "Regra do projeto: vacuum o recall antes de qualquer release."
+  id-recall 0.30, score-recall 1.00, kth exact score 1.000000, plateau 23 vectors tie it
+  ef=384: id-recall 0.50, score-recall 1.00, 63.32 ms
+  ef=512: id-recall 0.30, score-recall 1.00, 50.98 ms
+  ef=1024: id-recall 0.30, score-recall 1.00, 70.47 ms
+  ef=2048: id-recall 0.30, score-recall 1.00, 151.75 ms
+
+- **query 967**: "WAL is deployed in the storage environment. The o CLI runs on MiniLM and depends on reflection."
+  id-recall 0.60, score-recall 1.00, kth exact score 0.867733, plateau 14 vectors tie it
+  ef=384: id-recall 0.90, score-recall 1.00, 105.93 ms
+  ef=512: id-recall 0.60, score-recall 1.00, 85.98 ms
+  ef=1024: id-recall 0.60, score-recall 1.00, 222.61 ms
+  ef=2048: id-recall 0.60, score-recall 1.00, 430.12 ms
+
+- **query 995**: "The founder prefers MiniLM over a background thread. Never use panics; standardize on o índice."
+  id-recall 0.30, score-recall 1.00, kth exact score 0.826836, plateau 22 vectors tie it
+  ef=384: id-recall 0.70, score-recall 1.00, 131.07 ms
+  ef=512: id-recall 0.30, score-recall 1.00, 134.50 ms
+  ef=1024: id-recall 0.30, score-recall 1.00, 214.08 ms
+  ef=2048: id-recall 0.30, score-recall 1.00, 439.08 ms
+
