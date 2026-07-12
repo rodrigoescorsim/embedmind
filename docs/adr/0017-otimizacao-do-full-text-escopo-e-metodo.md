@@ -97,6 +97,38 @@ harness (`benches/run_all.sh --full`), **ou** quando o founder decide
 conscientemente aceitar uma limitação de escala documentada (não é decisão
 default desta fase — ver "Alternativas rejeitadas").
 
+## Resultado do profiling (FT1/S24)
+
+Medição feita com instrumentação manual (`Instant` por fase, `Store::search_text_profiled` +
+binário `profile_fts`) sobre `agent-mem-100k` aquecido (metodologia BENCHMARKS.md §3), 1000
+queries, 50 de warm-up. Relatório bruto completo em
+[`benches/results/profile-fts-100k.txt`](../../benches/results/profile-fts-100k.txt).
+
+Wall time medido pela instrumentação: p50 994,33 ms, p99 4.576,46 ms — consistente com a ordem
+de grandeza do `1.224,62 ms` de p99 do harness citado no Contexto (mesma fase híbrida, método de
+medição diferente).
+
+| fase | total ms (1000 queries) | fração do tempo medido |
+|---|---:|---:|
+| postings lookup (I/O de página + decodificação) | 13.863,27 | 1,2% |
+| **keep (recarga do registro + re-checagem de tombstone/scope/filtro)** | **1.030.310,79** | **88,8%** |
+| doc_len (recarga do registro + re-tokenização) | 52.272,67 | 4,5% |
+| scoring (acumulação no `HashMap` + sort) | 63.436,74 | 5,5% |
+
+18.090 termos casados no total; 366.468.601 postings visitados no total (~366.469 por query em
+média).
+
+**Causa dominante identificada:** a closure `keep` — não a decodificação de postings, não o
+hashing do `HashMap<Ulid, f32>`, não a re-tokenização de `doc_len` isolada. `keep` sozinha
+responde por 88,8% do tempo do meio full-text, acima do limiar de 60% que definia "causa
+dominante" no critério de pronto desta task. As hipóteses de I/O de página e custo do `HashMap`
+ficam descartadas por medição (1,2% e 5,5% respectivamente, não 4 — o `HashMap` está embutido em
+"scoring" no instrumentado, não isolado à parte, mas de qualquer forma marginal frente a `keep`).
+
+Candidato natural para a próxima task de otimização (FT2): eliminar ou reduzir a recarga do
+registro inteiro dentro de `keep` por candidato — não decidido aqui, apenas anotado; esta task é
+somente medição, nenhuma otimização entra neste commit.
+
 ## Alternativas rejeitadas
 
 - **Modo `vector_only` opcional exposto ao usuário, sem otimizar o FTS**:
