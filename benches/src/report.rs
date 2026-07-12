@@ -177,8 +177,9 @@ pub fn render_markdown(
     // --- metric table (one column per dataset) ---
     render_metric_table(&mut out, results);
 
-    // --- competitor comparison ---
-    render_competitor_table(&mut out, compare_result, competitors);
+    // --- competitor comparison: two labeled planes (BENCHMARKS.md §1, S17) ---
+    render_index_only_table(&mut out, compare_result, competitors);
+    render_text_to_result_table(&mut out, compare_result, competitors);
 
     // --- honesty: where EmbedMind loses ---
     render_losses(&mut out, compare_result, competitors);
@@ -279,20 +280,26 @@ fn render_metric_table(out: &mut String, results: &[SuiteResult]) {
     );
 }
 
-fn render_competitor_table(
+/// Plane 1 (BENCHMARKS.md §1, S17): **index-only** — pre-computed vectors in,
+/// ids out. Isolates index quality; the only plane where a vector-only store
+/// can legitimately win, since it never pays an embedding cost here. EmbedMind
+/// is shown via its `query engine` split (search + fusion + record load, no
+/// embed) — the number comparable to a baseline that receives ready-made
+/// vectors.
+fn render_index_only_table(
     out: &mut String,
     compare_result: Option<&SuiteResult>,
     competitors: &[(&'static Competitor, CompetitorOutcome)],
 ) {
     let _ = writeln!(
         out,
-        "### vs. baselines (same vectors, same queries, same k)\n"
+        "### vs. baselines — index-only (same vectors, same queries, same k)\n"
     );
     let biggest = compare_result;
     let ds = biggest.map(|r| r.dataset).unwrap_or("—");
     let _ = writeln!(
         out,
-        "_Comparison on `{ds}`. Competitor versions are pinned in `benches/src/competitors.rs` and recorded here (BENCHMARKS.md §1). Rows that could not run on this machine say so explicitly — never fabricated. EmbedMind's query p50/p99 include embedding the query text; the baselines receive ready-made vectors, so the like-for-like numbers are the `query engine` rows in the table above (S17). Each row states its **scope** — what it returns and what it persists (BENCHMARKS.md §4 rule 6): a smaller file or a faster query that does less is not a win row._\n"
+        "_Comparison on `{ds}`. Competitor versions are pinned in `benches/src/competitors.rs` and recorded here (BENCHMARKS.md §1). Rows that could not run on this machine say so explicitly — never fabricated. This plane hands every system, including EmbedMind, the identical pre-computed vector — EmbedMind's row is its `query engine` split (search + fusion + record load, embed time excluded, S17), the like-for-like number against a baseline that never embeds. It answers \"whose index is better\", the plane where a vector-only store can legitimately win (see the text→result plane below for the product workload, where it can't skip the embedding toll). Each row states its **scope** — what it returns and what it persists (BENCHMARKS.md §4 rule 6): a smaller file or a faster query that does less is not a win row._\n"
     );
     let _ = writeln!(
         out,
@@ -307,8 +314,8 @@ fn render_competitor_table(
             "| **EmbedMind** | {} | {:.4} | {:.2} ms | {:.2} ms | — (embeds; see note) | {} | {} | {} |",
             env!("CARGO_PKG_VERSION"),
             r.recall.recall_at_k,
-            r.query_p50_ms,
-            r.query_p99_ms,
+            r.query_engine_p50_ms,
+            r.query_engine_p99_ms,
             human_bytes(r.file_bytes),
             EMBEDMIND_SCOPE.returns,
             EMBEDMIND_SCOPE.persists,
@@ -349,6 +356,91 @@ fn render_competitor_table(
     let _ = writeln!(out);
 }
 
+/// Plane 2 (BENCHMARKS.md §1, S17): **text→result** — text in, results out,
+/// the product workload. Every system pays the same embedding toll: the query
+/// is embedded once with the shared ONNX pipeline (measured *outside* every
+/// competitor, via [`SuiteResult::query_embed_p50_ms`]/`_p99_ms`) and that cost
+/// is added to the competitor's own index-only query time, so its row is
+/// genuinely end-to-end — the same shape as EmbedMind's own `query_p50/p99_ms`,
+/// which already embeds internally. Percentiles are summed per component (not
+/// recomposed from raw samples), the same approximation the metric table above
+/// already documents for embed+engine.
+fn render_text_to_result_table(
+    out: &mut String,
+    compare_result: Option<&SuiteResult>,
+    competitors: &[(&'static Competitor, CompetitorOutcome)],
+) {
+    let _ = writeln!(
+        out,
+        "### vs. baselines — text→result (same embedding toll, same queries, same k)\n"
+    );
+    let biggest = compare_result;
+    let ds = biggest.map(|r| r.dataset).unwrap_or("—");
+    let _ = writeln!(
+        out,
+        "_Comparison on `{ds}`. The product question: an agent developer hands text in and gets results out. Every system here pays for embedding the query with the same all-MiniLM-L6-v2 pipeline (BENCHMARKS.md §1) — for the baselines it is measured separately (outside their own timing, via EmbedMind's `query embed` split on this run) and added to their index-only query time; EmbedMind's own `query p50/p99` already include it end-to-end. This is the plane index-only comparisons hide: a vector-only store cannot skip this toll in real use. recall@10 is EmbedMind's own end-to-end figure against each competitor's index-only recall — the index quality question is answered by the plane above, not repeated here. Rows that could not run on this machine say so explicitly — never fabricated._\n"
+    );
+    let _ = writeln!(
+        out,
+        "| System | Version | recall@10 | query p50 (embed + query) | query p99 (embed + query) |"
+    );
+    let _ = writeln!(out, "|---|---|---:|---:|---:|");
+
+    if let Some(r) = biggest {
+        let _ = writeln!(
+            out,
+            "| **EmbedMind** | {} | {:.4} | {:.2} ms | {:.2} ms |",
+            env!("CARGO_PKG_VERSION"),
+            r.recall.recall_at_k,
+            r.query_p50_ms,
+            r.query_p99_ms,
+        );
+    }
+
+    for (c, outcome) in competitors {
+        match outcome {
+            CompetitorOutcome::Measured(m) => {
+                let (p50, p99) = match biggest {
+                    Some(r) => (
+                        sum_opt(m.query_p50_ms, Some(r.query_embed_p50_ms)),
+                        sum_opt(m.query_p99_ms, Some(r.query_embed_p99_ms)),
+                    ),
+                    None => (None, None),
+                };
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} |",
+                    c.name,
+                    c.version,
+                    opt_f4(m.recall_at_10),
+                    opt_ms(p50),
+                    opt_ms(p99),
+                );
+            }
+            CompetitorOutcome::NotMeasured { reason } => {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} (target) | _not measured_ | _not measured_ | _not measured_ |",
+                    c.name, c.version
+                );
+                let _ = writeln!(out, "|   ↳ | | | _{reason}_ | |");
+            }
+        }
+    }
+    let _ = writeln!(out);
+}
+
+/// Adds two optional latencies (the query embed cost, measured once outside
+/// every competitor, plus the competitor's own index-only query time). `None`
+/// propagates — a component that could not be measured must never silently
+/// render as if it were zero.
+fn sum_opt(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        _ => None,
+    }
+}
+
 /// EmbedMind's own scope for the comparison table (`docs/BENCHMARKS.md` §4
 /// rule 6) — kept next to [`crate::competitors::Scope`] so both sides of the
 /// comparison state their scope the same way.
@@ -380,11 +472,21 @@ fn render_losses(
                     any = true;
                 }
                 if let Some(cp) = m.query_p99_ms
+                    && cp < r.query_engine_p99_ms - 1e-6
+                {
+                    let _ = writeln!(
+                        out,
+                        "- **query p99 (index-only)**: {} {:.2} ms beats EmbedMind's engine time {:.2} ms on `{}`.",
+                        c.name, cp, r.query_engine_p99_ms, r.dataset
+                    );
+                    any = true;
+                }
+                if let Some(cp) = sum_opt(m.query_p99_ms, Some(r.query_embed_p99_ms))
                     && cp < r.query_p99_ms - 1e-6
                 {
                     let _ = writeln!(
                         out,
-                        "- **query p99**: {} {:.2} ms beats EmbedMind {:.2} ms on `{}`.",
+                        "- **query p99 (text→result)**: {} {:.2} ms (embed + query) beats EmbedMind {:.2} ms on `{}`.",
                         c.name, cp, r.query_p99_ms, r.dataset
                     );
                     any = true;
@@ -790,6 +892,107 @@ mod tests {
         assert!(md.contains("sqlite-vec"));
         assert!(md.contains("0.1.10-alpha.4"));
         assert!(md.contains("_not measured_"));
+    }
+
+    #[test]
+    fn markdown_has_both_labeled_comparison_planes() {
+        // S17/BQ3: index-only (pre-computed vectors in, ids out) and
+        // text→result (text in, results out, same embedding toll) must both
+        // appear, clearly labeled, alongside the existing recall-quality
+        // index-only section.
+        let env = RunEnv::capture("2026-07-11");
+        let r = fake_result("agent-mem-10k", 10_000, 5.0, 100.0);
+        let competitors: Vec<_> = COMPETITORS
+            .iter()
+            .map(|c| {
+                (
+                    c,
+                    CompetitorOutcome::NotMeasured {
+                        reason: "feature disabled".into(),
+                    },
+                )
+            })
+            .collect();
+        let md = render_markdown(&env, &[r], &competitors, None);
+        assert!(md.contains("vs. baselines — index-only"));
+        assert!(md.contains("vs. baselines — text→result"));
+        // index-only precedes text→result (index quality first, then the
+        // product workload).
+        let idx_pos = md.find("vs. baselines — index-only").unwrap();
+        let ttr_pos = md.find("vs. baselines — text→result").unwrap();
+        assert!(idx_pos < ttr_pos);
+    }
+
+    #[test]
+    fn text_to_result_sums_embed_plus_competitor_query() {
+        // The text→result plane must add the query-embed cost (measured
+        // outside every competitor, via the shared TimingEmbedder split) to
+        // each competitor's own index-only query time — never just the bare
+        // index-only number, which would silently hide the embedding toll.
+        let env = RunEnv::capture("2026-07-11");
+        let mut r = fake_result("agent-mem-10k", 10_000, 5.0, 100.0);
+        r.query_embed_p50_ms = 3.0;
+        r.query_embed_p99_ms = 7.0;
+        let competitors: Vec<_> = COMPETITORS
+            .iter()
+            .map(|c| {
+                (
+                    c,
+                    CompetitorOutcome::Measured(crate::competitors::CompetitorMetrics {
+                        recall_at_10: Some(0.98),
+                        query_p50_ms: Some(1.0),
+                        query_p99_ms: Some(2.0),
+                        cold_open_ms: None,
+                        ingest_vecs_per_sec: Some(1000.0),
+                        file_bytes: Some(1024),
+                        peak_rss_mib: None,
+                    }),
+                )
+            })
+            .collect();
+        let md = render_markdown(&env, std::slice::from_ref(&r), &competitors, None);
+
+        // 3.0 (embed) + 1.0 (competitor query) = 4.0 ms p50;
+        // 7.0 (embed) + 2.0 (competitor query) = 9.0 ms p99.
+        let ttr_section = &md[md.find("vs. baselines — text→result").unwrap()..];
+        assert!(
+            ttr_section.contains("4.00 ms"),
+            "expected summed p50 in text→result section:\n{ttr_section}"
+        );
+        assert!(
+            ttr_section.contains("9.00 ms"),
+            "expected summed p99 in text→result section:\n{ttr_section}"
+        );
+        // The index-only section must NOT show the summed numbers — it
+        // reports the bare competitor query time (its own index-only plane).
+        let idx_section = &md[md.find("vs. baselines — index-only").unwrap()
+            ..md.find("vs. baselines — text→result").unwrap()];
+        assert!(idx_section.contains("1.00 ms"));
+        assert!(idx_section.contains("2.00 ms"));
+    }
+
+    #[test]
+    fn text_to_result_never_fabricates_a_number_for_not_measured() {
+        // BENCHMARKS.md §4 rule 1: a competitor whose adapter didn't run must
+        // report "not measured" in the text→result plane too, never a
+        // fabricated sum.
+        let env = RunEnv::capture("2026-07-11");
+        let r = fake_result("agent-mem-10k", 10_000, 5.0, 100.0);
+        let competitors: Vec<_> = COMPETITORS
+            .iter()
+            .map(|c| {
+                (
+                    c,
+                    CompetitorOutcome::NotMeasured {
+                        reason: "feature disabled".into(),
+                    },
+                )
+            })
+            .collect();
+        let md = render_markdown(&env, &[r], &competitors, None);
+        let ttr_section = &md[md.find("vs. baselines — text→result").unwrap()..];
+        assert!(ttr_section.contains("_not measured_"));
+        assert!(ttr_section.contains("feature disabled"));
     }
 
     #[test]

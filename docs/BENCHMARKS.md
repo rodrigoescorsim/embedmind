@@ -14,11 +14,29 @@
 | Chroma (local/embedded mode, pinned version) | the product-category competitor: a local store that also embeds (same all-MiniLM-L6-v2) — the alternative an agent developer actually weighs |
 | Brute-force exact scan (our own, in-memory) | recall ceiling + sanity floor for latency claims |
 
-Two comparison planes, always labeled (S17): **index-only** — pre-computed vectors in,
-ids out; isolates index quality, the only plane where vector-only stores can appear —
-and **text→result** — text in, results out; the product workload, where every system
-pays the same embedding toll (measured with the same ONNX pipeline and added to the
-systems that don't embed themselves).
+Two comparison planes, always labeled and rendered as separate tables (S17):
+**index-only** — pre-computed vectors in, ids out; isolates index quality, the only
+plane where vector-only stores can legitimately win, since they never pay an embedding
+cost here. EmbedMind's row on this plane is its `query engine` split (search + fusion +
+record load, embed time excluded) — the like-for-like number against a baseline that
+receives ready-made vectors.
+
+And **text→result** — text in, results out, the product workload an agent developer
+actually faces. Every system pays the same embedding toll: the query is embedded once
+with the shared ONNX pipeline (measured *outside* every competitor, via EmbedMind's own
+`query embed` split on that run) and added to the competitor's index-only query time, so
+its row becomes genuinely end-to-end — the same shape as EmbedMind's own `query
+p50/p99`, which already embeds internally. recall@10 on this plane is EmbedMind's
+end-to-end figure against each competitor's own index-only recall (recall doesn't change
+with the embedding toll — it is not re-derived, just placed side by side; the index
+quality question belongs to the plane above). Chroma is included in this plane under the
+same rule as every other competitor: it receives pre-computed vectors (never re-embeds
+on its own), so it pays the identical externally-measured embedding cost the sqlite-vec
+and zvec rows do.
+
+Both planes obey the same honesty rule (§4): a competitor whose adapter did not run
+reports "not measured" with the reason on *both* tables — the text→result plane never
+fabricates a sum from a missing number.
 
 Rules of engagement: pinned versions (recorded in results), default/recommended settings
 for each baseline (no de-tuning the competition), same hardware, same dataset, same
@@ -52,7 +70,7 @@ pinned hash) so anyone can re-run everything with `cargo bench` / `benches/run_a
 | Metric | How measured |
 |---|---|
 | `recall@10` | vs. brute-force exact top-10 (and vs. labels on the public set); mean **and** per-query distribution (min/p10/p50) — a good mean can hide a catastrophic tail (S16) |
-| query latency p50 / p99 | single-thread, 1k queries, warm cache; **and** cold-open first-query (file just opened — the "no server" scenario). Reported **decomposed**: `embed` (query embedding) vs. `engine` (search + fusion + record load) — our embed-inclusive total vs. a vector-only system's search time is exactly the asymmetry this decomposition prevents (S17) |
+| query latency p50 / p99 | single-thread, 1k queries, warm cache; **and** cold-open first-query (file just opened — the "no server" scenario). Reported **decomposed**: `embed` (query embedding) vs. `engine` (search + fusion + record load) — our embed-inclusive total vs. a vector-only system's search time is exactly the asymmetry this decomposition prevents (S17). This split feeds both comparison tables: `engine` is EmbedMind's row on the index-only plane, `embed` is added to each competitor's own query time to build their row on the text→result plane |
 | ingest throughput | memories/sec, batch and one-at-a-time (agent pattern), fsync `full` |
 | file size on disk | after ingest, and after `vacuum` |
 | peak RSS | during ingest and during query load |
