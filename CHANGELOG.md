@@ -422,6 +422,16 @@ Pre-v0.1 — under active development, repo private until M1 completes
   ADRs ([docs/adr/](docs/adr/)).
 
 ### Changed
+- **Full-text search is ~10x faster at 100k memories** (story S25,
+  `docs/adr/0018`): the BM25 scan now scores a cheap per-candidate upper
+  bound first and only reloads/evaluates candidate records in descending
+  bound order, stopping as soon as the remaining bounds provably cannot
+  enter the top-k. Results are identical to the exhaustive scan — same
+  hits, bit-exact scores, same order — verified by equivalence tests and a
+  25/25 bit-exact check on the real 100k corpus. Measured (full-text half
+  of hybrid recall, no embed, 1000 warm queries @ 100k): p50 994 → 94 ms,
+  p99 4,577 → 551 ms. Still above the 50 ms p99 NFR — postings-level work
+  (FT3) remains on the roadmap.
 - Size NFR (honesty note, `docs/adr/0010`): the "< 40 MB incl. model" ceiling
   now governs the **compressed release artifact** users download (~20 MiB
   today), not the raw binary. The raw release binary is ~45 MiB because `ort`

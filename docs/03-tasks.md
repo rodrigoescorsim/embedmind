@@ -474,6 +474,15 @@ reduz trabalho, nunca muda quais documentos retornam ou sua ordem).
   `query_engine_p50/p99_ms` @ 100k.
 - **Verificação:** `cargo test --workspace` + `benches/run_all.sh --full` (comparar
   contra o baseline pré-FT2, não sobrescrever sem registrar o antes/depois).
+- **Status (2026-07-12): ENTREGUE.** [ADR 0018](adr/0018-early-termination-no-scan-bm25.md)
+  registra o critério (corte quando o próximo upper bound < k-ésimo score exato,
+  estrito) e o porquê: a FT1 mediu a avaliação por candidato (`keep`+`doc_len`,
+  93,3%) como causa dominante, não a decodificação (1,2%) — o corte reduz
+  avaliações, não bytes. Antes/depois @ 100k (1000 queries, meio full-text sem
+  embed): p50 994,33 → 94,50 ms, p99 4.576,46 → 550,78 ms. Equivalência: teste
+  unitário com corte ativo/empates/filtros + 25/25 queries bit-idênticas no corpus
+  real (`bench_fts`). NFR p99 < 50 ms ainda não fecha → FT3 segue necessária;
+  re-rodada de `run_all.sh --full` fica para a validação da fase.
 
 ### FT3. Compressão delta+varint e/ou skip lists nas postings (story S26) — depende de FT1/FT2
 

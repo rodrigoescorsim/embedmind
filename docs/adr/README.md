@@ -27,5 +27,6 @@ vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvi
 | [0015](0015-ef-search-default-escalado-pelo-indice.md) | `ef_search` default escalado pelo tamanho do índice (patamares medidos) | Aceito |
 | [0016](0016-limiar-de-near-duplicate-medido.md) | Limiar de near-duplicate do `remember` medido no corpus (0.80) | Aceito |
 | [0017](0017-otimizacao-do-full-text-escopo-e-metodo.md) | Otimização do full-text: profiling antes de estrutura, bump de formato liberado | Aceito |
+| [0018](0018-early-termination-no-scan-bm25.md) | Early termination no scan BM25: avaliação limitada por bound, resultado idêntico | Aceito |
 
 Template: `Status · Contexto · Decisão · Alternativas rejeitadas · Consequências`.
