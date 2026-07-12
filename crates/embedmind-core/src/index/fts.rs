@@ -385,6 +385,16 @@ pub struct Hit {
 /// DESIGN §7). `doc_len` yields a candidate's current token length for BM25
 /// length normalization; returning `None` drops the candidate (its record is
 /// gone). Both closures are called at most once per candidate record.
+///
+/// Scan strategy (FT2, `docs/adr/0018`): FT1 measured `keep` + `doc_len` —
+/// both of which reload the candidate's record — at 93% of query time @ 100k,
+/// so this evaluates candidates lazily: a first pass scores a cheap upper
+/// bound per candidate from the postings alone (no closures), then a second
+/// pass evaluates candidates exactly, best bound first, stopping as soon as
+/// the remaining bounds fall strictly below the k-th best exact score. The
+/// result is identical — same hits, same scores, same order — to the
+/// exhaustive scan ([`search_profiled`] keeps that scan as the test oracle);
+/// early termination only skips work that provably cannot change the top k.
 pub fn search(
     src: &dyn PageSource,
     fts_root_page: u64,
@@ -422,12 +432,14 @@ pub fn search(
         meta.total_tokens as f32 / meta.doc_count as f32
     };
 
-    // Accumulate BM25 across terms. `scores` sums per candidate; `lengths`
-    // and `kept` memoize the per-record closures so each is hit at most once.
-    let mut scores: HashMap<Ulid, f32> = HashMap::new();
-    let mut lengths: HashMap<Ulid, Option<u32>> = HashMap::new();
-    let mut kept: HashMap<Ulid, bool> = HashMap::new();
-
+    // Pass 1 — decode every matched term's postings once and accumulate a
+    // per-candidate upper bound on its BM25 score, without calling `keep` or
+    // `doc_len`. `dl = 0` minimizes the length norm, so each term's bound
+    // dominates its true contribution for any document length; the bound
+    // stays sound under f32 rounding because +, ×, ÷ round monotonically and
+    // the exact score below sums the same terms in the same order.
+    let mut matched: Vec<(f32, Postings)> = Vec::with_capacity(query_terms.len());
+    let mut bounds: HashMap<Ulid, f32> = HashMap::new();
     for term in &query_terms {
         let Some(postings) = postings_for(src, meta.dict_root, term.as_bytes())? else {
             continue;
@@ -440,37 +452,67 @@ pub fn search(
         // because df <= N (a term's postings are a subset of the corpus).
         let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
         for p in &postings.entries {
-            let id = p.record_id;
-            if !*kept.entry(id).or_insert_with(|| keep(id)) {
-                continue;
-            }
-            let dl = match lengths.entry(id) {
-                std::collections::hash_map::Entry::Occupied(e) => *e.get(),
-                std::collections::hash_map::Entry::Vacant(e) => *e.insert(doc_len(id)?),
-            };
-            let Some(dl) = dl else {
-                continue; // record vanished; skip it
-            };
             let tf = p.term_freq as f32;
-            let norm = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl as f32 / avgdl.max(1.0));
-            let contribution = idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
-            *scores.entry(id).or_insert(0.0) += contribution;
+            let norm = tf + BM25_K1 * (1.0 - BM25_B);
+            let bound = idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
+            *bounds.entry(p.record_id).or_insert(0.0) += bound;
         }
+        matched.push((idf, postings));
     }
 
-    let mut hits: Vec<Hit> = scores
-        .into_iter()
-        .filter(|&(_, s)| s > 0.0)
-        .map(|(record_id, score)| Hit { record_id, score })
-        .collect();
-    // Best score first; ties broken by id for a deterministic order (G3).
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+    // Best bound first; ties by id so the evaluation order is deterministic.
+    let mut candidates: Vec<(Ulid, f32)> = bounds.into_iter().collect();
+    candidates.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.record_id.cmp(&b.record_id))
+            .then_with(|| a.0.cmp(&b.0))
     });
-    hits.truncate(k);
+
+    // Pass 2 — evaluate candidates exactly, best bound first. Once k exact
+    // hits exist and the next bound is *strictly* below the k-th best exact
+    // score, no unevaluated candidate can enter the top k (its true score is
+    // at most its bound) nor displace an equal-score hit (a tie would need
+    // bound == k-th score, which is not strictly below), so stop.
+    let mut hits: Vec<Hit> = Vec::with_capacity(k + 1);
+    for (id, bound) in candidates {
+        if hits.len() == k && bound < hits[k - 1].score {
+            break;
+        }
+        if !keep(id) {
+            continue;
+        }
+        let Some(dl) = doc_len(id)? else {
+            continue; // record vanished; skip it
+        };
+        // Exact BM25 — same expression and same (sorted) term order as the
+        // exhaustive scan, so scores are bit-identical to it.
+        let mut score = 0.0f32;
+        for (idf, postings) in &matched {
+            let Ok(i) = postings.entries.binary_search_by(|p| p.record_id.cmp(&id)) else {
+                continue;
+            };
+            let tf = postings.entries[i].term_freq as f32;
+            let norm = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl as f32 / avgdl.max(1.0));
+            score += idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
+        }
+        if score <= 0.0 {
+            continue;
+        }
+        // Insert keeping (score desc, id asc) — the same order the exhaustive
+        // scan sorts by (G3) — and keep only the best k.
+        let pos =
+            hits.partition_point(|h| h.score > score || (h.score == score && h.record_id < id));
+        if pos < k {
+            hits.insert(
+                pos,
+                Hit {
+                    record_id: id,
+                    score,
+                },
+            );
+            hits.truncate(k);
+        }
+    }
     Ok(hits)
 }
 
@@ -516,19 +558,21 @@ pub struct SearchPhaseTimings {
     pub postings_visited: u64,
 }
 
-/// Same BM25 search as [`search`], instrumented phase-by-phase with
-/// [`std::time::Instant`] (`docs/adr/0017` §1 method: manual instrumentation
-/// is the accepted fallback when native flamegraph tooling — `perf`/`samply`
-/// — is unavailable on the box). Kept as a **separate** function rather than
+/// The **exhaustive** BM25 scan (the pre-FT2 `search` algorithm: every
+/// posting of every matched term is scored, `keep`/`doc_len` memoized per
+/// candidate), instrumented phase-by-phase with [`std::time::Instant`]
+/// (`docs/adr/0017` §1 method: manual instrumentation is the accepted
+/// fallback when native flamegraph tooling — `perf`/`samply` — is
+/// unavailable on the box). Kept as a **separate** function rather than
 /// adding timing to `search` itself so the production path (`Store::recall`,
 /// `Store::search_text`) never pays a single extra `Instant::now()` call —
 /// this is read-only profiling surface, not a production code path change
 /// (`#[doc(hidden)]`, same visibility pattern as [`fuzz_decode_page`]).
 ///
-/// Duplicates `search`'s scoring logic rather than calling it, because the
-/// phase boundaries (postings lookup vs. `keep` vs. `doc_len` vs. scoring)
-/// only exist inside the loop body — there is no seam to wrap from outside
-/// without changing `search` itself, which story FT1 explicitly must not do.
+/// Since FT2 (`docs/adr/0018`) this doubles as the **equivalence oracle**:
+/// [`search`] terminates its scan early but must return exactly what this
+/// full scan returns — same hits, same scores, same order — in any regime;
+/// the equivalence tests below compare the two directly.
 #[doc(hidden)]
 pub fn search_profiled(
     src: &dyn PageSource,
@@ -796,6 +840,91 @@ mod tests {
         assert_eq!(plain, profiled);
         assert_eq!(timings.terms_matched, 2); // "memory" and "rust"
         assert!(timings.postings_visited >= 3); // doc 0 + doc 2 for "rust", doc 0 + doc 2 for "memory"
+    }
+
+    #[test]
+    fn early_termination_matches_exhaustive_scan_on_larger_corpus() {
+        // FT2 (`docs/adr/0018`) hard invariant: the bounded scan in `search`
+        // must return exactly what the exhaustive scan returns — same hits,
+        // same (bit-identical) scores, same order — including when the cut
+        // actually triggers: k far below the candidate count, common + rare
+        // terms, varied document lengths and term frequencies, exact-tie
+        // duplicates, a keep filter, and vanished records.
+        let mut pager = pager(4096);
+        let mut docs: Vec<String> = Vec::new();
+        for i in 0..240 {
+            // Every doc shares "common"; its tf and the doc length vary so
+            // bounds and exact scores disagree in both directions, and the
+            // cycles (7, 23) repeat content so exact score ties occur.
+            let mut d = "common ".repeat(1 + i % 7);
+            d.push_str(&"filler ".repeat(i % 23));
+            if i % 11 == 0 {
+                d.push_str("rare ");
+            }
+            if i % 37 == 0 {
+                d.push_str("rarest");
+            }
+            docs.push(d);
+        }
+        let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+        let ids = index_all(&mut pager, &doc_refs);
+        let mut contents = std::collections::HashMap::new();
+        for (id, d) in ids.iter().zip(&docs) {
+            contents.insert(*id, d.clone());
+        }
+        // Every 5th record "vanished": indexed, but `doc_len` yields None.
+        let mut partial = contents.clone();
+        for id in ids.iter().step_by(5) {
+            partial.remove(id);
+        }
+        // A keep filter that rejects a third of the corpus, including
+        // candidates holding the best bounds.
+        let dropped: std::collections::HashSet<Ulid> = ids
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(i, id)| (i % 3 == 0).then_some(id))
+            .collect();
+
+        let root = pager.header().fts_root_page;
+        for query in [
+            "common",
+            "common rare",
+            "rare rarest common",
+            "filler common",
+        ] {
+            for k in [1, 3, 10, 500] {
+                let plain = search(&pager, root, query, k, |_| true, len_of(&contents)).unwrap();
+                let (full, _) =
+                    search_profiled(&pager, root, query, k, |_| true, len_of(&contents)).unwrap();
+                assert_eq!(plain, full, "query={query:?} k={k}");
+
+                let plain = search(
+                    &pager,
+                    root,
+                    query,
+                    k,
+                    |id| !dropped.contains(&id),
+                    len_of(&contents),
+                )
+                .unwrap();
+                let (full, _) = search_profiled(
+                    &pager,
+                    root,
+                    query,
+                    k,
+                    |id| !dropped.contains(&id),
+                    len_of(&contents),
+                )
+                .unwrap();
+                assert_eq!(plain, full, "query={query:?} k={k} (keep filter)");
+
+                let plain = search(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
+                let (full, _) =
+                    search_profiled(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
+                assert_eq!(plain, full, "query={query:?} k={k} (vanished records)");
+            }
+        }
     }
 
     #[test]
