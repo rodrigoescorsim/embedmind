@@ -126,20 +126,30 @@ pub struct SuiteOptions {
 
 /// Runs the full metric suite for `spec` against an already-materialized
 /// dataset: `store` opened from `spec.mind_path`, `set` its parallel vectors.
+///
+/// `set` is taken **by value and dropped right after the recall phase** (S28):
+/// the brute-force baseline vectors are harness apparatus, not product memory
+/// (~152 MiB resident at 100k — half the 300 MiB RAM NFR), and the peak-RSS
+/// phases below must measure what a real process serving this store holds
+/// (engine + ONNX session), not the harness's own reference data. A caller
+/// that needs the vectors afterwards (the competitor comparison) reloads the
+/// `.vec` sidecar — cheap next to letting it contaminate the NFR measurement.
 pub fn run_suite(
     spec: &DatasetSpec,
     data_dir: &Path,
     store: Store,
-    set: &VectorSet,
+    set: VectorSet,
     embedder: &Arc<dyn Embedder>,
     opts: SuiteOptions,
 ) -> embedmind_core::Result<SuiteResult> {
     let stats = store.stats()?;
     let model_id = stats.embedding_model_id.clone().unwrap_or_default();
+    let count = set.entries.len();
+    let dims = set.dims;
 
     // --- recall@10 (fixed query set, same as Part 1's baseline binary) ---
     let recall_texts = recall::query_texts(spec, opts.warm_queries);
-    let recall_report = recall::measure(&store, set, embedder.as_ref(), &recall_texts, K)?;
+    let recall_report = recall::measure(&store, &set, embedder.as_ref(), &recall_texts, K)?;
 
     // Pre-embed the query set once; both the warm-latency loop and the
     // competitors receive these identical normalized vectors.
@@ -149,6 +159,11 @@ pub fn run_suite(
         normalize(&mut v);
         query_vectors.push(v);
     }
+
+    // The recall phase was the set's last consumer — release it before any
+    // RSS-measured phase runs (S28; `profile_rss` verified the allocator does
+    // return the bytes to the OS on drop).
+    drop(set);
 
     // --- warm query latency, decomposed embed vs. engine vs. vector-only (S17
     // + BQ/S16 follow-up) ---
@@ -185,8 +200,8 @@ pub fn run_suite(
 
     Ok(SuiteResult {
         dataset: spec.name,
-        count: set.entries.len(),
-        dims: set.dims,
+        count,
+        dims,
         model_id,
         recall: recall_report,
         query_p50_ms: warm.total.p50_ms().unwrap_or(0.0),
