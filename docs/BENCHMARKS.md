@@ -114,6 +114,13 @@ baseline: `recall@10` drops > 1 pt · p99 query latency regresses > 15% · file 
 are deliberately loose (shared-runner noise); the reference machine confirms before a
 release is cut.
 
+A guard failure re-runs the full harness once before failing the job: a shared runner
+can stall on fsync (I/O contention on a noisy neighbor) and spike a single p99 sample
+far past any threshold that would still catch a real regression — observed 2026-07-12,
+`remember p99` at 109ms vs. a 12-19ms steady state on identical code in the surrounding
+runs (run 29209346867). One retry with fresh samples tells a transient stall (passes on
+retry) from a real regression (fails again); it does not loosen the thresholds above.
+
 Implementation: `.github/workflows/bench.yml` (path-filtered to engine/harness changes)
 runs the harness and then `compare_baseline` (`benches/src/regression.rs`) against a
 baseline. The baseline is *rolling*: the results of the last guard-passing run on
