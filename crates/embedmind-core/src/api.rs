@@ -843,6 +843,75 @@ impl Store {
         Ok(out)
     }
 
+    /// [`Store::search_text`], instrumented phase-by-phase — measurement-only
+    /// surface for story FT1 (`docs/adr/0017`), never called by production
+    /// `recall`/`search_text`. Exists so `benches/` can isolate where the
+    /// full-text half of hybrid recall spends its time on a real `.mind` file
+    /// through the same public `Store` boundary the harness already uses,
+    /// without exposing the internal pager to the bench crate.
+    #[doc(hidden)]
+    pub fn search_text_profiled(
+        &self,
+        query: Query,
+    ) -> Result<(Vec<Recalled>, index::fts::SearchPhaseTimings)> {
+        let root = self.pager.header().root_btree_page;
+        let fts_root = self.pager.header().fts_root_page;
+        let pager = &self.pager;
+        let cache: std::cell::RefCell<BTreeMap<Ulid, Option<MemoryRecord>>> =
+            std::cell::RefCell::new(BTreeMap::new());
+        let load = |id: Ulid| -> Result<Option<MemoryRecord>> {
+            if let Some(rec) = cache.borrow().get(&id) {
+                return Ok(rec.clone());
+            }
+            let rec = match btree::get(pager, root, &id.to_bytes())? {
+                Some(bytes) => Some(MemoryRecord::decode(&bytes)?),
+                None => None,
+            };
+            cache.borrow_mut().insert(id, rec.clone());
+            Ok(rec)
+        };
+
+        let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
+        let (hits, timings) = index::fts::search_profiled(
+            &self.pager,
+            fts_root,
+            &query.text,
+            query.limit,
+            |id| {
+                if filter_error.borrow().is_some() {
+                    return false;
+                }
+                match load(id) {
+                    Ok(Some(rec)) if in_scope(&query, &rec) => {
+                        match query.record_passes_filters(&rec) {
+                            Ok(pass) => pass,
+                            Err(e) => {
+                                *filter_error.borrow_mut() = Some(e);
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                }
+            },
+            |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),
+        )?;
+        if let Some(e) = filter_error.borrow_mut().take() {
+            return Err(e);
+        }
+
+        let mut out = Vec::with_capacity(hits.len());
+        for hit in hits {
+            if let Some(rec) = load(hit.record_id)? {
+                out.push(Recalled {
+                    memory: Memory::from_record(rec),
+                    score: hit.score,
+                });
+            }
+        }
+        Ok((out, timings))
+    }
+
     /// Fetches one memory by id. Tombstoned (forgotten) memories return
     /// `None`, exactly like absent ones. Superseded memories (S19) **are**
     /// returned — they are history, hidden from recall but not from a direct
