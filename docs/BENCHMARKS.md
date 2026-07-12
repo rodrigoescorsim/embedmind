@@ -121,12 +121,21 @@ far past any threshold that would still catch a real regression — observed 202
 runs (run 29209346867). One retry with fresh samples tells a transient stall (passes on
 retry) from a real regression (fails again); it does not loosen the thresholds above.
 
+"Same runner" is not a fixed shape: GitHub-hosted `ubuntu-latest` runners vary between 2
+and 4 vCPUs, and more CPUs on a shared host means more scheduling contention, not less —
+a systematic latency shift, not a code regression. Observed 2026-07-12 (run 29212624981):
+both the initial attempt and the retry failed `remember p99` (109.68ms, then 79.26ms)
+against an 18.79ms baseline recorded on a 2-CPU runner, while the current runs carried 4
+CPUs. `same_env` (`benches/src/regression.rs`) now includes CPU count alongside os/arch,
+so a baseline recorded on a different CPU count degrades latency/RSS checks to warnings
+instead of failing the job — the same treatment already applied across OS/arch.
+
 Implementation: `.github/workflows/bench.yml` (path-filtered to engine/harness changes)
 runs the harness and then `compare_baseline` (`benches/src/regression.rs`) against a
 baseline. The baseline is *rolling*: the results of the last guard-passing run on
-`main`, kept in the CI cache so it comes from the same runner and every check is
-enforced; when no rolling baseline exists yet, it falls back to the committed
-`benches/results/<version>.json` release baseline — which may come from another
-platform, in which case the machine-dependent latency/RSS checks degrade to loud
-warnings and only the deterministic recall@10 + file-size checks fail the job.
-Locally, `BASELINE=<results.json> ./benches/run_all.sh` runs the same comparison.
+`main`, kept in the CI cache so it usually comes from the same runner shape and every
+check is enforced; when no rolling baseline exists yet, or its CPU count differs, it
+falls back to comparable behavior via `same_env` — the machine-dependent latency/RSS
+checks degrade to loud warnings and only the deterministic recall@10 + file-size checks
+fail the job. Locally, `BASELINE=<results.json> ./benches/run_all.sh` runs the same
+comparison.

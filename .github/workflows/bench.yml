@@ -7,8 +7,9 @@
 #
 # Baseline strategy (see benches/src/regression.rs):
 #   1. Rolling same-runner baseline: the results of the last guard-passing run
-#      on main, kept in the actions cache. Same os/arch, so ALL checks
-#      (recall@10, file size, query/remember p99, peak RSS) are enforced.
+#      on main, kept in the actions cache. When os/arch/CPU count match, ALL
+#      checks (recall@10, file size, query/remember p99, peak RSS) are
+#      enforced.
 #   2. Fallback: the committed release baseline (newest
 #      benches/results/<version>.json). It may come from another platform
 #      (e.g. the founder's Windows box), in which case the machine-dependent
@@ -16,6 +17,12 @@
 #      recall@10 + file-size checks are enforced.
 # The rolling baseline only advances when the guard passes, so a regression on
 # main cannot ratchet itself into the baseline.
+#
+# ubuntu-latest is not a fixed shape (observed 2 and 4 vCPUs across "same
+# runner" rolling-baseline runs) — `same_env` (regression.rs) treats a
+# CPU-count mismatch the same as an os/arch mismatch: latency/RSS checks
+# degrade to warnings instead of failing on what is runner noise, not a code
+# regression (see docs/BENCHMARKS.md §5, 2026-07-12).
 #
 # Datasets are ALWAYS materialized fresh (benches/data is deliberately not
 # cached): the .mind store is built by the code under test, so a cached store
