@@ -473,7 +473,9 @@ pub fn search(
     // score, no unevaluated candidate can enter the top k (its true score is
     // at most its bound) nor displace an equal-score hit (a tie would need
     // bound == k-th score, which is not strictly below), so stop.
-    let mut hits: Vec<Hit> = Vec::with_capacity(k + 1);
+    // At most k hits live here (plus one transiently during insert); a huge
+    // caller `k` (e.g. "no limit") must neither overflow nor preallocate.
+    let mut hits: Vec<Hit> = Vec::with_capacity(k.saturating_add(1).min(candidates.len()));
     for (id, bound) in candidates {
         if hits.len() == k && bound < hits[k - 1].score {
             break;
