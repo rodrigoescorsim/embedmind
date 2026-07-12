@@ -1,0 +1,15 @@
+    Finished `release` profile [optimized] target(s) in 0.20s
+     Running `target\release\profile_rss.exe agent-mem-100k`
+phase-by-phase RSS, dataset agent-mem-100k (MiB):
+  process start                                    11.8
+  after ONNX embedder load                         88.6
+  after VectorSet load (100000 vectors)           241.3
+  after Store::open                               241.3
+  recall phase peak (50 queries)                  254.6
+    (40 hybrid+vector queries in 29.3s)
+  warm-query phase peak (40 queries)              260.8
+  after VectorSet drop                             93.0
+    (40 hybrid+vector queries in 25.6s)
+  warm-query phase peak, set dropped (40 queries)     97.8
+  ingest phase peak (200 remembers)                94.9
+(deltas between consecutive lines attribute the bytes)

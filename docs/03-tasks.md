@@ -550,6 +550,19 @@ páginas do pager, buffers de decodificação — antes de escolher a correção
   já registrada (ex.: ADR 0002/0008 do HNSW).
 - **Verificação:** `benches/run_all.sh --full` confirmando RSS < 300 MiB @ 100k;
   `cargo test --workspace`.
+- **Resultado (2026-07-12, ADR 0020):** o `Store::open` não move RSS (241,3 →
+  241,3 MiB no profiling) — o HNSW paginado (ADR 0008) e o pager não retêm
+  estrutura residente relevante, então a suposição do ADR 0015 ("dimensionamento
+  geral do índice") estava errada. Binário novo `profile_rss` (mesmo método da
+  FT1) mediu a causa real: o `VectorSet` de baseline brute-force do próprio
+  harness, ~153 MiB residentes, mantido vivo por referência além de seu único
+  uso (a fase de recall) e contaminando as duas fases de RSS medidas. Corrigido
+  em `harness::run_suite` (passa a consumir `set` por valor e dropá-lo logo após
+  a fase de recall) — nenhuma mudança em `embedmind-core`. RSS de pico @ 100k
+  medido após a correção: **97,8 MiB (query) / 94,9 MiB (ingest)**, bem abaixo
+  do teto de 300 MiB. `cargo test --workspace` 100% verde. Evidência bruta em
+  `benches/results/profile-rss-100k.txt`; rerun oficial do `run_all.sh --full`
+  (confirmação formal do NFR na rodada completa) fica com o founder.
 
 ---
 

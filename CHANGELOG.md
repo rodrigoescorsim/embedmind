@@ -422,6 +422,23 @@ Pre-v0.1 — under active development, repo private until M1 completes
   ADRs ([docs/adr/](docs/adr/)).
 
 ### Changed
+- **Peak RSS @ 100k was a benchmark-harness bug, not an engine problem**
+  (story S28, `docs/adr/0020`): ADR 0015 had measured 307.1 MiB (query) /
+  305.4 MiB (ingest) against the 300 MiB ceiling and guessed the cause was
+  "general index sizing at 100k" — never actually profiled. A new
+  phase-by-phase RSS-attribution binary (`profile_rss`, same method as the
+  S24 full-text profiling) measured it instead: `Store::open` moves RSS by
+  ~0 (the paginated HNSW and the pager hold nothing significant resident,
+  confirming ADR 0008), and the dominant structure is the benchmark
+  harness's own brute-force baseline `VectorSet` (~153 MiB resident @ 100k),
+  kept alive by reference through the RSS-measured phases well past its one
+  real use (the recall-accuracy phase). Fix: `harness::run_suite` now takes
+  the `VectorSet` by value and drops it right after the recall phase; the
+  competitor comparison (which runs later) reloads the `.vec` sidecar. No
+  engine code changed. Peak RSS @ 100k measured after the fix: 97.8 MiB
+  (query) / 94.9 MiB (ingest) — well inside the 300 MiB ceiling. ADR 0015's
+  now-incorrect "general index sizing" note is corrected in place with a
+  pointer to ADR 0020, per the immutable-ADR convention.
 - **Benchmark recall@10 grading is now tie-aware** (story S27,
   `docs/adr/0019`): a returned hit counts when its exact cosine score ties
   (`SCORE_TIE_EPS = 1e-5`) or beats the k-th exact score, instead of only
