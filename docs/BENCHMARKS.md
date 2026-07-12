@@ -69,7 +69,7 @@ pinned hash) so anyone can re-run everything with `cargo bench` / `benches/run_a
 
 | Metric | How measured |
 |---|---|
-| `recall@10` | vs. brute-force exact top-10 (and vs. labels on the public set); mean **and** per-query distribution (min/p10/p50) — a good mean can hide a catastrophic tail (S16) |
+| `recall@10` | vs. brute-force exact top-10 (and vs. labels on the public set); mean **and** per-query distribution (min/p10/p50) — a good mean can hide a catastrophic tail (S16). Grading is **tie-aware** (score parity, ADR 0019, S27): a returned hit counts when its exact cosine score ties (`SCORE_TIE_EPS = 1e-5`) or beats the k-th exact score, capped at k. The agent-memory corpus holds exact duplicate texts by design (8.4% @ 10k, 23.0% @ 100k), which embed to bit-identical vectors — the exact top-k boundary is routinely a plateau of tied scores wider than k, and *which* tied ids a correct index returns is arbitrary; grading that coin flip as a miss would measure the tie-break, not the index. The same rule grades every competitor |
 | query latency p50 / p99 | single-thread, 1k queries, warm cache; **and** cold-open first-query (file just opened — the "no server" scenario). Reported **decomposed**: `embed` (query embedding) vs. `engine` (search + fusion + record load) — our embed-inclusive total vs. a vector-only system's search time is exactly the asymmetry this decomposition prevents (S17). This split feeds both comparison tables: `engine` is EmbedMind's row on the index-only plane, `embed` is added to each competitor's own query time to build their row on the text→result plane |
 | ingest throughput | memories/sec, batch and one-at-a-time (agent pattern), fsync `full` |
 | file size on disk | after ingest, and after `vacuum` |

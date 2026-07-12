@@ -422,6 +422,21 @@ Pre-v0.1 — under active development, repo private until M1 completes
   ADRs ([docs/adr/](docs/adr/)).
 
 ### Changed
+- **Benchmark recall@10 grading is now tie-aware** (story S27,
+  `docs/adr/0019`): a returned hit counts when its exact cosine score ties
+  (`SCORE_TIE_EPS = 1e-5`) or beats the k-th exact score, instead of only
+  when its *id* survived the exact baseline's arbitrary tie-break. The
+  agent-memory corpus holds exact duplicate texts by design (23.0% @ 100k),
+  which embed to bit-identical vectors, so the exact top-10 boundary is
+  routinely a plateau of tied scores wider than k — the diagnostic probe
+  (`probe_worst`, 1000 queries) showed every one of the 70 sub-0.70 queries
+  @ 100k had score-parity 1.00: the catastrophic tail reported by ADR 0015
+  was 100% a metric artifact, not an HNSW miss. Same rule grades every
+  competitor. New numbers @ 100k: mean 0.9360 → 1.0000, worst query
+  0.20 → 1.00 (@ 10k: 0.9953 → 1.0000, 0.90 → 1.00). Engine, HNSW
+  parameters and file format untouched; honest limitation recorded in the
+  ADR (with tie-aware grading the committed synthetic datasets no longer
+  discriminate index quality at the k boundary).
 - **Full-text search is ~10x faster at 100k memories** (story S25,
   `docs/adr/0018`): the BM25 scan now scores a cheap per-candidate upper
   bound first and only reloads/evaluates candidate records in descending

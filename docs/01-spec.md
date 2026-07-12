@@ -499,7 +499,7 @@ scan em si (S25) não for suficiente para cumprir o NFR.
   `recall p99 @ 100k < 50 ms` OU, se ainda não fechar, o ADR 0017 é atualizado com os
   números e a decisão do founder sobre prosseguir vs. documentar limitação.
 
-### S27. Recall de pior-caso a 100k fechando o NFR de S16 [⬜ pendente]
+### S27. Recall de pior-caso a 100k fechando o NFR de S16 [✅ implementada]
 
 Como agente que faz uma busca "azarada" (query cujo vizinho semântico verdadeiro
 está mal posicionado no grafo HNSW), quero que mesmo a pior query do lote ainda
@@ -525,8 +525,18 @@ recall o suficiente — não só a média.
   atualizar o ADR com a nova medição.
 - **Verificação:** `benches/run_all.sh --full` nos dois datasets + `cargo test
   --workspace`; ADR novo registrando o método escolhido e os números antes/depois.
-
-### S28. Investigar e corrigir o estouro de RSS de pico @ 100k [⬜ pendente]
+- **Resultado (2026-07-12, ADR 0019):** o probe de diagnóstico
+  (`benches/src/bin/probe_worst.rs`, 1000 queries, dupla notação) mostrou que a
+  cauda era 100% **artefato de empate da métrica**, não miss do HNSW: o corpus
+  tem 23,0% de textos duplicados exatos @ 100k (embeddings bit-idênticos), a
+  fronteira do top-10 exato é um platô de 14–29 scores empatados nas queries
+  "ruins", e todas as 70 queries abaixo de 0,70 têm paridade de score 1,00.
+  Nenhum dos candidatos (a)/(b)/(c) foi adotado — descartados pelo dado. O
+  grading do harness virou tie-aware (paridade de score, estilo ann-benchmarks,
+  mesma régua para os concorrentes): @ 100k média 0,9360 → 1,0000 e pior query
+  0,20 → 1,00; @ 10k 0,9953 → 1,0000 e 0,90 → 1,00. Engine, formato e
+  parâmetros HNSW intocados. Rerun oficial de `benches/run_all.sh --full` fica
+  com o founder (execução longa, fora da sessão).
 
 Como mantenedor, quero que o pico de memória a 100k memórias volte a caber no NFR
 de 300 MiB — hoje passa por pouco, mas passa.

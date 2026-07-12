@@ -28,5 +28,6 @@ vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvi
 | [0016](0016-limiar-de-near-duplicate-medido.md) | Limiar de near-duplicate do `remember` medido no corpus (0.80) | Aceito |
 | [0017](0017-otimizacao-do-full-text-escopo-e-metodo.md) | Otimização do full-text: profiling antes de estrutura, bump de formato liberado | Aceito |
 | [0018](0018-early-termination-no-scan-bm25.md) | Early termination no scan BM25: avaliação limitada por bound, resultado idêntico | Aceito |
+| [0019](0019-recall-tie-aware-no-harness.md) | Recall@k do harness tie-aware: paridade de score contra o top-k exato | Aceito |
 
 Template: `Status · Contexto · Decisão · Alternativas rejeitadas · Consequências`.

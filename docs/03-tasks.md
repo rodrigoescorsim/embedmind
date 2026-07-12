@@ -521,6 +521,18 @@ baixa confiança. Medir no harness e registrar a escolha em ADR novo.
   ADR novo com o método escolhido e os números antes/depois.
 - **Verificação:** `benches/run_all.sh --full` nos dois datasets + `cargo test
   --workspace`.
+- **Resultado (2026-07-12, ADR 0019):** nenhum dos três candidatos foi adotado —
+  o probe `probe_worst` (1000 queries, dupla notação id-overlap × paridade de
+  score) provou que a cauda era artefato da métrica, não miss do HNSW: 23,0% do
+  corpus @ 100k são textos duplicados exatos (embeddings bit-idênticos), o
+  limite do top-10 exato é um platô de 14–29 scores empatados e as 70 queries
+  abaixo de 0,70 têm todas paridade 1,00 (a escada ef 384–2048 não melhora o
+  id-overlap — é sorteio de empate — e custa até ~660 ms/query). O grading do
+  harness virou tie-aware (mesma régua para EmbedMind e concorrentes): @ 100k
+  média 0,9360 → 1,0000, pior query 0,20 → 1,00; @ 10k 0,9953 → 1,0000,
+  0,90 → 1,00. Latência/RSS intocados (mudança só de medição). Evidência bruta
+  em `benches/results/probe-worst-{10k,100k}.txt`; rerun oficial do
+  `run_all.sh --full` fica com o founder.
 
 ### FT5. Corrigir o estouro de RSS de pico @ 100k (story S28) — independente de FT1-FT3
 
