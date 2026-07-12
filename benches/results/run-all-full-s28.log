@@ -1,0 +1,100 @@
+>> EmbedMind benchmark suite
+>> date=2026-07-12  datasets=agent-mem-10k agent-mem-100k  features=''
+   Compiling embedmind-bench v0.1.0-dev (C:\workspace\Rodrigo\embedmind\benches)
+    Finished `release` profile [optimized] target(s) in 1m 27s
+     Running `target\release\run_all.exe agent-mem-10k agent-mem-100k`
+=== agent-mem-10k (10000 memories) ===
+  loaded 10000 cached vectors
+  running metric suite (1000 queries)...
+  done in 312.0s: recall@10 1.0000 (min 1.00 / p10 1.00 / p50 1.00), query p99 145.93 ms (embed 54.05 / engine 103.00), remember p99 97.02 ms
+=== agent-mem-100k (100000 memories) ===
+  loaded 100000 cached vectors
+  running metric suite (1000 queries)...
+  done in 1013.0s: recall@10 1.0000 (min 1.00 / p10 1.00 / p50 1.00), query p99 956.80 ms (embed 44.81 / engine 913.25), remember p99 100.59 ms
+
+## Benchmark results
+
+_Machine: windows / x86_64, 20 logical CPUs · EmbedMind 0.1.0-dev · 2026-07-12 · CPU-only, single-thread._
+
+### EmbedMind
+
+| Metric | agent-mem-10k | agent-mem-100k |
+|---|---:|---:|
+| memories | 10k | 100k |
+| recall@10 (vs brute-force) | 1.0000 | 1.0000 |
+| recall@10 min (worst query) | 1.0000 | 1.0000 |
+| recall@10 p10 / p50 (per query) | 1.0000 / 1.0000 | 1.0000 / 1.0000 |
+| query p50 (warm) | 84.96 ms | 466.12 ms |
+| query p99 (warm) | 145.93 ms | 956.80 ms |
+| ↳ query embed p50 / p99 | 22.34 / 54.05 ms | 23.26 / 44.81 ms |
+| ↳ query engine p50 / p99 | 60.55 / 103.00 ms | 443.43 / 913.25 ms |
+| ↳ query vector-only p50 / p99 (no FTS/fusion) | 27.86 / 41.73 ms | 86.14 / 132.43 ms |
+| query first (cold-open) | 145.19 ms | 989.97 ms |
+| cold open (Store::open) | 1.23 ms | 28.14 ms |
+| remember p50 (e2e, w/ embed) | 47.25 ms | 41.17 ms |
+| remember p99 (e2e, w/ embed) | 97.02 ms | 100.59 ms |
+| ingest throughput | 13 mem/s | 14 mem/s |
+| file size on disk | 86.0 MiB | 855.0 MiB |
+| peak RSS (ingest) | 97.6 MiB | 120.1 MiB |
+| peak RSS (query) | 99.5 MiB | 120.6 MiB |
+
+_Warm query latency is end-to-end (the engine embeds the query text itself). The `↳` rows decompose it per query (S17): `embed` = embedding the query with the built-in ONNX model; `engine` = hybrid search + RRF fusion + record load with the vector ready — the number comparable to vector-in baselines. Percentiles are computed per component, so embed + engine need not equal the total percentile._
+
+_`remember` latency is end-to-end and includes embedding — the baselines below don't embed, so their ingest is vectors-only and not comparable to this row (BENCHMARKS.md §1)._
+
+_`query vector-only` is `Store::recall_vector` (HNSW half only, no BM25/RRF fusion) on the same query set, timed right after the hybrid call for cache parity — comparable to `engine` above (both exclude embed time). The delta between the two isolates the FTS+fusion cost from everything the vector half pays too._
+
+### vs. baselines — index-only (same vectors, same queries, same k)
+
+_Comparison on `agent-mem-100k`. Competitor versions are pinned in `benches/src/competitors.rs` and recorded here (BENCHMARKS.md §1). Rows that could not run on this machine say so explicitly — never fabricated. This plane hands every system, including EmbedMind, the identical pre-computed vector — EmbedMind's row is its `query engine` split (search + fusion + record load, embed time excluded, S17), the like-for-like number against a baseline that never embeds. It answers "whose index is better", the plane where a vector-only store can legitimately win (see the text→result plane below for the product workload, where it can't skip the embedding toll). Each row states its **scope** — what it returns and what it persists (BENCHMARKS.md §4 rule 6): a smaller file or a faster query that does less is not a win row._
+
+| System | Version | recall@10 | query p50 | query p99 | ingest (vec-only) | on-disk size | returns | persists |
+|---|---|---:|---:|---:|---:|---:|---|---|
+| **EmbedMind** | 0.1.0-dev | 1.0000 | 443.43 ms | 913.25 ms | — (embeds; see note) | 855.0 MiB | full content + metadata + provenance | text + metadata + full-text index + vectors |
+| sqlite-vec | 0.1.10-alpha.4 (target) | _not measured_ | _not measured_ | _not measured_ | _not measured_ | _not measured_ | rowid + distance only (no content/metadata store) | vectors only |
+|   ↳ | | | | | | _feature `compare-sqlite-vec` disabled (build with it + the sqlite-vec 0.1.10-alpha.4 extension to fill this row)_ | | |
+| zvec | 0.5.1 (target) | _not measured_ | _not measured_ | _not measured_ | _not measured_ | _not measured_ | primary key + distance only (no content/metadata store) | vectors + primary key only |
+|   ↳ | | | | | | _feature `compare-zvec` disabled (build with it + a zvec 0.5.1 build to fill this row)_ | | |
+| Chroma | 1.5.9 (target) | _not measured_ | _not measured_ | _not measured_ | _not measured_ | _not measured_ | ids only (queried by vector; metadata/documents optional and unused here) | vectors + ids (a local Chroma collection can also store documents/metadata, unused in this comparison) |
+|   ↳ | | | | | | _feature `compare-chroma` disabled (build with it + Python 3 + `pip install chromadb==1.5.9` to fill this row)_ | | |
+
+- **sqlite-vec** (0.1.10-alpha.4): SQLite extension, default page size, vec0 virtual table, brute-force KNN (its recommended small-scale path).
+- **zvec** (0.5.1): Embedded vector store (alibaba/zvec) via the official zvec-rust binding, default HNSW settings (M=16, ef_construction=200, cosine).
+- **Chroma** (1.5.9): Local/embedded mode (PersistentClient), cosine space (its documented default for embedding search), driven via a pinned Python subprocess (benches/chroma_bench.py) — no server, no network.
+
+### vs. baselines — text→result (same embedding toll, same queries, same k)
+
+_Comparison on `agent-mem-100k`. The product question: an agent developer hands text in and gets results out. Every system here pays for embedding the query with the same all-MiniLM-L6-v2 pipeline (BENCHMARKS.md §1) — for the baselines it is measured separately (outside their own timing, via EmbedMind's `query embed` split on this run) and added to their index-only query time; EmbedMind's own `query p50/p99` already include it end-to-end. This is the plane index-only comparisons hide: a vector-only store cannot skip this toll in real use. recall@10 is EmbedMind's own end-to-end figure against each competitor's index-only recall — the index quality question is answered by the plane above, not repeated here. Rows that could not run on this machine say so explicitly — never fabricated._
+
+| System | Version | recall@10 | query p50 (embed + query) | query p99 (embed + query) |
+|---|---|---:|---:|---:|
+| **EmbedMind** | 0.1.0-dev | 1.0000 | 466.12 ms | 956.80 ms |
+| sqlite-vec | 0.1.10-alpha.4 (target) | _not measured_ | _not measured_ | _not measured_ |
+|   ↳ | | | _feature `compare-sqlite-vec` disabled (build with it + the sqlite-vec 0.1.10-alpha.4 extension to fill this row)_ | |
+| zvec | 0.5.1 (target) | _not measured_ | _not measured_ | _not measured_ |
+|   ↳ | | | _feature `compare-zvec` disabled (build with it + a zvec 0.5.1 build to fill this row)_ | |
+| Chroma | 1.5.9 (target) | _not measured_ | _not measured_ | _not measured_ |
+|   ↳ | | | _feature `compare-chroma` disabled (build with it + Python 3 + `pip install chromadb==1.5.9` to fill this row)_ | |
+
+### Where EmbedMind loses (honesty contract)
+
+- No competitor was measured on this run (see the note above), so no head-to-head loss can be reported yet. When a baseline is measured and wins a metric, it is listed here automatically — the harness computes this section, it is never hand-edited (BENCHMARKS.md §4 rule 3).
+
+### NFR verdict (spec §NFR)
+
+| NFR | Target | Measured | Verdict |
+|---|---|---:|:---:|
+| recall p99 @ 100k (CPU-only) | < 50 ms | 956.80 ms | ❌ **miss** |
+| remember p99 (end-to-end, incl. embedding) | < 200 ms | 100.59 ms (@ 100k) | ✅ pass |
+| peak RAM @ 100k | < 300 MiB | 120.6 MiB | ✅ pass |
+
+_Missed NFRs are reported, not hidden (BENCHMARKS.md §4 rule 1); they are tracked in CHANGELOG.md / docs/BENCHMARKS.md until met._
+
+
+wrote C:\workspace\Rodrigo\embedmind\benches\results\0.1.0-dev.json
+wrote C:\workspace\Rodrigo\embedmind\benches\results\latest.json
+wrote C:\workspace\Rodrigo\embedmind\benches\results\latest.md
+
+1 NFR(s) missed (reported above):
+  - recall p99 @ 100k (CPU-only): target < 50 ms, measured 956.80 ms
+error: process didn't exit successfully: `target\release\run_all.exe agent-mem-10k agent-mem-100k` (exit code: 1)

@@ -534,7 +534,7 @@ baixa confiança. Medir no harness e registrar a escolha em ADR novo.
   em `benches/results/probe-worst-{10k,100k}.txt`; rerun oficial do
   `run_all.sh --full` fica com o founder.
 
-### FT5. Corrigir o estouro de RSS de pico @ 100k (story S28) — independente de FT1-FT3
+### FT5. Corrigir o estouro de RSS de pico @ 100k (story S28) [✅ ENTREGUE] — independente de FT1-FT3
 
 RSS de pico medido em 307,1 MiB (query) / 305,4 MiB (ingest) @ 100k, contra o teto
 de 300 MiB — o ADR 0015 já descarta ser efeito do `ef_search` escalado (a folga já
@@ -559,10 +559,15 @@ páginas do pager, buffers de decodificação — antes de escolher a correção
   uso (a fase de recall) e contaminando as duas fases de RSS medidas. Corrigido
   em `harness::run_suite` (passa a consumir `set` por valor e dropá-lo logo após
   a fase de recall) — nenhuma mudança em `embedmind-core`. RSS de pico @ 100k
-  medido após a correção: **97,8 MiB (query) / 94,9 MiB (ingest)**, bem abaixo
-  do teto de 300 MiB. `cargo test --workspace` 100% verde. Evidência bruta em
-  `benches/results/profile-rss-100k.txt`; rerun oficial do `run_all.sh --full`
-  (confirmação formal do NFR na rodada completa) fica com o founder.
+  medido após a correção: **97,8 MiB (query) / 94,9 MiB (ingest)** no
+  diagnóstico isolado. `cargo test --workspace` 100% verde. Rerun oficial
+  `benches/run_all.sh --full` (1000 queries, os dois datasets) CONFIRMA o NFR:
+  peak RAM @ 100k **120,6 MiB (query) / 120,1 MiB (ingest) — ✅ pass** (teto
+  300 MiB). `recall p99 @ 100k` reprova nessa mesma rodada (956,80 ms vs.
+  < 50 ms) — gargalo pré-existente do FTS (ADR 0017/0018), fora do escopo
+  desta story, não é regressão desta correção. Evidência bruta em
+  `benches/results/profile-rss-100k.txt`, `benches/results/run-all-full-s28.log`
+  e `benches/results/0.1.0-dev.json`.
 
 ---
 

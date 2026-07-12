@@ -55,6 +55,28 @@ Achados:
   pico de query e ~95 MiB no pico de ingest @ 100k — bem abaixo do teto, com
   folga de ~67%.
 
+## Confirmação oficial (`benches/run_all.sh --full`)
+
+A rodada completa do harness (1000 queries, os dois datasets, log completo em
+`benches/results/run-all-full-s28.log`, JSON em
+`benches/results/0.1.0-dev.json`) confirma a correção fora do binário de
+diagnóstico isolado:
+
+| NFR | Alvo | Medido @ 100k | Veredito |
+|---|---|---:|:---:|
+| peak RAM @ 100k | < 300 MiB | **120,6 MiB (query) / 120,1 MiB (ingest)** | ✅ pass |
+
+Os números da rodada oficial (peak RSS via o processo do próprio harness, não
+via `profile_rss` isolado) ficam um pouco acima dos ~98 MiB medidos no binário
+de diagnóstico — esperado, já que a rodada oficial mede 1000 queries reais
+(vs. 40 do `profile_rss`) e outras fases do harness ao redor — mas seguem bem
+abaixo do teto de 300 MiB, com folga de ~60%.
+
+`recall p99 @ 100k` reprova nesta mesma rodada (956,80 ms vs. alvo < 50 ms) —
+gargalo pré-existente do full-text (ADR 0017/0018), fora do escopo desta
+story (FT5 é independente de FT1-FT3, `docs/03-tasks.md`). Não é regressão
+introduzida por esta correção: o `query engine` já carregava esse custo antes.
+
 ## Decisão
 
 **`harness::run_suite` passa a receber o `VectorSet` por valor e o dropa logo
@@ -89,9 +111,10 @@ ADR.
 
 - `harness::run_suite(spec, data_dir, store, set: VectorSet, embedder, opts)`
   agora consome `set`; único chamador é `run_all.rs`, atualizado.
-- RSS de pico @ 100k medido: ~97,8 MiB (query) / ~94,9 MiB (ingest) — dentro
-  do teto de 300 MiB com folga larga. `benches/run_all.sh --full` deve
-  confirmar isso na rodada oficial (fora desta sessão; ver task).
+- RSS de pico @ 100k medido: ~97,8 MiB (query) / ~94,9 MiB (ingest) no
+  diagnóstico isolado (`profile_rss`); **120,6 MiB (query) / 120,1 MiB
+  (ingest) na rodada oficial** `benches/run_all.sh --full` (1000 queries) —
+  ambos dentro do teto de 300 MiB com folga larga. Story S28 fechada.
 - `benches/src/bin/profile_rss.rs` fica no repo como ferramenta de diagnóstico
   reutilizável, mesmo padrão do `profile_fts.rs` (S24/ADR 0017) — próxima
   suspeita de RSS não precisa reinventar a instrumentação.

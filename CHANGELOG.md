@@ -436,9 +436,14 @@ Pre-v0.1 — under active development, repo private until M1 completes
   the `VectorSet` by value and drops it right after the recall phase; the
   competitor comparison (which runs later) reloads the `.vec` sidecar. No
   engine code changed. Peak RSS @ 100k measured after the fix: 97.8 MiB
-  (query) / 94.9 MiB (ingest) — well inside the 300 MiB ceiling. ADR 0015's
-  now-incorrect "general index sizing" note is corrected in place with a
-  pointer to ADR 0020, per the immutable-ADR convention.
+  (query) / 94.9 MiB (ingest) in the isolated diagnostic. The official
+  `benches/run_all.sh --full` run (1000 queries, both datasets) confirms it:
+  peak RAM @ 100k **120.6 MiB (query) / 120.1 MiB (ingest) — within the 300
+  MiB ceiling**. `recall p99 @ 100k` still misses its target in that same run
+  (956.80 ms vs. < 50 ms) — the pre-existing full-text bottleneck (ADR
+  0017/0018), out of scope for this story and not a regression from this fix.
+  ADR 0015's now-incorrect "general index sizing" note is corrected in place
+  with a pointer to ADR 0020, per the immutable-ADR convention.
 - **Benchmark recall@10 grading is now tie-aware** (story S27,
   `docs/adr/0019`): a returned hit counts when its exact cosine score ties
   (`SCORE_TIE_EPS = 1e-5`) or beats the k-th exact score, instead of only
