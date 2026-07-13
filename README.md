@@ -165,14 +165,17 @@ single-thread), EmbedMind `0.1.0-dev`, 384-dim all-MiniLM-L6-v2 int8 embeddings:
 |---|---:|---:|
 | recall@10 (vs. brute-force, tie-aware) | 1.0000 | 1.0000 |
 | recall@10, worst query | 1.0000 | 1.0000 |
-| query p50 / p99 (warm, end-to-end) | 19.9 ms / 31.8 ms | 122.7 ms / 255.1 ms |
-| ↳ query engine p50 / p99 (no embed) | 16.1 ms / 27.1 ms | 118.2 ms / 249.3 ms |
-| ↳ query vector-only p50 / p99 (HNSW half only) | 6.3 ms / 8.5 ms | 20.4 ms / 41.0 ms |
-| cold open (`Store::open`) + first query | 14.0 ms + 30.8 ms | 14.6 ms + 236.6 ms |
-| `remember` p50 / p99 (end-to-end, **incl. embedding**) | 9.5 ms / 24.5 ms | 8.7 ms / 22.9 ms |
-| ingest throughput (end-to-end, incl. embedding) | ~48 mem/s | ~52 mem/s |
-| file size on disk | 85.7 MiB | 844.8 MiB |
-| peak RSS (ingest / query) | 97.6 MiB / 99.4 MiB | 117.5 MiB / 117.7 MiB |
+| query p50 / p99 (warm, end-to-end) | 24.6 ms / 51.4 ms | 127.6 ms / 224.0 ms |
+| ↳ query engine p50 / p99 (no embed) | 19.9 ms / 42.5 ms | 124.1 ms / 218.6 ms |
+| ↳ query vector-only p50 / p99 (HNSW half only) | 6.6 ms / 13.5 ms | 19.3 ms / 29.2 ms |
+| cold open (`Store::open`) + first query | 15.6 ms + 31.7 ms | 16.6 ms + 223.0 ms |
+| `remember` p50 / p99 (end-to-end, **incl. embedding**) | 8.8 ms / 23.5 ms | 8.7 ms / 21.7 ms |
+| ingest throughput (end-to-end, incl. embedding) | ~53 mem/s | ~53 mem/s |
+| file size on disk | 85.0 MiB | 845.3 MiB |
+| peak RSS (ingest / query) | 98.3 MiB / 99.3 MiB | 112.6 MiB / 113.5 MiB |
+
+_Measured with BlockMax-WAND active (both datasets in `format_version` 6) — see the NFR note
+below: it did not move the @ 100k number._
 
 **Full-text lift — what the hybrid buys you, measured (not assumed)**
 
@@ -183,39 +186,46 @@ materialized dataset (`benches/src/lexical.rs`, `lexical_lift` in `benches/resul
 
 | Dataset | Hybrid recall@10 | Vector-only recall@10 | Lift | Hybrid p99 | Vector-only p99 |
 |---|---:|---:|---:|---:|---:|
-| agent-mem-10k | 1.0000 | 0.9100 | **+0.09** | 22.1 ms | 18.6 ms |
-| agent-mem-100k | 1.0000 | 0.8200 | **+0.18** | 139.4 ms | 32.5 ms |
+| agent-mem-10k | 1.0000 | 0.9000 | **+0.10** | 9.2 ms | 8.8 ms |
+| agent-mem-100k | 1.0000 | 0.8200 | **+0.18** | 266.9 ms | 37.0 ms |
 
-**The lift doubles as the corpus grows 10x, it doesn't shrink.** Vector-only degrades (0.9100 →
+**The lift doubles as the corpus grows 10x, it doesn't shrink.** Vector-only degrades (0.9000 →
 0.8200) as more near-duplicate embeddings collide in a bigger corpus; the hybrid holds 100% on
 both because BM25 finds the exact literal regardless of how crowded the vector space gets around
 it. That's the "hybrid, for real" differentiator measured, not asserted — see
 [ADR 0023](docs/adr/0023-blockmax-wand-decisao-fase-bmw.md) for the founder's decision (invest in
 BlockMax-WAND, keep full-text as default) made with this data in hand. Honesty check: this is the
-same full-text path whose p99 misses the latency NFR below — the lift is real, and so is the cost
-that BMW is meant to close.
+same full-text path whose p99 misses the latency NFR below — the lift is real, and BlockMax-WAND
+(below) did not close that cost.
 
 Notes and honesty caveats:
 
 - **`remember` latency includes embedding on CPU.** That is the real cost your agent pays,
   so we report it — but it means our ingest number is *not* comparable to a vectors-only
-  store's ingest. Embedding, not indexing, dominates that ~52 mem/s.
+  store's ingest. Embedding, not indexing, dominates that ~53 mem/s.
 - **The `query engine` / `query vector-only` split isolates the full-text cost.** `engine`
   is hybrid search (BM25 + HNSW + RRF fusion + record load) with embedding already
   excluded; `vector-only` is the HNSW half alone on the same query set. The gap between
-  them (~208 ms @ 100k) is the full-text scan — see the NFR miss below.
-- **recall p99 @ 100k misses the < 50 ms NFR: 255.1 ms, honestly reported, not hidden.**
-  Three rounds of optimization (early termination — [ADR 0018](docs/adr/0018-early-termination-no-scan-bm25.md);
+  them (~189 ms @ 100k) is the full-text scan — see the NFR miss below.
+- **recall p99 @ 100k misses the < 50 ms NFR: 224.0 ms, honestly reported, not hidden.**
+  Four rounds of optimization (early termination — [ADR 0018](docs/adr/0018-early-termination-no-scan-bm25.md);
   delta+varint postings — [ADR 0021](docs/adr/0021-postings-fts-delta-varint.md); skip-list
-  structure — [ADR 0022](docs/adr/0022-postings-fts-skip-lists.md)) cut it ~4.8x from an
-  original 1,224.6 ms, but the ceiling wasn't reached. The full-text lift measured above (doubling
-  from +0.09 to +0.18 as the corpus grows) is why the founder chose to keep investing rather than
-  make full-text opt-in — see [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md)
-  for the full accounting and [ADR 0023](docs/adr/0023-blockmax-wand-decisao-fase-bmw.md) for the
-  BlockMax-WAND decision and its rollback criteria (see [ROADMAP.md](ROADMAP.md) "Fase BMW").
+  structure — [ADR 0022](docs/adr/0022-postings-fts-skip-lists.md); BlockMax-WAND —
+  [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md)) cut it ~5.5x from an original 1,224.6 ms,
+  but the ceiling wasn't reached — and BlockMax-WAND itself moved the @ 100k number by less than
+  measurement noise. Root cause measured, not guessed: BlockMax-WAND *does* activate on 82.8% of
+  the benchmark's queries, but only 0.05% of touched postings blocks are actually skipped without
+  decoding — this synthetic corpus's high-frequency terms spread their postings too evenly across
+  the id space for the block-max refinement to prove a whole block is safe to skip. The algorithm
+  is correct (equivalence-tested against the linear oracle); the workload this benchmark measures
+  just doesn't have the term concentration BlockMax-WAND is built to exploit. Full accounting in
+  [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) ("Fechamento da fase BMW")
+  and [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md). The ADR 0023 rollback criterion
+  (accept the documented limitation vs. revert full-text to opt-in) is still open — a founder
+  decision, not made in this round (see [ROADMAP.md](ROADMAP.md) "Fase BMW").
 - **recall@10 and peak RSS both pass at 100k**: recall@10 is 1.0000 (tie-aware grading,
-  worst query included) and peak RSS is 117.7 MiB — well under the 300 MiB ceiling.
-  `remember` p99 < 200 ms end-to-end also passes at 22.9 ms @ 100k.
+  worst query included) and peak RSS is 113.5 MiB — well under the 300 MiB ceiling.
+  `remember` p99 < 200 ms end-to-end also passes at 21.7 ms @ 100k.
 
 ### vs. baselines — index-only (same pre-computed vectors, same queries, same k)
 
@@ -229,7 +239,7 @@ smaller file or a faster query that does less isn't a win row:
 
 | System | Version | recall@10 | query p50 / p99 | returns | persists |
 |---|---|---:|---:|---|---|
-| **EmbedMind** | 0.1.0-dev | 1.0000 | 118.2 ms / 249.3 ms | full content + metadata + provenance | text + metadata + full-text index + vectors |
+| **EmbedMind** | 0.1.0-dev | 1.0000 | 124.1 ms / 218.6 ms | full content + metadata + provenance | text + metadata + full-text index + vectors |
 | sqlite-vec | 0.1.10-alpha.4 | _not measured on this run_ | — | rowid + distance only | vectors only |
 | zvec | 0.5.1 | _not measured on this run_ | — | primary key + distance only | vectors + primary key only |
 | Chroma | 1.5.9 | _not measured on this run_ | — | ids only | vectors + ids |

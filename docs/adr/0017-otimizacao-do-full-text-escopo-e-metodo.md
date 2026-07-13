@@ -284,6 +284,103 @@ Com esse dado em mãos, o founder decidiu (2026-07-13): manter o full-text como 
 na reescrita BlockMax-WAND para fechar a latência, em vez de tornar o full-text opt-in — decisão
 completa, com critério de reversão, no [ADR 0023](0023-blockmax-wand-decisao-fase-bmw.md).
 
+## Fechamento da fase BMW — veredito final do NFR (BMW-3, 2026-07-13)
+
+Medição oficial `benches/run_all.sh --full` (1000 queries, ambos os datasets **regenerados em
+`format_version` 6 pelo founder** — `embedmind vacuum`, header `MINDFMT1 06` confirmado byte a
+byte nos dois arquivos antes da rodada), publicada em
+[`benches/results/0.1.0-dev.json`](../../benches/results/0.1.0-dev.json) (espelho em `latest.md`).
+Esta é a medição com o BlockMax-WAND (BMW-2, [ADR 0025](0025-blockmax-wand-na-busca-fts.md))
+ativo — `fts::search` despacha para `search_bmw_counted` em qualquer arquivo fv ≥ 6.
+
+### `recall` p99 — end-to-end (embed + engine híbrido)
+
+| dataset | antes (FT, fv4/5) | depois (BMW ativo, fv6) | razão |
+|---|---:|---:|---:|
+| agent-mem-10k | 31,84 ms (FT, ver acima) | **51,42 ms** | inconclusivo isoladamente (variância de máquina entre rodadas; ver nota abaixo) |
+| agent-mem-100k | 255,12 ms (FT, ver acima) | **224,00 ms** | ~1,14x — **não fecha o NFR** |
+
+**NFR `recall p99 @ 100k < 50 ms`: ❌ REPROVADO — 224,00 ms.** O número @100k é o que decide:
+praticamente idêntico ao patamar pré-BMW (224,88–255,12 ms nas rodadas anteriores da fase FT),
+apesar do BMW estar de fato ativo (arquivo confirmadamente fv6). @10k o p99 subiu para 51,42 ms
+frente aos ~30 ms de rodadas anteriores — isso sozinho não indica regressão: são datasets
+pequenos, mais sensíveis a ruído de máquina entre execuções, e o dado que importa (@100k, onde o
+full-text domina o custo) não se moveu.
+
+### Causa raiz: o BMW ativa, mas quase não pula blocos neste corpus
+
+Hipótese inicial (a checar antes de aceitar o número): o corpus sintético de benchmark, gerado
+por templates+paráfrase com vocabulário amplo, poderia nunca atingir `SKIP_MIN_DOC_FREQ` (512
+postings) na maioria dos termos de query — nesse caso o BMW nunca seria exercitado e o p99 parado
+seria trivial (nada mudou porque nada rodou o caminho novo). **Medida diretamente e refutada:**
+um binário de instrumentação (`benches/src/bin/bmw_reach.rs`, usando o novo
+`Store::search_text_bmw_counted` `#[doc(hidden)]`, mesmo padrão de `search_text_profiled`) rodou
+as mesmas 1000 queries do harness oficial sobre `agent-mem-100k` (fv6) contando `BmwCounters` por
+query:
+
+| métrica | valor |
+|---|---:|
+| queries com ≥1 termo com skip real (`block_count > 0`) | 828 / 1000 (82,8%) |
+| queries onde todo termo casado decodificou inteiro (sem skip) | 172 / 1000 (17,2%) |
+| queries sem nenhum termo casado | 0 / 1000 (0,0%) |
+| blocos totais tocados | 2.870.508 |
+| blocos decodificados | 2.869.126 |
+| **blocos pulados sem decodificar** | **1.382 (0,05%)** |
+| documentos avaliados exatamente | 6.820.998 |
+| `pivot_skips` (faixas de id provadas abaixo de θ pelo refinamento block-max) | 1.670.664 |
+
+O BMW **está** sendo exercitado na grande maioria das queries — a hipótese inicial (corpus sem
+termos frequentes o bastante) está refutada. A causa real é outra: os `pivot_skips` são altos
+(1,67M), mas quase nunca se traduzem em blocos de fato pulados (0,05%). Olhando
+`BmwCursor::advance_to` (`fts.rs`): um pulo só evita decodificar um bloco quando o alvo cai
+exatamente no `first_id` de um bloco *depois* do bloco atual; se o alvo cai **dentro** de um
+bloco (posição intermediária), esse bloco é decodificado de qualquer forma para localizar a
+posição exata via `partition_point`. Com termos de alta frequência (df ≥ 512) cujas postings
+cobrem o espaço de ids de forma densa e relativamente uniforme — o padrão esperado de um corpus
+sintético com vocabulário amplo e ids monotonicamente crescentes por inserção —, o refinamento
+block-max quase sempre encontra um documento dentro do próprio bloco coberto que ainda pode bater
+`θ`, então o pulo de faixa (`pivot_skips`) aterrissa dentro de um bloco em vez de saltar um bloco
+inteiro. Em média, cada query decodifica ~2.869 blocos e avalia ~6.821 documentos — essencialmente
+a lista candidata inteira — igual ao que a passada linear já fazia. O ganho estrutural do BMW
+(pular blocos inteiros sem decodificar) depende de blocos *inteiramente* abaixo do threshold, algo
+que corpora com clusters de termos raros/localizados no espaço de ids favorecem e este corpus
+sintético não tem.
+
+**Isto não é "o BMW falhou" — é "o corpus de benchmark não tem a distribuição de postings que o
+BMW foi desenhado para explorar".** O algoritmo (ADR 0025) está correto e a suite de equivalência
+prova que o resultado é idêntico ao oráculo; o que não se confirmou foi o ganho de latência *neste
+workload de medição*. Registrado como limitação de metodologia de benchmark, não como bug de
+produção: um corpus real de memórias de agente pode ter termos verdadeiramente raros e
+concentrados (nomes próprios, identificadores específicos de um projeto) onde o BMW cortaria mais
+— mas o harness sintético atual (`benches/src/corpus.rs`) não modela essa concentração, e ajustar o
+gerador de corpus para medir isso corretamente é um trabalho de escopo próprio, fora desta task.
+
+### Full-text lift (FT6) revalidado nesta rodada
+
+A mesma rodada oficial roda a suite `lexical.rs` de novo (mesmo run) — o BMW não pode ter
+degradado a equivalência híbrida em escala real: `hybrid_recall_at_10` segue **1,0000** em ambos
+os datasets (`benches/results/latest.md`), idêntico ao medido antes do BMW. Nenhuma regressão de
+recall lexical introduzida pela reescrita.
+
+### Veredito final dos NFRs desta fase (substitui o veredito FT acima)
+
+| NFR | alvo | medido @ 100k | veredito |
+|---|---|---:|:---:|
+| `recall` p99 (end-to-end) | < 50 ms | 224,00 ms | ❌ **reprovado** |
+| recall@10 híbrido (tie-aware) | ≥ 0,70 | 1,0000 | ✅ aprovado |
+| full-text lift lexical (hybrid vs. vector-only) | sem regressão | 1,0000 (igual à rodada FT) | ✅ aprovado |
+| RSS de pico | < 300 MiB | 113,5 MiB (query) / 112,6 MiB (ingest) | ✅ aprovado |
+
+**O NFR de latência `< 50 ms @ 100k` NÃO foi alcançado (224,00 ms medido).** O critério de reversão
+do ADR 0023 ("se o BMW não fechar o NFR, vector-only default volta à mesa") está em aberto —
+decisão do founder, não tomada nesta sessão. As opções conhecidas com dado em mãos: aceitar a
+limitação de latência como documentada (o full-text lift medido, FT6, +0,18 recall@10 @100k,
+continua sendo valor de produto real), ou reverter full-text para opt-in, ou investir em uma
+próxima otimização (ajustar o gerador de corpus de benchmark para medir com distribuições de
+postings mais realistas, e/ou revisitar o refinamento block-max para pular parcialmente dentro de
+um bloco). Nenhuma dessas opções foi escolhida aqui; o número e a causa raiz estão reportados sem
+meias-palavras no README/CHANGELOG, e a escolha entre elas fica pendente.
+
 ## Alternativas rejeitadas
 
 - **Modo `vector_only` opcional exposto ao usuário, sem otimizar o FTS**:

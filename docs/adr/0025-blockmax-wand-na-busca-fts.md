@@ -158,9 +158,28 @@ idêntico ao oráculo pela suite acima — híbrido idêntico por composição.
 
 - Nenhuma mudança de formato; fv6 (ADR 0024) já carregava tudo. Arquivos v4/v5
   seguem no linear — sem bound por bloco não há como pular com segurança.
-- A passada 1 deixa de ser O(postings totais) em fv6; quanto corta na prática
-  é a medição da **BMW-3** (`benches/run_all.sh --full` @ 10k/100k, dataset
-  regenerado em fv6), que fecha ou não o NFR `< 50 ms` e alimenta a decisão da
-  BMW-4 (ADR 0023 "Critério de reversão").
+- A passada 1 deixa de ser O(postings totais) em fv6 **em tese** — quanto
+  corta na prática dependia da distribuição de postings do workload medido.
 - `search_linear` fica permanentemente como oráculo + caminho legado; qualquer
   mudança futura de scoring precisa tocar os DOIS caminhos e passar a suite.
+
+## BMW-3 — medição @ 100k: reprovado, com causa raiz medida (2026-07-13)
+
+`benches/run_all.sh --full` sobre os datasets regenerados em fv6 pelo founder (`ADR 0017`
+"Fechamento da fase BMW" tem a tabela completa): **`recall p99 @ 100k = 224,00 ms`, NFR `< 50 ms`
+reprovado** — praticamente idêntico ao patamar pré-BMW (255,12 ms).
+
+A hipótese óbvia de investigar primeiro — "o corpus de benchmark não tem termos com `df ≥
+SKIP_MIN_DOC_FREQ` (512), o BMW nunca ativa" — foi **medida e refutada** por
+`benches/src/bin/bmw_reach.rs` (novo, usa `Store::search_text_bmw_counted` `#[doc(hidden)]`, §5
+acima): 82,8% das 1000 queries oficiais têm ≥1 termo com skip index real. A causa é outra: dos
+~2,87M blocos tocados, só 0,05% (1.382) foram pulados sem decodificar — os `pivot_skips` (1,67M)
+majoritariamente aterrissam **dentro** de um bloco (`BmwCursor::advance_to` decodifica o bloco de
+destino sempre que o alvo não cai exatamente no `first_id` de um bloco seguinte), não o saltam
+inteiro. Termos de alta frequência com postings densas e ~uniformes no espaço de ids — o padrão
+que este corpus sintético produz — dão ao refinamento block-max pouquíssimas chances de provar um
+bloco *inteiro* abaixo de `θ`. O algoritmo está correto (a suite de equivalência prova isso); o
+ganho estrutural que ele foi desenhado para explorar (blocos de termos raros e concentrados que
+podem ser inteiramente descartados) não aparece neste workload de medição. Detalhe completo e
+números: ADR 0017 "Fechamento da fase BMW" (inclui o veredito do NFR e o estado da decisão de
+reversão do ADR 0023, ainda em aberto).
