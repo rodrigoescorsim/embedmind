@@ -30,7 +30,22 @@ use ulid::Ulid;
 
 use crate::corpus::{self, GenMemory};
 
-/// A committed benchmark dataset: reproducible from these three fields alone.
+/// How a dataset's text corpus is distributed — the knob behind the BMW-5
+/// benchmark-methodology investigation (`docs/adr/0026`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorpusMode {
+    /// [`corpus::generate`]: uniform template/slot picks, no temporal locality.
+    /// This is the **documented worst case** for BlockMax-WAND (frequent terms
+    /// spread evenly across the id space, so block-max never proves a whole
+    /// block below threshold) and stays the official regression corpus.
+    Uniform,
+    /// [`corpus::generate_local`]: session bursts + Zipf vocabulary, so a
+    /// frequent term's postings cluster in a contiguous id window — the
+    /// realistic distribution measured side by side against `Uniform`.
+    Locality,
+}
+
+/// A committed benchmark dataset: reproducible from these fields alone.
 #[derive(Debug, Clone, Copy)]
 pub struct DatasetSpec {
     /// Stable name (`agent-mem-10k`, `agent-mem-100k`), used for file paths and
@@ -41,6 +56,10 @@ pub struct DatasetSpec {
     pub seed: u64,
     /// Number of memories.
     pub count: usize,
+    /// Which corpus distribution to generate (see [`CorpusMode`]). Existing
+    /// datasets are [`CorpusMode::Uniform`]; the BMW-5 locality datasets are
+    /// [`CorpusMode::Locality`].
+    pub mode: CorpusMode,
 }
 
 /// The two committed datasets, always reported side by side (`docs/BENCHMARKS.md`
@@ -52,11 +71,24 @@ pub const DATASETS: &[DatasetSpec] = &[
         name: "agent-mem-10k",
         seed: 0xEDB1_A9C7_2026_0708,
         count: 10_000,
+        mode: CorpusMode::Uniform,
     },
     DatasetSpec {
         name: "agent-mem-100k",
         seed: 0xEDB1_A9C7_2026_0708,
         count: 100_000,
+        mode: CorpusMode::Uniform,
+    },
+    // BMW-5 (`docs/adr/0026`): the same size and seed as `agent-mem-10k`, but
+    // the session-locality + Zipf distribution — measured side by side against
+    // the uniform worst case to test whether the documented BMW limitation was
+    // partly a benchmark-methodology artifact. Not part of the official
+    // regression suite; generated on demand for the comparison.
+    DatasetSpec {
+        name: "agent-mem-locality-10k",
+        seed: 0xEDB1_A9C7_2026_0708,
+        count: 10_000,
+        mode: CorpusMode::Locality,
     },
 ];
 
@@ -66,9 +98,13 @@ impl DatasetSpec {
         DATASETS.iter().find(|d| d.name == name)
     }
 
-    /// The generated text corpus for this dataset — deterministic.
+    /// The generated text corpus for this dataset — deterministic, dispatched
+    /// by [`CorpusMode`].
     pub fn corpus(&self) -> Vec<GenMemory> {
-        corpus::generate(self.seed, self.count)
+        match self.mode {
+            CorpusMode::Uniform => corpus::generate(self.seed, self.count),
+            CorpusMode::Locality => corpus::generate_local(self.seed, self.count),
+        }
     }
 
     /// Path of the materialized vector file (git-ignored build product).
