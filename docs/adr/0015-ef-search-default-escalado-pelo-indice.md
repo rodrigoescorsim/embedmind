@@ -124,10 +124,11 @@ nunca teve como escopo consertar.
 - **RSS de pico @ 100k também estoura o NFR** (< 300 MiB): medido 307,1 MiB
   (query) / 305,4 MiB (ingest) na mesma rodada — a folga de 6% citada na task
   BQ1 (280,9 MiB) já não existe. Reportado aqui e no CHANGELOG por
-  transparência; a causa é dimensionamento geral do índice a 100k, não algo
-  que o `ef_search` escalado piora sozinho (o degrau maior consome mais RAM
-  durante a busca, mas a folga já estava apertada antes deste ADR). Sem
-  correção nesta task — precisa de investigação própria.
+  transparência; ~~a causa é dimensionamento geral do índice a 100k~~ — **essa
+  frase estava errada, era suposição não medida.** [ADR 0020](0020-rss-de-pico-era-o-harness-nao-o-engine.md)
+  (story S28/FT5) mediu por profiling: a causa é o `VectorSet` de baseline do
+  próprio harness (~153 MiB residentes, mantido vivo além de seu último uso),
+  não o HNSW/pager do engine — corrigido lá sem tocar `embedmind-core`.
 - **Duas reprovações do DoD original ficam registradas como dívida técnica,
   não escondidas:**
   1. **Recall de pior-caso a 100k não fecha em 0,70** mesmo no degrau máximo

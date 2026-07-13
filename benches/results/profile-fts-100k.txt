@@ -1,0 +1,22 @@
+    Finished `release` profile [optimized] target(s) in 0.18s
+     Running `target\release\profile_fts.exe agent-mem-100k`
+[agent-mem-100k] warming up (50 queries)...
+[agent-mem-100k] timing 1000 queries...
+  250/1000
+  500/1000
+  750/1000
+  1000/1000
+# FT1 full-text phase profile — agent-mem-100k, 1000 queries (ADR 0017)
+
+`Store::search_text_profiled` wall time — p50 994.329 ms, p99 4576.462 ms
+
+| phase | total ms | share of measured phases |
+|---|---:|---:|
+| postings lookup (page I/O + decode) | 13863.273 | 1.2% |
+| keep (tombstone/scope/filter re-check) | 1030310.788 | 88.8% |
+| doc_len (record reload + re-tokenize) | 52272.666 | 4.5% |
+| scoring (HashMap accumulate + sort) | 63436.738 | 5.5% |
+| **sum of phases** | 1159883.464 | 100.0% |
+
+terms matched (total across queries): 18090 · postings visited (total): 366468601
+avg postings visited per query: 366468.6

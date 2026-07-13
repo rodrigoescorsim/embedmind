@@ -4,94 +4,105 @@
     "arch": "x86_64",
     "cpus": 20,
     "embedmind_version": "0.1.0-dev",
-    "date_utc": "2026-07-09"
+    "date_utc": "2026-07-12"
   },
-  "compared_on": "agent-mem-10k",
+  "compared_on": "agent-mem-100k",
   "datasets": [
     {
       "dataset": "agent-mem-10k",
       "count": 10000,
       "dims": 384,
       "model_id": "all-MiniLM-L6-v2-int8",
-      "recall_at_10": 0.995300,
-      "recall_at_10_min": 0.900000,
-      "query_p50_ms": 10.3989,
-      "query_p99_ms": 14.2736,
-      "cold_open_ms": 0.3664,
-      "cold_first_query_ms": 10.5636,
-      "remember_p50_ms": 7.4859,
-      "remember_p99_ms": 22.2795,
-      "ingest_per_sec": 67.54,
-      "file_bytes": 85991424,
-      "peak_rss_ingest_mib": 118.57,
-      "peak_rss_query_mib": 117.79
+      "recall_at_10": 1.000000,
+      "recall_at_10_min": 1.000000,
+      "recall_at_10_p10": 1.000000,
+      "recall_at_10_p50": 1.000000,
+      "query_p50_ms": 84.9629,
+      "query_p99_ms": 145.9279,
+      "query_embed_p50_ms": 22.3394,
+      "query_embed_p99_ms": 54.0543,
+      "query_engine_p50_ms": 60.5511,
+      "query_engine_p99_ms": 102.9996,
+      "query_vector_p50_ms": 27.8589,
+      "query_vector_p99_ms": 41.7320,
+      "cold_open_ms": 1.2330,
+      "cold_first_query_ms": 145.1927,
+      "remember_p50_ms": 47.2474,
+      "remember_p99_ms": 97.0174,
+      "ingest_per_sec": 12.77,
+      "file_bytes": 90136576,
+      "peak_rss_ingest_mib": 97.61,
+      "peak_rss_query_mib": 99.46
     },
     {
       "dataset": "agent-mem-100k",
       "count": 100000,
       "dims": 384,
       "model_id": "all-MiniLM-L6-v2-int8",
-      "recall_at_10": 0.931300,
-      "recall_at_10_min": 0.200000,
-      "query_p50_ms": 10.9473,
-      "query_p99_ms": 15.4970,
-      "cold_open_ms": 0.3305,
-      "cold_first_query_ms": 12.8875,
-      "remember_p50_ms": 7.3656,
-      "remember_p99_ms": 22.4308,
-      "ingest_per_sec": 67.81,
-      "file_bytes": 859643904,
-      "peak_rss_ingest_mib": 280.93,
-      "peak_rss_query_mib": 280.34
+      "recall_at_10": 1.000000,
+      "recall_at_10_min": 1.000000,
+      "recall_at_10_p10": 1.000000,
+      "recall_at_10_p50": 1.000000,
+      "query_p50_ms": 466.1220,
+      "query_p99_ms": 956.8041,
+      "query_embed_p50_ms": 23.2614,
+      "query_embed_p99_ms": 44.8144,
+      "query_engine_p50_ms": 443.4253,
+      "query_engine_p99_ms": 913.2473,
+      "query_vector_p50_ms": 86.1413,
+      "query_vector_p99_ms": 132.4267,
+      "cold_open_ms": 28.1403,
+      "cold_first_query_ms": 989.9696,
+      "remember_p50_ms": 41.1704,
+      "remember_p99_ms": 100.5914,
+      "ingest_per_sec": 14.30,
+      "file_bytes": 896577536,
+      "peak_rss_ingest_mib": 120.14,
+      "peak_rss_query_mib": 120.63
     }
   ],
   "competitors": [
     {
       "name": "sqlite-vec",
       "version": "0.1.10-alpha.4",
-      "measured": true,
-      "metrics": {
-        "recall_at_10": 0.998400,
-        "query_p50_ms": 9.842100,
-        "query_p99_ms": 13.208400,
-        "ingest_vecs_per_sec": 196.234266,
-        "file_bytes": 16003072
-      },
-      "reason": ""
+      "measured": false,
+      "metrics": null,
+      "reason": "feature `compare-sqlite-vec` disabled (build with it + the sqlite-vec 0.1.10-alpha.4 extension to fill this row)"
     },
     {
       "name": "zvec",
       "version": "0.5.1",
-      "measured": true,
-      "metrics": {
-        "recall_at_10": 0.991200,
-        "query_p50_ms": 1.046100,
-        "query_p99_ms": 1.527000,
-        "ingest_vecs_per_sec": 70904.586534,
-        "file_bytes": 18206899
-      },
-      "reason": ""
+      "measured": false,
+      "metrics": null,
+      "reason": "feature `compare-zvec` disabled (build with it + a zvec 0.5.1 build to fill this row)"
+    },
+    {
+      "name": "Chroma",
+      "version": "1.5.9",
+      "measured": false,
+      "metrics": null,
+      "reason": "feature `compare-chroma` disabled (build with it + Python 3 + `pip install chromadb==1.5.9` to fill this row)"
     }
   ],
   "nfrs": [
     {
       "name": "recall p99 @ 100k (CPU-only)",
       "target": "< 50 ms",
-      "measured": "15.50 ms",
-      "passed": true,
+      "measured": "956.80 ms",
+      "passed": false,
       "not_applicable": false
     },
     {
       "name": "remember p99 (end-to-end, incl. embedding)",
       "target": "< 200 ms",
-      "measured": "22.43 ms (@ 100k)",
+      "measured": "100.59 ms (@ 100k)",
       "passed": true,
       "not_applicable": false
     },
     {
       "name": "peak RAM @ 100k",
       "target": "< 300 MiB",
-      "measured": "280.9 MiB",
+      "measured": "120.6 MiB",
       "passed": true,
       "not_applicable": false
     }

@@ -61,8 +61,17 @@ pub struct RunSummary {
 impl RunSummary {
     /// Machine-dependent metrics (latency, RSS) are only *enforced* against a
     /// baseline from the same platform; across platforms they become warnings.
+    ///
+    /// CPU count is part of that comparability check: GitHub-hosted
+    /// `ubuntu-latest` runners are not a fixed shape (observed 2 and 4 vCPUs
+    /// across otherwise-identical "same runner" rolling-baseline runs,
+    /// 2026-07-11 vs. 2026-07-12), and more CPUs on a shared host means more
+    /// scheduling contention, not less — a real, systematic latency shift
+    /// that isn't a code regression. Comparing across CPU counts produced two
+    /// consecutive false-positive guard failures (remember p99) despite the
+    /// retry added for transient fsync stalls.
     pub fn same_env(&self, other: &RunSummary) -> bool {
-        self.os == other.os && self.arch == other.arch
+        self.os == other.os && self.arch == other.arch && self.cpus == other.cpus
     }
 }
 
@@ -243,9 +252,9 @@ pub fn render_markdown(
     if !baseline.same_env(current) {
         let _ = writeln!(
             out,
-            "> ⚠️ Baseline comes from a different platform — latency/RSS checks are\n\
-             > reported as warnings, not failures. recall@10 and file size are\n\
-             > machine-independent and stay enforced.\n"
+            "> ⚠️ Baseline comes from a different platform or CPU count — latency/RSS\n\
+             > checks are reported as warnings, not failures. recall@10 and file size\n\
+             > are machine-independent and stay enforced.\n"
         );
     }
     let _ = writeln!(
@@ -616,6 +625,29 @@ mod tests {
         let q = checks.iter().find(|c| c.metric == "query p99").unwrap();
         assert_eq!(q.verdict, Verdict::Warn);
         assert!(!has_failures(&checks));
+    }
+
+    #[test]
+    fn differing_cpu_count_is_not_same_env_even_on_same_os_arch() {
+        let mut base = summary("linux", vec![metrics("agent-mem-10k")]);
+        base.cpus = 2;
+        let mut m = metrics("agent-mem-10k");
+        m.remember_p99_ms *= 4.0; // steep regression that would fail if enforced
+        let mut cur = summary("linux", vec![m]);
+        cur.cpus = 4;
+
+        assert!(!base.same_env(&cur));
+        let checks = check_regressions(&base, &cur).unwrap();
+        let remember = checks.iter().find(|c| c.metric == "remember p99").unwrap();
+        assert_eq!(remember.verdict, Verdict::Warn);
+        assert!(!has_failures(&checks));
+        // recall@10/file size stay enforced regardless of CPU count.
+        assert!(
+            checks
+                .iter()
+                .filter(|c| c.metric == "recall@10" || c.metric == "file size")
+                .all(|c| c.verdict != Verdict::Warn)
+        );
     }
 
     #[test]

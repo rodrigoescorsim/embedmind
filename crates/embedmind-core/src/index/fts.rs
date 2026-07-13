@@ -72,8 +72,83 @@ const FTS_DICT: dict::DictSpec = dict::DictSpec {
     max_key_len: MAX_TERM_LEN,
 };
 
-/// Bytes per posting entry on disk: `record_id` (16) + `term_freq` (u32).
+/// Bytes per posting entry on disk in the fixed-width layout: `record_id`
+/// (16) + `term_freq` (u32).
 const POSTING_LEN: usize = 20;
+
+/// First `format_version` whose postings bodies use the delta+varint layout
+/// (S26, `docs/adr/0021`, `docs/FORMAT.md` §11). Older files keep the
+/// fixed-width layout for both reads and writes, so a file never mixes
+/// layouts and stays readable by the build that wrote it.
+const DELTA_VARINT_MIN_FORMAT_VERSION: u32 = 4;
+
+/// Longest legal LEB128 varint for a u128: ⌈128 / 7⌉ bytes. A longer run of
+/// continuation bits is malformed, which also bounds the decode loop.
+const MAX_VARINT_LEN: usize = 19;
+
+/// On-disk encoding of a postings body — selected by the *file's*
+/// `format_version` (`docs/FORMAT.md` §11), never stored per body: every body
+/// in one file uses one layout, and `vacuum`'s rebuild-by-copy re-encodes an
+/// old file into the current layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostingsLayout {
+    /// `format_version` ≤ 3: `doc_freq` (u32) then fixed 20-byte entries of
+    /// `record_id` (16 raw bytes) · `term_freq` (u32).
+    FixedWidth,
+    /// `format_version` ≥ 4: `doc_freq` (u32) then per entry the varint
+    /// **delta** of `record_id` from the previous entry (the list is sorted
+    /// strictly ascending, so deltas after the first are ≥ 1; the first is
+    /// the id's raw u128 value) followed by `term_freq` as a varint.
+    DeltaVarint,
+}
+
+impl PostingsLayout {
+    fn for_format_version(version: u32) -> Self {
+        if version >= DELTA_VARINT_MIN_FORMAT_VERSION {
+            PostingsLayout::DeltaVarint
+        } else {
+            PostingsLayout::FixedWidth
+        }
+    }
+}
+
+/// Appends `v` as an LEB128 varint (7 data bits per byte, low bits first,
+/// high bit = continuation). Minimal-length by construction, so the encoding
+/// is deterministic (G3).
+fn put_varint(out: &mut Vec<u8>, mut v: u128) {
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Reads one LEB128 varint at `*off`, advancing it. Rejects truncation, more
+/// than [`MAX_VARINT_LEN`] bytes, and data bits shifted past 128 — so a
+/// hostile body can neither loop forever nor silently wrap a value.
+fn read_varint(body: &[u8], off: &mut usize, page_no: u64) -> Result<u128> {
+    let mut value: u128 = 0;
+    for i in 0..MAX_VARINT_LEN {
+        let byte = *body
+            .get(*off + i)
+            .ok_or_else(|| malformed(page_no, "fts varint truncated"))?;
+        let bits = u128::from(byte & 0x7F);
+        let shift = 7 * i as u32;
+        if bits != 0 && (bits << shift) >> shift != bits {
+            return Err(malformed(page_no, "fts varint overflow"));
+        }
+        value |= bits << shift;
+        if byte & 0x80 == 0 {
+            *off += i + 1;
+            return Ok(value);
+        }
+    }
+    Err(malformed(page_no, "fts varint too long"))
+}
 
 fn malformed(page_no: u64, what: &'static str) -> Error {
     Error::MalformedPage { page_no, what }
@@ -260,21 +335,44 @@ impl Postings {
         }
     }
 
-    /// Serialized body: `doc_freq` (u32) + `doc_freq` × posting entries.
-    fn encode(&self) -> Vec<u8> {
+    /// Serialized body: `doc_freq` (u32) + `doc_freq` × posting entries in
+    /// `layout`'s encoding (`docs/FORMAT.md` §11).
+    fn encode(&self, layout: PostingsLayout) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + self.entries.len() * POSTING_LEN);
         out.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
-        for p in &self.entries {
-            out.extend_from_slice(&p.record_id.to_bytes());
-            out.extend_from_slice(&p.term_freq.to_le_bytes());
+        match layout {
+            PostingsLayout::FixedWidth => {
+                for p in &self.entries {
+                    out.extend_from_slice(&p.record_id.to_bytes());
+                    out.extend_from_slice(&p.term_freq.to_le_bytes());
+                }
+            }
+            PostingsLayout::DeltaVarint => {
+                let mut prev: u128 = 0;
+                for p in &self.entries {
+                    let id = u128::from(p.record_id);
+                    // The list is strictly ascending, so this never wraps and
+                    // deltas after the first entry are always ≥ 1.
+                    put_varint(&mut out, id.wrapping_sub(prev));
+                    put_varint(&mut out, u128::from(p.term_freq));
+                    prev = id;
+                }
+            }
         }
         out
     }
 
-    /// Parses a postings body. Validates the count against the buffer before
-    /// allocating (fuzz rule, `docs/TESTING.md` §3) and rejects unsorted or
-    /// duplicate ids (a corrupt or hostile page).
-    fn decode(body: &[u8], page_no: u64) -> Result<Self> {
+    /// Parses a postings body in `layout`'s encoding. Validates the count
+    /// against the buffer before allocating (fuzz rule, `docs/TESTING.md` §3)
+    /// and rejects unsorted or duplicate ids (a corrupt or hostile page).
+    fn decode(body: &[u8], page_no: u64, layout: PostingsLayout) -> Result<Self> {
+        match layout {
+            PostingsLayout::FixedWidth => Self::decode_fixed_width(body, page_no),
+            PostingsLayout::DeltaVarint => Self::decode_delta_varint(body, page_no),
+        }
+    }
+
+    fn decode_fixed_width(body: &[u8], page_no: u64) -> Result<Self> {
         let count = dict::read_u32(body, 0, page_no)? as usize;
         let need = 4usize
             .checked_add(
@@ -311,12 +409,57 @@ impl Postings {
         }
         Ok(Postings { entries })
     }
+
+    fn decode_delta_varint(body: &[u8], page_no: u64) -> Result<Self> {
+        let count = dict::read_u32(body, 0, page_no)? as usize;
+        // Every entry takes at least two bytes (one-varint delta + one-varint
+        // term_freq), so a hostile count is rejected before allocating.
+        let min_need = 4usize
+            .checked_add(
+                count
+                    .checked_mul(2)
+                    .ok_or_else(|| malformed(page_no, "fts postings count overflow"))?,
+            )
+            .ok_or_else(|| malformed(page_no, "fts postings length overflow"))?;
+        if body.len() < min_need {
+            return Err(malformed(page_no, "fts postings truncated"));
+        }
+        let mut entries = Vec::with_capacity(count);
+        let mut prev: u128 = 0;
+        let mut off = 4;
+        for i in 0..count {
+            let delta = read_varint(body, &mut off, page_no)?;
+            if i > 0 && delta == 0 {
+                return Err(malformed(page_no, "unsorted fts postings"));
+            }
+            let id = if i == 0 {
+                delta
+            } else {
+                prev.checked_add(delta)
+                    .ok_or_else(|| malformed(page_no, "fts posting id overflow"))?
+            };
+            prev = id;
+            let term_freq = u32::try_from(read_varint(body, &mut off, page_no)?)
+                .map_err(|_| malformed(page_no, "fts posting term_freq overflow"))?;
+            if term_freq == 0 {
+                return Err(malformed(page_no, "fts posting zero term_freq"));
+            }
+            entries.push(Posting {
+                record_id: Ulid::from(id),
+                term_freq,
+            });
+        }
+        Ok(Postings { entries })
+    }
 }
 
-/// Reads a term's postings from the dictionary, or `None` if absent.
+/// Reads a term's postings from the dictionary, or `None` if absent. The
+/// body layout follows the file's `format_version`, so an older file keeps
+/// decoding with its own (fixed-width) layout.
 fn postings_for(src: &dyn PageSource, root: u64, term: &[u8]) -> Result<Option<Postings>> {
+    let layout = PostingsLayout::for_format_version(src.format_version());
     match dict::get(src, FTS_DICT, root, term)? {
-        Some((body, page_no)) => Ok(Some(Postings::decode(&body, page_no)?)),
+        Some((body, page_no)) => Ok(Some(Postings::decode(&body, page_no, layout)?)),
         None => Ok(None),
     }
 }
@@ -351,12 +494,15 @@ pub fn index_document(txn: &mut Txn<'_>, record_id: Ulid, content: &str) -> Resu
     let mut terms: Vec<(String, u32)> = freqs.into_iter().collect();
     terms.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // Writes use the file's own layout (not this build's newest), so an
+    // older file stays uniform and readable by the build that created it.
+    let layout = PostingsLayout::for_format_version(txn.format_version());
     let mut root = meta.dict_root;
     for (term, tf) in terms {
         let term_bytes = term.as_bytes();
         let mut postings = postings_for(txn, root, term_bytes)?.unwrap_or_default();
         postings.upsert(record_id, tf);
-        root = dict::upsert(txn, FTS_DICT, root, term_bytes, &postings.encode())?;
+        root = dict::upsert(txn, FTS_DICT, root, term_bytes, &postings.encode(layout))?;
     }
 
     meta.dict_root = root;
@@ -385,6 +531,16 @@ pub struct Hit {
 /// DESIGN §7). `doc_len` yields a candidate's current token length for BM25
 /// length normalization; returning `None` drops the candidate (its record is
 /// gone). Both closures are called at most once per candidate record.
+///
+/// Scan strategy (FT2, `docs/adr/0018`): FT1 measured `keep` + `doc_len` —
+/// both of which reload the candidate's record — at 93% of query time @ 100k,
+/// so this evaluates candidates lazily: a first pass scores a cheap upper
+/// bound per candidate from the postings alone (no closures), then a second
+/// pass evaluates candidates exactly, best bound first, stopping as soon as
+/// the remaining bounds fall strictly below the k-th best exact score. The
+/// result is identical — same hits, same scores, same order — to the
+/// exhaustive scan ([`search_profiled`] keeps that scan as the test oracle);
+/// early termination only skips work that provably cannot change the top k.
 pub fn search(
     src: &dyn PageSource,
     fts_root_page: u64,
@@ -422,12 +578,14 @@ pub fn search(
         meta.total_tokens as f32 / meta.doc_count as f32
     };
 
-    // Accumulate BM25 across terms. `scores` sums per candidate; `lengths`
-    // and `kept` memoize the per-record closures so each is hit at most once.
-    let mut scores: HashMap<Ulid, f32> = HashMap::new();
-    let mut lengths: HashMap<Ulid, Option<u32>> = HashMap::new();
-    let mut kept: HashMap<Ulid, bool> = HashMap::new();
-
+    // Pass 1 — decode every matched term's postings once and accumulate a
+    // per-candidate upper bound on its BM25 score, without calling `keep` or
+    // `doc_len`. `dl = 0` minimizes the length norm, so each term's bound
+    // dominates its true contribution for any document length; the bound
+    // stays sound under f32 rounding because +, ×, ÷ round monotonically and
+    // the exact score below sums the same terms in the same order.
+    let mut matched: Vec<(f32, Postings)> = Vec::with_capacity(query_terms.len());
+    let mut bounds: HashMap<Ulid, f32> = HashMap::new();
     for term in &query_terms {
         let Some(postings) = postings_for(src, meta.dict_root, term.as_bytes())? else {
             continue;
@@ -440,37 +598,69 @@ pub fn search(
         // because df <= N (a term's postings are a subset of the corpus).
         let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
         for p in &postings.entries {
-            let id = p.record_id;
-            if !*kept.entry(id).or_insert_with(|| keep(id)) {
-                continue;
-            }
-            let dl = match lengths.entry(id) {
-                std::collections::hash_map::Entry::Occupied(e) => *e.get(),
-                std::collections::hash_map::Entry::Vacant(e) => *e.insert(doc_len(id)?),
-            };
-            let Some(dl) = dl else {
-                continue; // record vanished; skip it
-            };
             let tf = p.term_freq as f32;
-            let norm = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl as f32 / avgdl.max(1.0));
-            let contribution = idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
-            *scores.entry(id).or_insert(0.0) += contribution;
+            let norm = tf + BM25_K1 * (1.0 - BM25_B);
+            let bound = idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
+            *bounds.entry(p.record_id).or_insert(0.0) += bound;
         }
+        matched.push((idf, postings));
     }
 
-    let mut hits: Vec<Hit> = scores
-        .into_iter()
-        .filter(|&(_, s)| s > 0.0)
-        .map(|(record_id, score)| Hit { record_id, score })
-        .collect();
-    // Best score first; ties broken by id for a deterministic order (G3).
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+    // Best bound first; ties by id so the evaluation order is deterministic.
+    let mut candidates: Vec<(Ulid, f32)> = bounds.into_iter().collect();
+    candidates.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.record_id.cmp(&b.record_id))
+            .then_with(|| a.0.cmp(&b.0))
     });
-    hits.truncate(k);
+
+    // Pass 2 — evaluate candidates exactly, best bound first. Once k exact
+    // hits exist and the next bound is *strictly* below the k-th best exact
+    // score, no unevaluated candidate can enter the top k (its true score is
+    // at most its bound) nor displace an equal-score hit (a tie would need
+    // bound == k-th score, which is not strictly below), so stop.
+    // At most k hits live here (plus one transiently during insert); a huge
+    // caller `k` (e.g. "no limit") must neither overflow nor preallocate.
+    let mut hits: Vec<Hit> = Vec::with_capacity(k.saturating_add(1).min(candidates.len()));
+    for (id, bound) in candidates {
+        if hits.len() == k && bound < hits[k - 1].score {
+            break;
+        }
+        if !keep(id) {
+            continue;
+        }
+        let Some(dl) = doc_len(id)? else {
+            continue; // record vanished; skip it
+        };
+        // Exact BM25 — same expression and same (sorted) term order as the
+        // exhaustive scan, so scores are bit-identical to it.
+        let mut score = 0.0f32;
+        for (idf, postings) in &matched {
+            let Ok(i) = postings.entries.binary_search_by(|p| p.record_id.cmp(&id)) else {
+                continue;
+            };
+            let tf = postings.entries[i].term_freq as f32;
+            let norm = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl as f32 / avgdl.max(1.0));
+            score += idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
+        }
+        if score <= 0.0 {
+            continue;
+        }
+        // Insert keeping (score desc, id asc) — the same order the exhaustive
+        // scan sorts by (G3) — and keep only the best k.
+        let pos =
+            hits.partition_point(|h| h.score > score || (h.score == score && h.record_id < id));
+        if pos < k {
+            hits.insert(
+                pos,
+                Hit {
+                    record_id: id,
+                    score,
+                },
+            );
+            hits.truncate(k);
+        }
+    }
     Ok(hits)
 }
 
@@ -480,18 +670,183 @@ pub fn indexed_documents(src: &dyn PageSource, fts_root_page: u64) -> Result<u64
     Ok(load_meta(src, fts_root_page)?.map_or(0, |m| m.doc_count))
 }
 
-/// Fuzz-only surface: decode one page as each FTS node kind and as postings,
-/// exercising every parser branch. Must return, never panic (`fuzz_fts_page`
-/// target, `docs/TESTING.md` §3).
+/// Per-phase timings for one [`search_profiled`] call, in nanoseconds —
+/// measurement-only surface for story FT1 (`docs/adr/0017`). Never called
+/// from `api.rs`/production `recall`; exists purely so `benches/` can isolate
+/// where the full-text half of hybrid recall spends its time without
+/// guessing from code reading (ADR 0017 §1 lists the same four candidates
+/// this struct's fields name).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchPhaseTimings {
+    /// `dict::get` + `Postings::decode`: term lookup page I/O (cache hit or
+    /// disk) *and* bytes-to-`Vec<Posting>` decode are one call in the current
+    /// dictionary API, so this phase intentionally bundles both — a probe
+    /// that needs to split page-cache-miss I/O from decode CPU would need a
+    /// `PageSource` wrapper, out of scope for this read-only measurement.
+    pub postings_lookup_ns: u64,
+    /// The `keep` closure: tombstone/scope/filter re-check per distinct
+    /// candidate id (memoized in `kept`, so this is paid once per id even
+    /// though a candidate may appear in several terms' postings).
+    pub keep_ns: u64,
+    /// The `doc_len` closure: re-loads the candidate's record and
+    /// re-tokenizes its content for BM25 length normalization (memoized in
+    /// `lengths`, once per id) — the cost the ADR 0011 trade-off (not
+    /// persisting `doc_len`) puts on the read path.
+    pub doc_len_ns: u64,
+    /// `HashMap<Ulid, f32>` insert/accumulate into `scores`, plus the final
+    /// sort-and-truncate into ranked `Hit`s.
+    pub scoring_ns: u64,
+    /// Number of query terms that had a non-empty postings list (informs
+    /// whether `postings_lookup_ns` reflects one term or several).
+    pub terms_matched: u32,
+    /// Number of `(term, posting)` pairs visited across every matched term —
+    /// the raw work size `postings_lookup_ns`/`keep_ns`/`doc_len_ns` scale
+    /// with, so two runs can be compared per-pair, not just in aggregate.
+    pub postings_visited: u64,
+}
+
+/// The **exhaustive** BM25 scan (the pre-FT2 `search` algorithm: every
+/// posting of every matched term is scored, `keep`/`doc_len` memoized per
+/// candidate), instrumented phase-by-phase with [`std::time::Instant`]
+/// (`docs/adr/0017` §1 method: manual instrumentation is the accepted
+/// fallback when native flamegraph tooling — `perf`/`samply` — is
+/// unavailable on the box). Kept as a **separate** function rather than
+/// adding timing to `search` itself so the production path (`Store::recall`,
+/// `Store::search_text`) never pays a single extra `Instant::now()` call —
+/// this is read-only profiling surface, not a production code path change
+/// (`#[doc(hidden)]`, same visibility pattern as [`fuzz_decode_page`]).
+///
+/// Since FT2 (`docs/adr/0018`) this doubles as the **equivalence oracle**:
+/// [`search`] terminates its scan early but must return exactly what this
+/// full scan returns — same hits, same scores, same order — in any regime;
+/// the equivalence tests below compare the two directly.
+#[doc(hidden)]
+pub fn search_profiled(
+    src: &dyn PageSource,
+    fts_root_page: u64,
+    query: &str,
+    k: usize,
+    mut keep: impl FnMut(Ulid) -> bool,
+    mut doc_len: impl FnMut(Ulid) -> Result<Option<u32>>,
+) -> Result<(Vec<Hit>, SearchPhaseTimings)> {
+    let mut timings = SearchPhaseTimings::default();
+    if k == 0 {
+        return Ok((Vec::new(), timings));
+    }
+    let Some(meta) = load_meta(src, fts_root_page)? else {
+        return Ok((Vec::new(), timings));
+    };
+    if meta.doc_count == 0 || meta.dict_root == 0 {
+        return Ok((Vec::new(), timings));
+    }
+
+    let mut query_terms: Vec<String> = tokenize(query)
+        .into_iter()
+        .map(|t| clip_term(&t).to_owned())
+        .filter(|t| !t.is_empty())
+        .collect();
+    query_terms.sort();
+    query_terms.dedup();
+    if query_terms.is_empty() {
+        return Ok((Vec::new(), timings));
+    }
+
+    let n = meta.doc_count as f32;
+    let avgdl = if meta.doc_count == 0 {
+        0.0
+    } else {
+        meta.total_tokens as f32 / meta.doc_count as f32
+    };
+
+    let mut scores: HashMap<Ulid, f32> = HashMap::new();
+    let mut lengths: HashMap<Ulid, Option<u32>> = HashMap::new();
+    let mut kept: HashMap<Ulid, bool> = HashMap::new();
+
+    for term in &query_terms {
+        let lookup_started = std::time::Instant::now();
+        let postings = postings_for(src, meta.dict_root, term.as_bytes())?;
+        timings.postings_lookup_ns += lookup_started.elapsed().as_nanos() as u64;
+        let Some(postings) = postings else {
+            continue;
+        };
+        let df = postings.entries.len() as f32;
+        if df == 0.0 {
+            continue;
+        }
+        timings.terms_matched += 1;
+        let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+        for p in &postings.entries {
+            timings.postings_visited += 1;
+            let id = p.record_id;
+            let is_kept = match kept.get(&id) {
+                Some(&v) => v,
+                None => {
+                    let keep_started = std::time::Instant::now();
+                    let v = keep(id);
+                    timings.keep_ns += keep_started.elapsed().as_nanos() as u64;
+                    kept.insert(id, v);
+                    v
+                }
+            };
+            if !is_kept {
+                continue;
+            }
+            let dl = match lengths.get(&id) {
+                Some(&v) => v,
+                None => {
+                    let doc_len_started = std::time::Instant::now();
+                    let v = doc_len(id)?;
+                    timings.doc_len_ns += doc_len_started.elapsed().as_nanos() as u64;
+                    lengths.insert(id, v);
+                    v
+                }
+            };
+            let Some(dl) = dl else {
+                continue;
+            };
+            let scoring_started = std::time::Instant::now();
+            let tf = p.term_freq as f32;
+            let norm = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl as f32 / avgdl.max(1.0));
+            let contribution = idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
+            *scores.entry(id).or_insert(0.0) += contribution;
+            timings.scoring_ns += scoring_started.elapsed().as_nanos() as u64;
+        }
+    }
+
+    let scoring_started = std::time::Instant::now();
+    let mut hits: Vec<Hit> = scores
+        .into_iter()
+        .filter(|&(_, s)| s > 0.0)
+        .map(|(record_id, score)| Hit { record_id, score })
+        .collect();
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.record_id.cmp(&b.record_id))
+    });
+    hits.truncate(k);
+    timings.scoring_ns += scoring_started.elapsed().as_nanos() as u64;
+
+    Ok((hits, timings))
+}
+
+/// Fuzz-only surface: decode one page as each FTS node kind and as postings
+/// — in **both** postings layouts (fixed-width for `format_version` ≤ 3
+/// files, delta+varint for ≥ 4), exercising every parser branch. Must
+/// return, never panic (`fuzz_fts_page` target, `docs/TESTING.md` §3).
 #[doc(hidden)]
 pub fn fuzz_decode_page(page: &[u8]) {
     dict::fuzz_decode_node(page, FTS_DICT);
     let _ = FtsMeta::decode(page, 1);
-    // Postings bodies live at the page content region; try decoding the body.
-    if page.len() > PAGE_HEADER_LEN {
-        let _ = Postings::decode(&page[PAGE_HEADER_LEN..], 1);
+    for layout in [PostingsLayout::FixedWidth, PostingsLayout::DeltaVarint] {
+        // Postings bodies live at the page content region; try the body too.
+        if page.len() > PAGE_HEADER_LEN {
+            let _ = Postings::decode(&page[PAGE_HEADER_LEN..], 1, layout);
+        }
+        let _ = Postings::decode(page, 1, layout);
     }
-    let _ = Postings::decode(page, 1);
 }
 
 #[cfg(test)]
@@ -559,16 +914,105 @@ mod tests {
         p.upsert(Ulid::from_parts(1, 0), 1);
         p.upsert(Ulid::from_parts(1, 0), 5); // update, not duplicate
         assert_eq!(p.entries.len(), 2);
-        let body = p.encode();
-        assert_eq!(Postings::decode(&body, 1).unwrap(), p);
+        for layout in [PostingsLayout::FixedWidth, PostingsLayout::DeltaVarint] {
+            let body = p.encode(layout);
+            assert_eq!(Postings::decode(&body, 1, layout).unwrap(), p);
 
-        // A hostile count with no payload must fail before allocating.
-        let mut bad = 1_000_000u32.to_le_bytes().to_vec();
-        bad.extend_from_slice(&[0u8; 4]);
-        assert!(matches!(
-            Postings::decode(&bad, 1),
-            Err(Error::MalformedPage { .. })
-        ));
+            // A hostile count with no payload must fail before allocating.
+            let mut bad = 1_000_000u32.to_le_bytes().to_vec();
+            bad.extend_from_slice(&[0u8; 4]);
+            assert!(matches!(
+                Postings::decode(&bad, 1, layout),
+                Err(Error::MalformedPage { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn delta_varint_roundtrips_and_shrinks_realistic_postings() {
+        // Realistic ids: ULIDs minted over time — sorted, random low bits —
+        // exactly what a real postings list holds (FORMAT §11: sorted by id).
+        let mut rng = SplitMix64(0x5EED_5EED);
+        let mut p = Postings::default();
+        for i in 0..500u64 {
+            let id = Ulid::from_parts(1_700_000_000_000 + i * 37, rng.next_u64().into());
+            p.upsert(id, 1 + (rng.next_u64() % 7) as u32);
+        }
+        let compact = p.encode(PostingsLayout::DeltaVarint);
+        let fixed = p.encode(PostingsLayout::FixedWidth);
+        assert_eq!(
+            Postings::decode(&compact, 1, PostingsLayout::DeltaVarint).unwrap(),
+            p
+        );
+        assert_eq!(
+            Postings::decode(&fixed, 1, PostingsLayout::FixedWidth).unwrap(),
+            p
+        );
+        // The whole point of S26: fewer bytes per entry than the fixed 20.
+        assert!(
+            compact.len() < fixed.len(),
+            "delta+varint ({}) must beat fixed-width ({})",
+            compact.len(),
+            fixed.len()
+        );
+
+        // Edge ids round-trip too: 0, adjacent, and u128::MAX.
+        let mut edge = Postings::default();
+        edge.upsert(Ulid::from(0u128), 1);
+        edge.upsert(Ulid::from(1u128), 2);
+        edge.upsert(Ulid::from(u128::MAX), u32::MAX);
+        let body = edge.encode(PostingsLayout::DeltaVarint);
+        assert_eq!(
+            Postings::decode(&body, 1, PostingsLayout::DeltaVarint).unwrap(),
+            edge
+        );
+    }
+
+    #[test]
+    fn delta_varint_rejects_hostile_bodies() {
+        let reject = |body: &[u8], what: &str| {
+            assert!(
+                matches!(
+                    Postings::decode(body, 1, PostingsLayout::DeltaVarint),
+                    Err(Error::MalformedPage { .. })
+                ),
+                "must reject: {what}"
+            );
+        };
+        // Entry count promised but body truncated mid-entry.
+        let mut body = 2u32.to_le_bytes().to_vec();
+        body.push(0x05); // entry 0: id 5
+        body.push(0x01); // entry 0: tf 1
+        body.push(0x03); // entry 1: delta 3, then missing tf
+        reject(&body, "truncated after last delta");
+        // Zero delta after the first entry = duplicate/unsorted id.
+        let mut body = 2u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0x05, 0x01, 0x00, 0x01]);
+        reject(&body, "zero delta (duplicate id)");
+        // Zero term_freq.
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0x05, 0x00]);
+        reject(&body, "zero term_freq");
+        // term_freq beyond u32.
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.push(0x05);
+        put_varint(&mut body, u128::from(u32::MAX) + 1);
+        reject(&body, "term_freq overflow");
+        // id accumulation past u128::MAX.
+        let mut body = 2u32.to_le_bytes().to_vec();
+        put_varint(&mut body, u128::MAX);
+        body.push(0x01);
+        body.extend_from_slice(&[0x01, 0x01]); // delta 1 wraps
+        reject(&body, "id overflow");
+        // A varint longer than 19 bytes must terminate the loop with an error.
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0x80; 20]);
+        reject(&body, "varint too long");
+        // Data bits shifted past 128 (19th byte with high data bits).
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&[0x80; 18]);
+        body.push(0x7F); // 7 data bits at shift 126 — overflow
+        reject(&body, "varint overflow bits");
     }
 
     #[test]
@@ -602,6 +1046,125 @@ mod tests {
         assert_eq!(hits[1].record_id, ids[0]);
         assert!(hits.iter().all(|h| h.score > 0.0));
         assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn search_profiled_matches_search_exactly() {
+        // FT1 (`docs/adr/0017`): the profiled duplicate must never diverge
+        // from the production scan it mirrors, or the phase timings would be
+        // measuring a different algorithm.
+        let mut pager = pager(4096);
+        let ids = index_all(
+            &mut pager,
+            &[
+                "the rust compiler enforces memory safety",
+                "python is a dynamic language",
+                "rust rust rust is about memory and safety in rust",
+            ],
+        );
+        let mut contents = std::collections::HashMap::new();
+        contents.insert(
+            ids[0],
+            "the rust compiler enforces memory safety".to_owned(),
+        );
+        contents.insert(ids[1], "python is a dynamic language".to_owned());
+        contents.insert(
+            ids[2],
+            "rust rust rust is about memory and safety in rust".to_owned(),
+        );
+        let root = pager.header().fts_root_page;
+
+        let plain = search(&pager, root, "rust memory", 10, |_| true, len_of(&contents)).unwrap();
+        let (profiled, timings) =
+            search_profiled(&pager, root, "rust memory", 10, |_| true, len_of(&contents)).unwrap();
+        assert_eq!(plain, profiled);
+        assert_eq!(timings.terms_matched, 2); // "memory" and "rust"
+        assert!(timings.postings_visited >= 3); // doc 0 + doc 2 for "rust", doc 0 + doc 2 for "memory"
+    }
+
+    #[test]
+    fn early_termination_matches_exhaustive_scan_on_larger_corpus() {
+        // FT2 (`docs/adr/0018`) hard invariant: the bounded scan in `search`
+        // must return exactly what the exhaustive scan returns — same hits,
+        // same (bit-identical) scores, same order — including when the cut
+        // actually triggers: k far below the candidate count, common + rare
+        // terms, varied document lengths and term frequencies, exact-tie
+        // duplicates, a keep filter, and vanished records.
+        let mut pager = pager(4096);
+        let mut docs: Vec<String> = Vec::new();
+        for i in 0..240 {
+            // Every doc shares "common"; its tf and the doc length vary so
+            // bounds and exact scores disagree in both directions, and the
+            // cycles (7, 23) repeat content so exact score ties occur.
+            let mut d = "common ".repeat(1 + i % 7);
+            d.push_str(&"filler ".repeat(i % 23));
+            if i % 11 == 0 {
+                d.push_str("rare ");
+            }
+            if i % 37 == 0 {
+                d.push_str("rarest");
+            }
+            docs.push(d);
+        }
+        let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+        let ids = index_all(&mut pager, &doc_refs);
+        let mut contents = std::collections::HashMap::new();
+        for (id, d) in ids.iter().zip(&docs) {
+            contents.insert(*id, d.clone());
+        }
+        // Every 5th record "vanished": indexed, but `doc_len` yields None.
+        let mut partial = contents.clone();
+        for id in ids.iter().step_by(5) {
+            partial.remove(id);
+        }
+        // A keep filter that rejects a third of the corpus, including
+        // candidates holding the best bounds.
+        let dropped: std::collections::HashSet<Ulid> = ids
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(i, id)| (i % 3 == 0).then_some(id))
+            .collect();
+
+        let root = pager.header().fts_root_page;
+        for query in [
+            "common",
+            "common rare",
+            "rare rarest common",
+            "filler common",
+        ] {
+            for k in [1, 3, 10, 500] {
+                let plain = search(&pager, root, query, k, |_| true, len_of(&contents)).unwrap();
+                let (full, _) =
+                    search_profiled(&pager, root, query, k, |_| true, len_of(&contents)).unwrap();
+                assert_eq!(plain, full, "query={query:?} k={k}");
+
+                let plain = search(
+                    &pager,
+                    root,
+                    query,
+                    k,
+                    |id| !dropped.contains(&id),
+                    len_of(&contents),
+                )
+                .unwrap();
+                let (full, _) = search_profiled(
+                    &pager,
+                    root,
+                    query,
+                    k,
+                    |id| !dropped.contains(&id),
+                    len_of(&contents),
+                )
+                .unwrap();
+                assert_eq!(plain, full, "query={query:?} k={k} (keep filter)");
+
+                let plain = search(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
+                let (full, _) =
+                    search_profiled(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
+                assert_eq!(plain, full, "query={query:?} k={k} (vanished records)");
+            }
+        }
     }
 
     #[test]
@@ -689,6 +1252,114 @@ mod tests {
         assert!(found.contains(&ids[0]));
         assert!(found.contains(&ids[1]));
         assert!(!found.contains(&ids[2]));
+    }
+
+    /// Cross-version round-trip (S26, `docs/adr/0021`): a `format_version` 3
+    /// file — created with the pre-S26 write path, which this build preserves
+    /// verbatim as the fixed-width layout — must keep working under this
+    /// build for reads *and* writes, staying uniform in its own layout, so
+    /// the build that wrote it could still read it back.
+    #[test]
+    fn format_version_3_file_reads_and_writes_fixed_width_postings() {
+        let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+        let opts = PagerOptions {
+            page_size: 4096,
+            format_version: 3,
+            ..Default::default()
+        };
+        let mut pager = Pager::create(Arc::clone(&vfs), Path::new("memory.mind"), opts).unwrap();
+        let ids = index_all(&mut pager, &["rust memory engine", "python memory model"]);
+        let mut contents = std::collections::HashMap::new();
+        contents.insert(ids[0], "rust memory engine".to_owned());
+        contents.insert(ids[1], "python memory model".to_owned());
+
+        // The stored body is the fixed-width layout, byte-exactly what the
+        // version-3 build wrote: 4 (doc_freq) + 20 per entry.
+        let meta = load_meta(&pager, pager.header().fts_root_page)
+            .unwrap()
+            .unwrap();
+        let (body, page_no) = dict::get(&pager, FTS_DICT, meta.dict_root, b"memory")
+            .unwrap()
+            .unwrap();
+        assert_eq!(body.len(), 4 + 2 * POSTING_LEN);
+        let decoded = Postings::decode(&body, page_no, PostingsLayout::FixedWidth).unwrap();
+        assert_eq!(decoded.entries.len(), 2);
+
+        // Search works on the old layout, and the file reopens still as v3
+        // (the version is a property of the file, never silently upgraded).
+        let root = pager.header().fts_root_page;
+        let hits = search(&pager, root, "memory", 10, |_| true, len_of(&contents)).unwrap();
+        assert_eq!(hits.len(), 2);
+        pager.close().unwrap();
+
+        let mut pager = Pager::open(
+            Arc::clone(&vfs),
+            Path::new("memory.mind"),
+            PagerOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(pager.header().format_version, 3);
+        // A write by this build extends the old file in its own layout.
+        let new_ids = index_all(&mut pager, &["fresh memory entry"]);
+        contents.insert(new_ids[0], "fresh memory entry".to_owned());
+        let meta = load_meta(&pager, pager.header().fts_root_page)
+            .unwrap()
+            .unwrap();
+        let (body, page_no) = dict::get(&pager, FTS_DICT, meta.dict_root, b"memory")
+            .unwrap()
+            .unwrap();
+        assert_eq!(body.len(), 4 + 3 * POSTING_LEN);
+        assert!(Postings::decode(&body, page_no, PostingsLayout::FixedWidth).is_ok());
+        let root = pager.header().fts_root_page;
+        let hits = search(&pager, root, "memory", 10, |_| true, len_of(&contents)).unwrap();
+        assert_eq!(hits.len(), 3);
+    }
+
+    /// A file created by this build (`format_version` 4) stores postings in
+    /// the delta+varint layout — verified on the raw dictionary body, not
+    /// just through `search`.
+    #[test]
+    fn new_files_store_postings_as_delta_varint() {
+        let mut pager = pager(4096);
+        assert_eq!(pager.header().format_version, crate::format::FORMAT_VERSION);
+        let ids = index_all(&mut pager, &["memory one", "memory two", "memory three"]);
+        let meta = load_meta(&pager, pager.header().fts_root_page)
+            .unwrap()
+            .unwrap();
+        let (body, page_no) = dict::get(&pager, FTS_DICT, meta.dict_root, b"memory")
+            .unwrap()
+            .unwrap();
+        // Strictly smaller than the fixed-width footprint for 3 entries…
+        assert!(body.len() < 4 + 3 * POSTING_LEN);
+        // …and it decodes (only) as the new layout to exactly those ids.
+        let decoded = Postings::decode(&body, page_no, PostingsLayout::DeltaVarint).unwrap();
+        let got: Vec<Ulid> = decoded.entries.iter().map(|p| p.record_id).collect();
+        let mut expected = ids.clone();
+        expected.sort();
+        assert_eq!(got, expected);
+    }
+
+    /// FTS_POSTINGS overflow chains under the new layout: enough shared-term
+    /// entries to spill past the inline cap, then read back intact.
+    #[test]
+    fn delta_varint_postings_survive_overflow_chains() {
+        let mut pager = pager(512);
+        let mut docs = Vec::new();
+        for i in 0..120 {
+            docs.push(format!("shared corpus word plus unique{i:03}"));
+        }
+        let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+        let ids = index_all(&mut pager, &doc_refs);
+        let mut contents = std::collections::HashMap::new();
+        for (id, doc) in ids.iter().zip(&docs) {
+            contents.insert(*id, doc.clone());
+        }
+        let root = pager.header().fts_root_page;
+        // "shared" appears in all 120 docs: at 512-byte pages its postings
+        // body far exceeds the inline cap, so it lives in an FTS_POSTINGS
+        // chain — and must come back complete.
+        let hits = search(&pager, root, "shared", 500, |_| true, len_of(&contents)).unwrap();
+        assert_eq!(hits.len(), 120);
     }
 
     #[test]

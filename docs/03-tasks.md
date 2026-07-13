@@ -474,6 +474,15 @@ reduz trabalho, nunca muda quais documentos retornam ou sua ordem).
   `query_engine_p50/p99_ms` @ 100k.
 - **Verificação:** `cargo test --workspace` + `benches/run_all.sh --full` (comparar
   contra o baseline pré-FT2, não sobrescrever sem registrar o antes/depois).
+- **Status (2026-07-12): ENTREGUE.** [ADR 0018](adr/0018-early-termination-no-scan-bm25.md)
+  registra o critério (corte quando o próximo upper bound < k-ésimo score exato,
+  estrito) e o porquê: a FT1 mediu a avaliação por candidato (`keep`+`doc_len`,
+  93,3%) como causa dominante, não a decodificação (1,2%) — o corte reduz
+  avaliações, não bytes. Antes/depois @ 100k (1000 queries, meio full-text sem
+  embed): p50 994,33 → 94,50 ms, p99 4.576,46 → 550,78 ms. Equivalência: teste
+  unitário com corte ativo/empates/filtros + 25/25 queries bit-idênticas no corpus
+  real (`bench_fts`). NFR p99 < 50 ms ainda não fecha → FT3 segue necessária;
+  re-rodada de `run_all.sh --full` fica para a validação da fase.
 
 ### FT3. Compressão delta+varint e/ou skip lists nas postings (story S26) — depende de FT1/FT2
 
@@ -512,8 +521,20 @@ baixa confiança. Medir no harness e registrar a escolha em ADR novo.
   ADR novo com o método escolhido e os números antes/depois.
 - **Verificação:** `benches/run_all.sh --full` nos dois datasets + `cargo test
   --workspace`.
+- **Resultado (2026-07-12, ADR 0019):** nenhum dos três candidatos foi adotado —
+  o probe `probe_worst` (1000 queries, dupla notação id-overlap × paridade de
+  score) provou que a cauda era artefato da métrica, não miss do HNSW: 23,0% do
+  corpus @ 100k são textos duplicados exatos (embeddings bit-idênticos), o
+  limite do top-10 exato é um platô de 14–29 scores empatados e as 70 queries
+  abaixo de 0,70 têm todas paridade 1,00 (a escada ef 384–2048 não melhora o
+  id-overlap — é sorteio de empate — e custa até ~660 ms/query). O grading do
+  harness virou tie-aware (mesma régua para EmbedMind e concorrentes): @ 100k
+  média 0,9360 → 1,0000, pior query 0,20 → 1,00; @ 10k 0,9953 → 1,0000,
+  0,90 → 1,00. Latência/RSS intocados (mudança só de medição). Evidência bruta
+  em `benches/results/probe-worst-{10k,100k}.txt`; rerun oficial do
+  `run_all.sh --full` fica com o founder.
 
-### FT5. Corrigir o estouro de RSS de pico @ 100k (story S28) — independente de FT1-FT3
+### FT5. Corrigir o estouro de RSS de pico @ 100k (story S28) [✅ ENTREGUE] — independente de FT1-FT3
 
 RSS de pico medido em 307,1 MiB (query) / 305,4 MiB (ingest) @ 100k, contra o teto
 de 300 MiB — o ADR 0015 já descarta ser efeito do `ef_search` escalado (a folga já
@@ -529,6 +550,24 @@ páginas do pager, buffers de decodificação — antes de escolher a correção
   já registrada (ex.: ADR 0002/0008 do HNSW).
 - **Verificação:** `benches/run_all.sh --full` confirmando RSS < 300 MiB @ 100k;
   `cargo test --workspace`.
+- **Resultado (2026-07-12, ADR 0020):** o `Store::open` não move RSS (241,3 →
+  241,3 MiB no profiling) — o HNSW paginado (ADR 0008) e o pager não retêm
+  estrutura residente relevante, então a suposição do ADR 0015 ("dimensionamento
+  geral do índice") estava errada. Binário novo `profile_rss` (mesmo método da
+  FT1) mediu a causa real: o `VectorSet` de baseline brute-force do próprio
+  harness, ~153 MiB residentes, mantido vivo por referência além de seu único
+  uso (a fase de recall) e contaminando as duas fases de RSS medidas. Corrigido
+  em `harness::run_suite` (passa a consumir `set` por valor e dropá-lo logo após
+  a fase de recall) — nenhuma mudança em `embedmind-core`. RSS de pico @ 100k
+  medido após a correção: **97,8 MiB (query) / 94,9 MiB (ingest)** no
+  diagnóstico isolado. `cargo test --workspace` 100% verde. Rerun oficial
+  `benches/run_all.sh --full` (1000 queries, os dois datasets) CONFIRMA o NFR:
+  peak RAM @ 100k **120,6 MiB (query) / 120,1 MiB (ingest) — ✅ pass** (teto
+  300 MiB). `recall p99 @ 100k` reprova nessa mesma rodada (956,80 ms vs.
+  < 50 ms) — gargalo pré-existente do FTS (ADR 0017/0018), fora do escopo
+  desta story, não é regressão desta correção. Evidência bruta em
+  `benches/results/profile-rss-100k.txt`, `benches/results/run-all-full-s28.log`
+  e `benches/results/0.1.0-dev.json`.
 
 ---
 

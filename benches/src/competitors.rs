@@ -323,14 +323,16 @@ fn run_sqlite_vec(
                     .collect::<rusqlite::Result<_>>()?;
                 warm.push(started.elapsed());
 
+                // Tie-aware, same grading as EmbedMind's own recall
+                // (`docs/adr/0019`): rows are positions into `set.entries`.
                 let exact = crate::baseline::top_k(set, q, k, |_| true);
-                let exact_ids: std::collections::HashSet<i64> = exact
-                    .iter()
-                    .map(|hit| id_index(set, hit.record_id) as i64)
-                    .collect();
-                let hit_count = rows.iter().filter(|r| exact_ids.contains(r)).count();
-                if !exact_ids.is_empty() {
-                    recall_sum += hit_count as f64 / exact_ids.len() as f64;
+                if let Some(r) = crate::baseline::tie_aware_recall_by_position(
+                    set,
+                    q,
+                    &exact,
+                    rows.iter().copied(),
+                ) {
+                    recall_sum += r;
                     recall_n += 1;
                 }
             }
@@ -371,22 +373,6 @@ fn run_sqlite_vec(
             reason: format!("{reason} (target {})", c.version),
         }
     }
-}
-
-/// Finds `id`'s position in `set.entries` — both adapters key their rows by
-/// that same position (sqlite-vec's `rowid`, zvec's string pk), so this maps
-/// an exact-baseline hit back to the id space each adapter's query returns,
-/// letting recall be computed as a plain set overlap.
-#[cfg(any(
-    feature = "compare-sqlite-vec",
-    feature = "compare-zvec",
-    feature = "compare-chroma"
-))]
-fn id_index(set: &VectorSet, id: ulid::Ulid) -> usize {
-    set.entries
-        .iter()
-        .position(|e| e.id == id)
-        .unwrap_or(usize::MAX)
 }
 
 /// Encodes a `f32` vector as the little-endian byte blob `vec0` expects for a
@@ -466,19 +452,16 @@ fn run_zvec(c: &Competitor, set: &VectorSet, queries: &[Vec<f32>], k: usize) -> 
             let results = collection.query(&query)?;
             warm.push(started.elapsed());
 
-            let got: std::collections::HashSet<i64> = results
+            let got: Vec<i64> = results
                 .iter()
                 .filter_map(|d| d.get_pk().and_then(|pk| pk.parse::<i64>().ok()))
                 .collect();
 
+            // Tie-aware, same grading as EmbedMind's own recall
+            // (`docs/adr/0019`): pks are positions into `set.entries`.
             let exact = crate::baseline::top_k(set, q, k, |_| true);
-            let exact_ids: std::collections::HashSet<i64> = exact
-                .iter()
-                .map(|hit| id_index(set, hit.record_id) as i64)
-                .collect();
-            let hit_count = got.iter().filter(|r| exact_ids.contains(r)).count();
-            if !exact_ids.is_empty() {
-                recall_sum += hit_count as f64 / exact_ids.len() as f64;
+            if let Some(r) = crate::baseline::tie_aware_recall_by_position(set, q, &exact, got) {
+                recall_sum += r;
                 recall_n += 1;
             }
         }
@@ -545,7 +528,7 @@ fn dir_size(dir: &std::path::Path) -> Option<u64> {
 /// competitor receives (never re-embedded by Chroma itself, matching
 /// `docs/BENCHMARKS.md` Sec1 "same embeddings fed to all systems"). Ids are
 /// stringified indices into `set.entries`, which the script echoes back in
-/// `results` so `id_index`'s position-based recall math applies unchanged.
+/// `results` so the position-based tie-aware recall math applies unchanged.
 #[cfg(feature = "compare-chroma")]
 fn run_chroma(
     c: &Competitor,
@@ -642,22 +625,17 @@ fn run_chroma(
 
         // --- recall@k against the shared brute-force baseline, same pattern
         // as run_sqlite_vec/run_zvec: Chroma's returned ids are stringified
-        // positions into `set.entries`, mapped back through `id_index`. ---
+        // positions into `set.entries`, graded tie-aware (`docs/adr/0019`). ---
         let mut recall_sum = 0.0;
         let mut recall_n = 0usize;
         for (q, got_ids) in queries.iter().zip(results.iter()) {
-            let got: std::collections::HashSet<i64> = got_ids
+            let got: Vec<i64> = got_ids
                 .iter()
                 .filter_map(|s| s.parse::<i64>().ok())
                 .collect();
             let exact = crate::baseline::top_k(set, q, k, |_| true);
-            let exact_ids: std::collections::HashSet<i64> = exact
-                .iter()
-                .map(|hit| id_index(set, hit.record_id) as i64)
-                .collect();
-            let hit_count = got.iter().filter(|r| exact_ids.contains(r)).count();
-            if !exact_ids.is_empty() {
-                recall_sum += hit_count as f64 / exact_ids.len() as f64;
+            if let Some(r) = crate::baseline::tie_aware_recall_by_position(set, q, &exact, got) {
+                recall_sum += r;
                 recall_n += 1;
             }
         }

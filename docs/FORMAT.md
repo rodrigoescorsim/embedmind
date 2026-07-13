@@ -31,7 +31,7 @@ Format-level guarantees:
 ## 2. Encoding conventions
 
 - **Endianness:** all multi-byte integers are **little-endian**, always.
-- **Integers:** fixed-width (`u16`/`u32`/`u64`). No varints in v1 (simplicity > space; pages are the compression unit anyway).
+- **Integers:** fixed-width (`u16`/`u32`/`u64`). No varints in versions ≤ 3 (simplicity > space; pages are the compression unit anyway). `format_version` 4 introduces **LEB128 varints** (7 data bits per byte, low bits first, high bit = continuation, minimal-length) in exactly one place: the entries of a full-text postings body (§11). Everything else stays fixed-width.
 - **Strings / blobs:** `u32` byte-length prefix + UTF-8 bytes (strings) or raw bytes (blobs). No NUL terminators.
 - **Checksums:** `xxh3_64` (64-bit). Stored little-endian like everything else.
 - **Nothing is `memcpy`'d from structs.** Every field is explicitly (de)serialized so the parsers are fuzzable and layout is compiler-independent (DESIGN §3.1).
@@ -72,7 +72,7 @@ Format-level guarantees:
 | offset | size | field | notes |
 |---|---|---|---|
 | 0 | 8 | magic | ASCII `MINDFMT1` |
-| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12) |
+| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12); **4** once postings bodies are delta+varint encoded (ADR 0021, §11) |
 | 12 | 4 | `page_size` (u32) | default 4096 |
 | 16 | 8 | `page_count` (u64) | total pages incl. header |
 | 24 | 8 | `root_btree_page` (u64) | record B-tree root |
@@ -253,6 +253,14 @@ previously-reserved header field, so `format_version` moves 1 → 2 as an
 **additive** bump — a v1 file stays readable, it just has no full-text index.
 The graph layer (§12) repeats the pattern: two more page types plus
 `graph_root_page` in reserved bytes, `format_version` 2 → 3, equally additive.
+The postings compression (§11, ADR 0021) is the worked example of rule 3:
+`format_version` 3 → 4 re-encodes the postings **body** (no new page type, no
+new header field), so the layout is selected by the file's `format_version`
+and never mixed within one file. A version-4 build keeps reading *and
+writing* a version-≤3 file in that file's own fixed-width layout (degrades in
+size/speed, never in correctness or into an error), and the migrate path is
+the existing copy-based rebuild (`vacuum` re-encodes into a fresh version-4
+file). A version-3 build refuses a version-4 file per the G4 policy above.
 
 ## 11. Full-text index (inverted index + BM25)
 
@@ -288,9 +296,23 @@ so such a file degrades to vector-only recall).
     An entry's footprint is capped at `usable/4` (postings above the matching
     inline limit spill to overflow), which makes leaf splits provably safe by
     the same midpoint argument as §5.1.
-- **Postings body** for a term: `doc_freq` (u32) then `doc_freq` entries of
-  `record_id` (ULID, 16 bytes) · `term_freq` (u32), **sorted ascending by
-  `record_id`** (deterministic across platforms — G3; `term_freq` is never 0).
+- **Postings body** for a term: `doc_freq` (u32) then `doc_freq` entries,
+  **sorted strictly ascending by `record_id`** (deterministic across
+  platforms — G3; `term_freq` is never 0). The entry encoding is selected by
+  the file's `format_version` — one layout per file, never mixed, never
+  tagged per body (ADR 0021):
+  - **`format_version` ≤ 3 (fixed-width):** each entry is `record_id` (ULID,
+    16 raw bytes) · `term_freq` (u32) — 20 bytes.
+  - **`format_version` ≥ 4 (delta+varint):** each entry is the LEB128 varint
+    (§2) **delta** of `record_id` (as a u128) from the previous entry's,
+    followed by `term_freq` as a varint. The first entry's delta is its raw
+    u128 value; because the list is strictly ascending, every later delta is
+    ≥ 1 — readers reject a zero delta (duplicate id), an id summing past
+    `u128::MAX`, a varint longer than 19 bytes, or a `term_freq` of 0 or
+    beyond u32.
+  A version-4 build reading **or writing** an older file uses that file's
+  fixed-width layout, so the file stays uniform and readable by the build
+  that created it; `vacuum`'s copy-based rebuild is the migration path.
 - **FTS_POSTINGS** pages chain an oversized postings body: common header with
   `entry_count` = payload bytes on this page (`next_page` = 0 ends the chain),
   payload at offset 16. The dictionary cell records the exact `total_len`;
@@ -310,9 +332,10 @@ memory is never re-`remember`ed (content is immutable after write), a
 `(term, record_id)` pair is written once.
 
 All FTS parsers are fully bounds-checked and panic-free — they are a fuzz
-target (`fuzz_fts_page`, [TESTING.md](TESTING.md) §3), and the record crash
-harness now exercises FTS pages because `remember` writes them in the same
-transaction as the record.
+target (`fuzz_fts_page`, [TESTING.md](TESTING.md) §3, which decodes every
+input under **both** postings layouts), and the record crash harness now
+exercises FTS pages because `remember` writes them in the same transaction
+as the record.
 
 ## 12. Graph layer (entities + relations)
 

@@ -15,6 +15,21 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **FTS postings compressed with delta+varint — `format_version` 4** (story
+  S26 part 1, [ADR 0021](docs/adr/0021-postings-fts-delta-varint.md)): a
+  term's postings entries are now stored as the varint-encoded delta of each
+  `record_id` from the previous one plus a varint `term_freq`, instead of
+  fixed 20-byte entries — fewer bytes per posting through the pager and the
+  decode loop, zero change in search semantics (same hits, same scores, same
+  order; the `search_profiled` oracle and both-layout round-trip tests pin
+  it). The layout is selected by the file's `format_version`, never mixed
+  within a file: files written by older builds (v ≤ 3) keep reading **and
+  writing** their fixed-width layout under this build — degrading only in
+  size/speed, never in correctness — and `vacuum`'s copy-based rebuild is
+  the upgrade path. The `fuzz_fts_page` body now decodes every input under
+  both layouts, with new v4 corpus seeds alongside the preserved v3 ones
+  ([FORMAT.md](docs/FORMAT.md) §2/§4/§11). NFR impact @ 100k is measured in
+  the FT-phase closing task, not claimed here.
 - **Usage report: `embedmind report`** (story S23) — the trust answer to "is
   the memory actually being used?". Aggregates the op-log written by `serve
   --op-log` over a window (`--since N`, default 7 days): sessions, recalls
@@ -422,6 +437,53 @@ Pre-v0.1 — under active development, repo private until M1 completes
   ADRs ([docs/adr/](docs/adr/)).
 
 ### Changed
+- **Peak RSS @ 100k was a benchmark-harness bug, not an engine problem**
+  (story S28, `docs/adr/0020`): ADR 0015 had measured 307.1 MiB (query) /
+  305.4 MiB (ingest) against the 300 MiB ceiling and guessed the cause was
+  "general index sizing at 100k" — never actually profiled. A new
+  phase-by-phase RSS-attribution binary (`profile_rss`, same method as the
+  S24 full-text profiling) measured it instead: `Store::open` moves RSS by
+  ~0 (the paginated HNSW and the pager hold nothing significant resident,
+  confirming ADR 0008), and the dominant structure is the benchmark
+  harness's own brute-force baseline `VectorSet` (~153 MiB resident @ 100k),
+  kept alive by reference through the RSS-measured phases well past its one
+  real use (the recall-accuracy phase). Fix: `harness::run_suite` now takes
+  the `VectorSet` by value and drops it right after the recall phase; the
+  competitor comparison (which runs later) reloads the `.vec` sidecar. No
+  engine code changed. Peak RSS @ 100k measured after the fix: 97.8 MiB
+  (query) / 94.9 MiB (ingest) in the isolated diagnostic. The official
+  `benches/run_all.sh --full` run (1000 queries, both datasets) confirms it:
+  peak RAM @ 100k **120.6 MiB (query) / 120.1 MiB (ingest) — within the 300
+  MiB ceiling**. `recall p99 @ 100k` still misses its target in that same run
+  (956.80 ms vs. < 50 ms) — the pre-existing full-text bottleneck (ADR
+  0017/0018), out of scope for this story and not a regression from this fix.
+  ADR 0015's now-incorrect "general index sizing" note is corrected in place
+  with a pointer to ADR 0020, per the immutable-ADR convention.
+- **Benchmark recall@10 grading is now tie-aware** (story S27,
+  `docs/adr/0019`): a returned hit counts when its exact cosine score ties
+  (`SCORE_TIE_EPS = 1e-5`) or beats the k-th exact score, instead of only
+  when its *id* survived the exact baseline's arbitrary tie-break. The
+  agent-memory corpus holds exact duplicate texts by design (23.0% @ 100k),
+  which embed to bit-identical vectors, so the exact top-10 boundary is
+  routinely a plateau of tied scores wider than k — the diagnostic probe
+  (`probe_worst`, 1000 queries) showed every one of the 70 sub-0.70 queries
+  @ 100k had score-parity 1.00: the catastrophic tail reported by ADR 0015
+  was 100% a metric artifact, not an HNSW miss. Same rule grades every
+  competitor. New numbers @ 100k: mean 0.9360 → 1.0000, worst query
+  0.20 → 1.00 (@ 10k: 0.9953 → 1.0000, 0.90 → 1.00). Engine, HNSW
+  parameters and file format untouched; honest limitation recorded in the
+  ADR (with tie-aware grading the committed synthetic datasets no longer
+  discriminate index quality at the k boundary).
+- **Full-text search is ~10x faster at 100k memories** (story S25,
+  `docs/adr/0018`): the BM25 scan now scores a cheap per-candidate upper
+  bound first and only reloads/evaluates candidate records in descending
+  bound order, stopping as soon as the remaining bounds provably cannot
+  enter the top-k. Results are identical to the exhaustive scan — same
+  hits, bit-exact scores, same order — verified by equivalence tests and a
+  25/25 bit-exact check on the real 100k corpus. Measured (full-text half
+  of hybrid recall, no embed, 1000 warm queries @ 100k): p50 994 → 94 ms,
+  p99 4,577 → 551 ms. Still above the 50 ms p99 NFR — postings-level work
+  (FT3) remains on the roadmap.
 - Size NFR (honesty note, `docs/adr/0010`): the "< 40 MB incl. model" ceiling
   now governs the **compressed release artifact** users download (~20 MiB
   today), not the raw binary. The raw release binary is ~45 MiB because `ort`

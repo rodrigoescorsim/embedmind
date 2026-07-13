@@ -7,8 +7,9 @@
 #
 # Baseline strategy (see benches/src/regression.rs):
 #   1. Rolling same-runner baseline: the results of the last guard-passing run
-#      on main, kept in the actions cache. Same os/arch, so ALL checks
-#      (recall@10, file size, query/remember p99, peak RSS) are enforced.
+#      on main, kept in the actions cache. When os/arch/CPU count match, ALL
+#      checks (recall@10, file size, query/remember p99, peak RSS) are
+#      enforced.
 #   2. Fallback: the committed release baseline (newest
 #      benches/results/<version>.json). It may come from another platform
 #      (e.g. the founder's Windows box), in which case the machine-dependent
@@ -16,6 +17,12 @@
 #      recall@10 + file-size checks are enforced.
 # The rolling baseline only advances when the guard passes, so a regression on
 # main cannot ratchet itself into the baseline.
+#
+# ubuntu-latest is not a fixed shape (observed 2 and 4 vCPUs across "same
+# runner" rolling-baseline runs) — `same_env` (regression.rs) treats a
+# CPU-count mismatch the same as an os/arch mismatch: latency/RSS checks
+# degrade to warnings instead of failing on what is runner noise, not a code
+# regression (see docs/BENCHMARKS.md §5, 2026-07-12).
 #
 # Datasets are ALWAYS materialized fresh (benches/data is deliberately not
 # cached): the .mind store is built by the code under test, so a cached store
@@ -133,10 +140,38 @@ jobs:
         shell: bash
         # Fails on any §5 threshold crossed vs the baseline (relative check;
         # the markdown verdict table goes to the step summary either way).
+        #
+        # Shared runners occasionally stall on fsync (I/O contention on a
+        # noisy neighbor), spiking the remember/query p99 of a single sample
+        # far past any threshold that would still catch a real regression —
+        # observed 2026-07-12: 109ms vs. a 12-19ms steady-state across the
+        # surrounding runs on identical code (run 29209346867). One retry
+        # (fresh dataset + fresh samples) tells a transient stall (passes on
+        # retry) from a real regression (fails again) without loosening the
+        # §5 thresholds themselves.
         run: |
-          cargo run -p embedmind-bench --release --bin compare_baseline -- \
-            /tmp/bench-baseline.json benches/results/latest.json \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+          attempt=1
+          while true; do
+            if cargo run -p embedmind-bench --release --bin compare_baseline -- \
+              /tmp/bench-baseline.json benches/results/latest.json \
+              > /tmp/regression-report.md; then
+              cat /tmp/regression-report.md | tee -a "$GITHUB_STEP_SUMMARY"
+              break
+            fi
+            if [ "$attempt" -ge 2 ]; then
+              echo "### Regression guard: failed twice — treating as a real regression" | tee -a "$GITHUB_STEP_SUMMARY"
+              cat /tmp/regression-report.md | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "::warning::Regression guard failed on attempt $attempt — retrying once (possible shared-runner fsync stall, see workflow comment)"
+            cat /tmp/regression-report.md
+            attempt=$((attempt + 1))
+            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.full }}" = "true" ]; then
+              ./benches/run_all.sh --full
+            else
+              ./benches/run_all.sh
+            fi
+          done
 
       - name: Upload results artifact
         if: always()

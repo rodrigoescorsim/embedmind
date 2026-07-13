@@ -14,11 +14,29 @@
 | Chroma (local/embedded mode, pinned version) | the product-category competitor: a local store that also embeds (same all-MiniLM-L6-v2) — the alternative an agent developer actually weighs |
 | Brute-force exact scan (our own, in-memory) | recall ceiling + sanity floor for latency claims |
 
-Two comparison planes, always labeled (S17): **index-only** — pre-computed vectors in,
-ids out; isolates index quality, the only plane where vector-only stores can appear —
-and **text→result** — text in, results out; the product workload, where every system
-pays the same embedding toll (measured with the same ONNX pipeline and added to the
-systems that don't embed themselves).
+Two comparison planes, always labeled and rendered as separate tables (S17):
+**index-only** — pre-computed vectors in, ids out; isolates index quality, the only
+plane where vector-only stores can legitimately win, since they never pay an embedding
+cost here. EmbedMind's row on this plane is its `query engine` split (search + fusion +
+record load, embed time excluded) — the like-for-like number against a baseline that
+receives ready-made vectors.
+
+And **text→result** — text in, results out, the product workload an agent developer
+actually faces. Every system pays the same embedding toll: the query is embedded once
+with the shared ONNX pipeline (measured *outside* every competitor, via EmbedMind's own
+`query embed` split on that run) and added to the competitor's index-only query time, so
+its row becomes genuinely end-to-end — the same shape as EmbedMind's own `query
+p50/p99`, which already embeds internally. recall@10 on this plane is EmbedMind's
+end-to-end figure against each competitor's own index-only recall (recall doesn't change
+with the embedding toll — it is not re-derived, just placed side by side; the index
+quality question belongs to the plane above). Chroma is included in this plane under the
+same rule as every other competitor: it receives pre-computed vectors (never re-embeds
+on its own), so it pays the identical externally-measured embedding cost the sqlite-vec
+and zvec rows do.
+
+Both planes obey the same honesty rule (§4): a competitor whose adapter did not run
+reports "not measured" with the reason on *both* tables — the text→result plane never
+fabricates a sum from a missing number.
 
 Rules of engagement: pinned versions (recorded in results), default/recommended settings
 for each baseline (no de-tuning the competition), same hardware, same dataset, same
@@ -51,8 +69,8 @@ pinned hash) so anyone can re-run everything with `cargo bench` / `benches/run_a
 
 | Metric | How measured |
 |---|---|
-| `recall@10` | vs. brute-force exact top-10 (and vs. labels on the public set); mean **and** per-query distribution (min/p10/p50) — a good mean can hide a catastrophic tail (S16) |
-| query latency p50 / p99 | single-thread, 1k queries, warm cache; **and** cold-open first-query (file just opened — the "no server" scenario). Reported **decomposed**: `embed` (query embedding) vs. `engine` (search + fusion + record load) — our embed-inclusive total vs. a vector-only system's search time is exactly the asymmetry this decomposition prevents (S17) |
+| `recall@10` | vs. brute-force exact top-10 (and vs. labels on the public set); mean **and** per-query distribution (min/p10/p50) — a good mean can hide a catastrophic tail (S16). Grading is **tie-aware** (score parity, ADR 0019, S27): a returned hit counts when its exact cosine score ties (`SCORE_TIE_EPS = 1e-5`) or beats the k-th exact score, capped at k. The agent-memory corpus holds exact duplicate texts by design (8.4% @ 10k, 23.0% @ 100k), which embed to bit-identical vectors — the exact top-k boundary is routinely a plateau of tied scores wider than k, and *which* tied ids a correct index returns is arbitrary; grading that coin flip as a miss would measure the tie-break, not the index. The same rule grades every competitor |
+| query latency p50 / p99 | single-thread, 1k queries, warm cache; **and** cold-open first-query (file just opened — the "no server" scenario). Reported **decomposed**: `embed` (query embedding) vs. `engine` (search + fusion + record load) — our embed-inclusive total vs. a vector-only system's search time is exactly the asymmetry this decomposition prevents (S17). This split feeds both comparison tables: `engine` is EmbedMind's row on the index-only plane, `embed` is added to each competitor's own query time to build their row on the text→result plane |
 | ingest throughput | memories/sec, batch and one-at-a-time (agent pattern), fsync `full` |
 | file size on disk | after ingest, and after `vacuum` |
 | peak RSS | during ingest and during query load |
@@ -96,12 +114,28 @@ baseline: `recall@10` drops > 1 pt · p99 query latency regresses > 15% · file 
 are deliberately loose (shared-runner noise); the reference machine confirms before a
 release is cut.
 
+A guard failure re-runs the full harness once before failing the job: a shared runner
+can stall on fsync (I/O contention on a noisy neighbor) and spike a single p99 sample
+far past any threshold that would still catch a real regression — observed 2026-07-12,
+`remember p99` at 109ms vs. a 12-19ms steady state on identical code in the surrounding
+runs (run 29209346867). One retry with fresh samples tells a transient stall (passes on
+retry) from a real regression (fails again); it does not loosen the thresholds above.
+
+"Same runner" is not a fixed shape: GitHub-hosted `ubuntu-latest` runners vary between 2
+and 4 vCPUs, and more CPUs on a shared host means more scheduling contention, not less —
+a systematic latency shift, not a code regression. Observed 2026-07-12 (run 29212624981):
+both the initial attempt and the retry failed `remember p99` (109.68ms, then 79.26ms)
+against an 18.79ms baseline recorded on a 2-CPU runner, while the current runs carried 4
+CPUs. `same_env` (`benches/src/regression.rs`) now includes CPU count alongside os/arch,
+so a baseline recorded on a different CPU count degrades latency/RSS checks to warnings
+instead of failing the job — the same treatment already applied across OS/arch.
+
 Implementation: `.github/workflows/bench.yml` (path-filtered to engine/harness changes)
 runs the harness and then `compare_baseline` (`benches/src/regression.rs`) against a
 baseline. The baseline is *rolling*: the results of the last guard-passing run on
-`main`, kept in the CI cache so it comes from the same runner and every check is
-enforced; when no rolling baseline exists yet, it falls back to the committed
-`benches/results/<version>.json` release baseline — which may come from another
-platform, in which case the machine-dependent latency/RSS checks degrade to loud
-warnings and only the deterministic recall@10 + file-size checks fail the job.
-Locally, `BASELINE=<results.json> ./benches/run_all.sh` runs the same comparison.
+`main`, kept in the CI cache so it usually comes from the same runner shape and every
+check is enforced; when no rolling baseline exists yet, or its CPU count differs, it
+falls back to comparable behavior via `same_env` — the machine-dependent latency/RSS
+checks degrade to loud warnings and only the deterministic recall@10 + file-size checks
+fail the job. Locally, `BASELINE=<results.json> ./benches/run_all.sh` runs the same
+comparison.

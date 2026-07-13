@@ -27,5 +27,9 @@ vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvi
 | [0015](0015-ef-search-default-escalado-pelo-indice.md) | `ef_search` default escalado pelo tamanho do índice (patamares medidos) | Aceito |
 | [0016](0016-limiar-de-near-duplicate-medido.md) | Limiar de near-duplicate do `remember` medido no corpus (0.80) | Aceito |
 | [0017](0017-otimizacao-do-full-text-escopo-e-metodo.md) | Otimização do full-text: profiling antes de estrutura, bump de formato liberado | Aceito |
+| [0018](0018-early-termination-no-scan-bm25.md) | Early termination no scan BM25: avaliação limitada por bound, resultado idêntico | Aceito |
+| [0019](0019-recall-tie-aware-no-harness.md) | Recall@k do harness tie-aware: paridade de score contra o top-k exato | Aceito |
+| [0020](0020-rss-de-pico-era-o-harness-nao-o-engine.md) | RSS de pico @ 100k era o harness (VectorSet de baseline), não o engine | Aceito |
+| [0021](0021-postings-fts-delta-varint.md) | Postings FTS comprimidas com delta+varint (`format_version` 4) | Aceito |
 
 Template: `Status · Contexto · Decisão · Alternativas rejeitadas · Consequências`.

@@ -1,0 +1,16 @@
+   Compiling embedmind-bench v0.1.0-dev (C:\workspace\Rodrigo\embedmind\benches)
+   Compiling embedmind-core v0.1.0-dev (C:\workspace\Rodrigo\embedmind\crates\embedmind-core)
+    Finished `release` profile [optimized] target(s) in 51.88s
+     Running `target\release\bench_fts.exe agent-mem-100k`
+[agent-mem-100k] warming up (50 queries)...
+[agent-mem-100k] timing 1000 queries (bounded scan)...
+  250/1000
+  500/1000
+  750/1000
+  1000/1000
+[agent-mem-100k] equivalence check vs. exhaustive scan (25 queries)...
+# FT2 full-text after-measurement — agent-mem-100k, 1000 queries (ADR 0018)
+
+`Store::search_text` (bounded scan) wall time — p50 94.495 ms, p99 550.776 ms
+
+equivalence vs. exhaustive scan: OK — 25/25 queries identical (ids, bit-exact scores, order)

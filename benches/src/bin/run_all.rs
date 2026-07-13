@@ -140,7 +140,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             remember_samples: REMEMBER_SAMPLES,
             recency,
         };
-        let result = harness::run_suite(spec, &data_dir, store, &set, &embedder, suite_opts)?;
+        // `run_suite` consumes the set: the brute-force vectors are dropped
+        // right after the recall phase so the RSS-measured phases see only
+        // product-shaped memory (S28) — at 100k the resident set alone was
+        // ~152 MiB, half the RAM NFR, and it is harness data, not engine data.
+        let result = harness::run_suite(spec, &data_dir, store, set, &embedder, suite_opts)?;
         println!(
             "  done in {:.1}s: recall@10 {:.4} (min {:.2} / p10 {:.2} / p50 {:.2}), query p99 {:.2} ms (embed {:.2} / engine {:.2}), remember p99 {:.2} ms",
             started.elapsed().as_secs_f64(),
@@ -161,6 +165,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         let target_count =
             compare_count.unwrap_or_else(|| specs.iter().map(|s| s.count).max().unwrap_or(0));
         if competitor_outcomes.is_empty() || spec.count == target_count {
+            // Reload the baseline vectors from the `.vec` sidecar: `run_suite`
+            // consumed them (S28, see above), and the competitors run *after*
+            // the RSS-measured phases, so holding a fresh copy here is fine.
+            let set = dataset::load_vec_file(
+                spec,
+                &spec.vec_path(&data_dir),
+                embedder.dims(),
+                embedder.id(),
+            )?;
             competitor_outcomes = competitors::run_all(&set, &result.query_vectors, harness::K);
             compared_on = Some(spec.name);
         }
