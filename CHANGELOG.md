@@ -15,6 +15,25 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Changed
+- **Full-text lift measured on lexical queries — the benefit side of the FT
+  phase, not just the cost** (product review 2026-07-13,
+  [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) §"O
+  benefício do full-text"): new `benches/src/lexical.rs` harness generates 100
+  deterministic ground-truth-by-construction lexical queries (exact code
+  identifiers, ULIDs, hex hashes, CLI flags, literal error fragments) and
+  measures hybrid (`Store::recall`) vs. vector-only (`Store::recall_vector`)
+  recall@10 + latency over the same queries — the delta is the measured
+  full-text benefit that `benches/src/recall.rs` (vector-only against
+  semantic-paraphrase queries, by design) never captured. @ 10k
+  (`agent-mem-10k`, 100 cases): recall@10 hybrid **1.0000** vs. vector-only
+  **0.9000** (+0.10 lift), p99 89.15 ms vs. 52.76 ms. Honest reading: the
+  absolute lift is small @ 10k against the already-documented latency cost,
+  but the opposite hypothesis (a larger corpus has more near-duplicate
+  literals colliding in embedding space, worsening vector-only recall) is not
+  ruled out without the @ 100k number — **pending, manual founder
+  prerequisite** (the 100k run did not fit this session's budget). This task
+  does not decide between pursuing BlockMax-WAND or a vector-only default; it
+  only produces the missing measurement.
 - **Full-text optimization phase (FT) closes its accounting — `recall p99 @
   100k` NFR still misses target** (closing task, [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md)):
   official `benches/run_all.sh --full` run, 2026-07-13, published in

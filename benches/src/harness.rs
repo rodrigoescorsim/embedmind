@@ -109,6 +109,14 @@ pub struct SuiteResult {
     /// The query vectors used (normalized), so competitors get the identical
     /// set. Not rendered; handed to [`crate::competitors::run_all`].
     pub query_vectors: Vec<Vec<f32>>,
+
+    /// Full-text "lift" on lexical queries (founder review 2026-07-13): hybrid
+    /// (`Store::recall`) vs. vector-only (`Store::recall_vector`) recall +
+    /// latency over the same ground-truth-by-construction lexical queries
+    /// (`crate::lexical`) — the delta is the measured benefit of the
+    /// full-text half, which `recall` above (semantic-paraphrase queries,
+    /// vector-only by design) never captures.
+    pub lexical_lift: crate::lexical::LexicalLift,
 }
 
 /// Tunables for [`run_suite`] that aren't derived from the dataset or store.
@@ -122,6 +130,10 @@ pub struct SuiteOptions {
     pub remember_samples: usize,
     /// Whether warm queries run with `Query::recency` on (S20, `docs/adr/0014`).
     pub recency: bool,
+    /// Number of lexical ground-truth cases for the full-text lift phase
+    /// (founder review 2026-07-13). A few dozen is enough for a stable
+    /// recall@k signal without meaningfully changing the dataset's size.
+    pub lexical_cases: usize,
 }
 
 /// Runs the full metric suite for `spec` against an already-materialized
@@ -182,8 +194,23 @@ pub fn run_suite(
         embedder: Some(Arc::clone(&timing) as Arc<dyn Embedder>),
         ..StoreOptions::default()
     };
-    let warm_store = Store::open_with(Arc::new(RealVfs), &spec.mind_path(data_dir), warm_opts)?;
+    let mut warm_store = Store::open_with(Arc::new(RealVfs), &spec.mind_path(data_dir), warm_opts)?;
     let warm = measure_warm_queries(&warm_store, &timing, &recall_texts, K, opts.recency)?;
+
+    // --- full-text lift: lexical queries (founder review 2026-07-13) ---
+    // Seed disjoint from both the corpus and its query seed (`recall::query_texts`
+    // XORs the corpus seed once already), so lexical cases never collide with
+    // generated content. Ingested into the *same* real file the recall/warm
+    // phases just measured (same engine, same page cache), then removed via
+    // `forget` before this handle closes — the dataset `.mind` on disk must be
+    // unchanged by running the suite, since it is reused run to run.
+    let lexical_seed = spec.seed ^ 0x4C45_5849_4341_4C31_u64;
+    let lexical_cases = crate::lexical::generate_cases(lexical_seed, opts.lexical_cases);
+    let lexical_ids = crate::lexical::ingest_cases(&mut warm_store, &lexical_cases)?;
+    let lexical_lift = crate::lexical::measure_lift(&warm_store, &lexical_cases, &lexical_ids, K)?;
+    for id in &lexical_ids {
+        warm_store.forget(*id)?;
+    }
 
     // --- cold-open: close the warm store, then open the file fresh and time
     // open + first query — releasing the handle also drops the pager cache,
@@ -223,6 +250,7 @@ pub fn run_suite(
         file_bytes: stats.file_bytes,
         peak_rss_ingest_mib: rss_ingest_mib,
         peak_rss_query_mib: warm.peak_rss_mib,
+        lexical_lift,
         query_vectors,
     })
 }

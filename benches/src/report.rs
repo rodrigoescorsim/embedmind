@@ -177,6 +177,9 @@ pub fn render_markdown(
     // --- metric table (one column per dataset) ---
     render_metric_table(&mut out, results);
 
+    // --- full-text lift: lexical queries (founder review 2026-07-13) ---
+    render_lexical_lift_table(&mut out, results);
+
     // --- competitor comparison: two labeled planes (BENCHMARKS.md §1, S17) ---
     render_index_only_table(&mut out, compare_result, competitors);
     render_text_to_result_table(&mut out, compare_result, competitors);
@@ -278,6 +281,68 @@ fn render_metric_table(out: &mut String, results: &[SuiteResult]) {
         out,
         "_`query vector-only` is `Store::recall_vector` (HNSW half only, no BM25/RRF fusion) on the same query set, timed right after the hybrid call for cache parity — comparable to `engine` above (both exclude embed time). The delta between the two isolates the FTS+fusion cost from everything the vector half pays too._\n"
     );
+}
+
+/// Full-text "lift" on lexical queries (founder review 2026-07-13): recall@10
+/// and p99 latency of hybrid (`Store::recall`) vs. vector-only
+/// (`Store::recall_vector`) over the *same* ground-truth-by-construction
+/// lexical queries (`crate::lexical`) — exact code identifiers, ULIDs, error
+/// strings, CLI flags. The `recall@10` row above only ever measures the
+/// vector half against semantic-paraphrase queries (by design, to isolate
+/// HNSW quality); this table is the other half of the question: what does
+/// full-text actually buy on queries an embedding tends to get wrong. The
+/// delta row makes that benefit explicit rather than left for a reader to
+/// subtract by eye.
+fn render_lexical_lift_table(out: &mut String, results: &[SuiteResult]) {
+    let _ = writeln!(
+        out,
+        "### Full-text lift: lexical queries (hybrid vs. vector-only)\n"
+    );
+    let _ = writeln!(
+        out,
+        "_Ground truth by construction: each query is the exact literal (a code identifier, ULID, hex hash, CLI flag, or error-message fragment) of one ingested memory; a hit is that memory appearing in the top-10. Same queries, same `k`, run through both recall strategies on the same materialized dataset (`crate::lexical`)._\n"
+    );
+
+    let mut header = String::from("| Metric |");
+    let mut sep = String::from("|---|");
+    for r in results {
+        let _ = write!(header, " {} |", r.dataset);
+        sep.push_str("---:|");
+    }
+    let _ = writeln!(out, "{header}");
+    let _ = writeln!(out, "{sep}");
+
+    row(out, "lexical cases", results, |r| {
+        r.lexical_lift.hybrid.queries.to_string()
+    });
+    row(
+        out,
+        "recall@10 — hybrid (BM25+vector+RRF)",
+        results,
+        |r| format!("{:.4}", r.lexical_lift.hybrid.recall_at_k),
+    );
+    row(out, "recall@10 — vector-only", results, |r| {
+        format!("{:.4}", r.lexical_lift.vector_only.recall_at_k)
+    });
+    row(out, "↳ full-text lift (Δ recall@10)", results, |r| {
+        format!(
+            "{:+.4}",
+            r.lexical_lift.hybrid.recall_at_k - r.lexical_lift.vector_only.recall_at_k
+        )
+    });
+    row(out, "query p50 / p99 — hybrid", results, |r| {
+        format!(
+            "{:.2} / {:.2} ms",
+            r.lexical_lift.hybrid.latency.p50_ms, r.lexical_lift.hybrid.latency.p99_ms
+        )
+    });
+    row(out, "query p50 / p99 — vector-only", results, |r| {
+        format!(
+            "{:.2} / {:.2} ms",
+            r.lexical_lift.vector_only.latency.p50_ms, r.lexical_lift.vector_only.latency.p99_ms
+        )
+    });
+    let _ = writeln!(out);
 }
 
 /// Plane 1 (BENCHMARKS.md §1, S17): **index-only** — pre-computed vectors in,
@@ -647,9 +712,42 @@ pub fn render_json(
         );
         let _ = writeln!(
             out,
-            "      \"peak_rss_query_mib\": {:.2}",
+            "      \"peak_rss_query_mib\": {:.2},",
             r.peak_rss_query_mib
         );
+        let _ = writeln!(out, "      \"lexical_lift\": {{");
+        let _ = writeln!(out, "        \"cases\": {},", r.lexical_lift.hybrid.queries);
+        let _ = writeln!(
+            out,
+            "        \"hybrid_recall_at_10\": {:.6},",
+            r.lexical_lift.hybrid.recall_at_k
+        );
+        let _ = writeln!(
+            out,
+            "        \"vector_only_recall_at_10\": {:.6},",
+            r.lexical_lift.vector_only.recall_at_k
+        );
+        let _ = writeln!(
+            out,
+            "        \"hybrid_query_p50_ms\": {:.4},",
+            r.lexical_lift.hybrid.latency.p50_ms
+        );
+        let _ = writeln!(
+            out,
+            "        \"hybrid_query_p99_ms\": {:.4},",
+            r.lexical_lift.hybrid.latency.p99_ms
+        );
+        let _ = writeln!(
+            out,
+            "        \"vector_only_query_p50_ms\": {:.4},",
+            r.lexical_lift.vector_only.latency.p50_ms
+        );
+        let _ = writeln!(
+            out,
+            "        \"vector_only_query_p99_ms\": {:.4}",
+            r.lexical_lift.vector_only.latency.p99_ms
+        );
+        let _ = writeln!(out, "      }}");
         let _ = writeln!(out, "    }}{comma}");
     }
     let _ = writeln!(out, "  ],");
@@ -824,6 +922,26 @@ mod tests {
             peak_rss_ingest_mib: rss,
             peak_rss_query_mib: rss - 10.0,
             query_vectors: vec![],
+            lexical_lift: crate::lexical::LexicalLift {
+                hybrid: crate::lexical::LexicalReport {
+                    k: 10,
+                    queries: 100,
+                    recall_at_k: 0.98,
+                    latency: crate::lexical::LatencySummary {
+                        p50_ms: 1.0,
+                        p99_ms: 2.0,
+                    },
+                },
+                vector_only: crate::lexical::LexicalReport {
+                    k: 10,
+                    queries: 100,
+                    recall_at_k: 0.4,
+                    latency: crate::lexical::LatencySummary {
+                        p50_ms: 0.5,
+                        p99_ms: 1.0,
+                    },
+                },
+            },
         }
     }
 

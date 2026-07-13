@@ -6,6 +6,11 @@ limitação é do founder, pendente). Abre a fase FT (`03-tasks.md`), motivada p
 reprovado da story S16/BQ1 ([ADR 0015](0015-ef-search-default-escalado-pelo-indice.md)):
 `recall` p99 @ 100k medido em 1.224,62 ms contra o teto de 50 ms — 24x acima.
 
+**Atualização 2026-07-13 (revisão do produto):** ver "O benefício do full-text: queries
+lexicais" abaixo — mede pela primeira vez o *ganho* do full-text (não só o custo), sobre
+queries lexicais com ground truth por construção. Medido @ 10k; @ 100k pendente (prereq manual
+do founder, comando registrado na seção).
+
 ## Contexto
 
 A task BQ1 (`ef_search` escalonado) isolou a causa: a busca vetorial pura
@@ -202,6 +207,59 @@ full-text) ou aceitar 224,88 ms como limitação de escala documentada para o la
 revisitando pós-tração. As duas opções descritas no ADR original (§"Critério de saída da fase") —
 "passa medido" ou "founder decide conscientemente aceitar uma limitação documentada" — continuam
 ambas em aberto; esta sessão só fecha a contabilidade de números, não escolhe entre elas.
+
+## O benefício do full-text: queries lexicais (revisão do founder, 2026-07-13)
+
+Toda a contabilidade acima mede o **custo** do full-text (~190 ms dos 224,88 ms de p99 @ 100k
+vêm do meio full-text) e usa como métrica de qualidade o `recall` sobre queries de paráfrase
+semântica (`benches/src/recall.rs`), medido só na metade vetorial (`Store::recall_vector`) —
+por desenho, para isolar a qualidade do HNSW sem a fusão do BM25 "contaminar" a métrica. Isso
+deixa a pergunta oposta sem resposta: o que o full-text **compra**, e em qual workload? Sem
+esse número, a decisão entre continuar investindo (BlockMax-WAND) ou tornar o full-text opt-in
+(vector-only default) estava sendo avaliada só pelo lado do custo.
+
+Esta seção fecha essa lacuna com um harness novo (`benches/src/lexical.rs`): um banco de
+queries **lexicais** — identificadores de código exatos (`lookup_via_skip_42`), flags de CLI
+(`--recency-v7`), fragmentos de mensagem de erro literal, hashes hex e ULIDs — gerado
+deterministicamente por seed e ancorado no corpus real (cada literal é injetado em exatamente
+uma memória sintética dedicada, que é o ground truth por construção da query). As mesmas 100
+queries rodam por `Store::recall` (híbrido: BM25+vetor+RRF) e por `Store::recall_vector`
+(vetor puro) sobre o mesmo dataset materializado; o delta de recall@10 entre os dois é o
+benefício medido do full-text nesse workload.
+
+### Resultado medido @ 10k (`agent-mem-10k`, 100 casos lexicais, `cargo run -p embedmind-bench --release --bin run_all -- agent-mem-10k`, 2026-07-13)
+
+| métrica | híbrido (BM25+vetor+RRF) | vetor-puro (`recall_vector`) | delta |
+|---|---:|---:|---:|
+| recall@10 | **1,0000** | 0,9000 | **+0,10** |
+| query p50 | 44,86 ms | 43,82 ms | +1,04 ms |
+| query p99 | 89,15 ms | 52,76 ms | +36,39 ms |
+
+Com o embedding all-MiniLM-L6-v2 (384 dims) usado hoje, o vetor puro já recupera **90%** dos
+literais exatos no top-10 — os embeddings de frases curtas carregam informação lexical
+suficiente para aproximar bem até identificadores/ULIDs incomuns, contrariando a intuição de
+que um embedding semântico "erra tudo" fora de vocabulário. O full-text fecha os 10% restantes
+(10 de 100 casos) ao custo de +36,39 ms de p99 nesta amostra @ 10k — a mesma ordem de grandeza
+do custo total do meio full-text já documentado acima (que cresce ~linear com o corpus, não
+com o número de queries lexicais).
+
+**Leitura honesta, sem escolher:** a 10k o lift absoluto é pequeno (+0,10 em recall@10) pelo
+custo de latência já conhecido. Isso pesa a favor de vector-only como default (FTS opt-in) **se**
+o mesmo padrão se confirmar @ 100k — mas a hipótese testável na direção oposta também é real: um
+corpus maior tem mais literais colidindo por proximidade vetorial (mais "quase-sinônimos" no
+espaço de embedding), o que tende a *piorar* o recall vetor-puro relativo, não melhorá-lo,
+enquanto o custo do full-text (o gargalo linear já medido) piora junto. Sem o número @ 100k,
+não é possível saber qual efeito domina — a medição @ 10k sozinha **não** decide a favor de
+nenhuma das duas opções (continuar BlockMax-WAND vs. vector-only default); ela é a metade da
+evidência que faltava, não o veredito.
+
+### Pendente: mesma medição @ 100k
+
+A rodada @ 100k (`cargo run -p embedmind-bench --release --bin run_all -- agent-mem-100k`, ou
+`benches/run_all.sh --full`) não coube no orçamento desta sessão (ingest + 1000 queries +ᵃ 100
+casos lexicais sobre um `.mind` de ~886 MiB é uma execução de dezenas de minutos). Fica como
+pré-requisito manual do founder: rodar o comando acima e substituir esta subseção pelo par de
+linhas @ 100k assim que existir, antes de fechar a decisão continuar-BlockMax-WAND-vs-vector-only.
 
 ## Alternativas rejeitadas
 

@@ -592,6 +592,43 @@ páginas do pager, buffers de decodificação — antes de escolher a correção
   `benches/results/profile-rss-100k.txt`, `benches/results/run-all-full-s28.log`
   e `benches/results/0.1.0-dev.json`.
 
+### FT6. Medir o benefício do full-text: queries lexicais (revisão do produto, 2026-07-13) — independente de FT1-FT5
+
+Toda a fase FT acima mediu o **custo** do full-text; nenhuma task mediu o
+**benefício**. `benches/src/recall.rs` mede recall só na metade vetorial
+(`recall_vector`) contra queries de paráfrase semântica — o caso onde o
+embedding já basta. Sem o número do outro lado (quanto o full-text ajuda em
+queries lexicais: identificadores de código, ULIDs/hashes, mensagens de erro
+literais, flags de CLI), a decisão entre investir em BlockMax-WAND ou tornar
+o full-text opt-in (vector-only default) estava sendo tomada só pelo custo.
+
+- **DoD:** suite de queries lexicais determinística (seed fixa, ancorada no
+  corpus real, ground truth por construção) no harness; relatório com
+  recall@k + latência de `Store::recall` (híbrido) vs. `Store::recall_vector`
+  (vetor-puro) sobre as mesmas queries, nos dois eixos (lexical e semântico);
+  leitura honesta registrada no ADR 0017 (a task não escolhe entre
+  BlockMax-WAND e vector-only default — só entrega o dado).
+- **Verificação:** `cargo test --workspace` (gerador de queries + ground-truth
+  lexical com teste unitário) + fmt + clippy; bench @ 10k medido nesta sessão,
+  @ 100k como prereq manual do founder se não coubesse.
+- **Resultado (2026-07-13):** `benches/src/lexical.rs` novo — gera 100 casos
+  lexicais determinísticos (5 categorias: identificador de código, flag CLI,
+  fragmento de erro, hash hex, ULID), cada um ancorado numa memória sintética
+  dedicada (o ground truth). `harness::run_suite` ingere os casos no store
+  real já materializado, mede ambas as estratégias, depois remove os casos via
+  `forget` antes de fechar — o `.mind` do dataset fica inalterado entre
+  execuções. Nova seção "full-text lift" em `latest.md`/JSON. Medido @ 10k
+  (`agent-mem-10k`, 100 casos): recall@10 híbrido **1,0000** vs. vetor-puro
+  **0,9000** (delta +0,10); p99 híbrido 89,15 ms vs. vetor-puro 52,76 ms.
+  Leitura honesta no ADR 0017 §"O benefício do full-text": o lift absoluto é
+  pequeno @ 10k frente ao custo de latência já documentado, mas a hipótese
+  oposta (corpus maior → mais colisão vetorial → recall vetor-puro pior) não
+  está descartada sem o número @ 100k — **pendente, prereq manual do founder**
+  (`cargo run -p embedmind-bench --release --bin run_all -- agent-mem-100k`,
+  ~886 MiB de dataset, dezenas de minutos, não coube no orçamento desta
+  sessão). `cargo test --workspace` 100% verde (191 testes), fmt e clippy
+  limpos.
+
 ---
 
 ## Fase C — M3: profundidade — semanas 9–12

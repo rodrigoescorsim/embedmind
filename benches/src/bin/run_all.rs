@@ -43,6 +43,11 @@ const WARM_QUERIES: usize = 1000;
 /// stable p99 without re-embedding the whole corpus a second time.
 const REMEMBER_SAMPLES: usize = 500;
 
+/// Lexical ground-truth cases for the full-text lift phase (founder review
+/// 2026-07-13, `crate::lexical`) — enough for a stable recall@k signal without
+/// meaningfully changing the dataset's size or ingest time.
+const LEXICAL_CASES: usize = 100;
+
 /// The run date, stamped into the results header/filename (BENCHMARKS.md §3:
 /// "every results table states … date"). Overridable via `BENCH_DATE` so a CI
 /// job can pin it; falls back to a build-time constant otherwise.
@@ -139,6 +144,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             warm_queries: WARM_QUERIES,
             remember_samples: REMEMBER_SAMPLES,
             recency,
+            lexical_cases: LEXICAL_CASES,
         };
         // `run_suite` consumes the set: the brute-force vectors are dropped
         // right after the recall phase so the RSS-measured phases see only
@@ -156,6 +162,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             result.query_embed_p99_ms,
             result.query_engine_p99_ms,
             result.remember_p99_ms,
+        );
+        println!(
+            "  lexical lift: hybrid recall@10 {:.4} (p99 {:.2} ms) vs. vector-only recall@10 {:.4} (p99 {:.2} ms), {} cases",
+            result.lexical_lift.hybrid.recall_at_k,
+            result.lexical_lift.hybrid.latency.p99_ms,
+            result.lexical_lift.vector_only.recall_at_k,
+            result.lexical_lift.vector_only.latency.p99_ms,
+            result.lexical_lift.hybrid.queries,
         );
 
         // Competitors run on exactly one dataset (its query vectors): the one
