@@ -1616,6 +1616,71 @@ pub struct SearchPhaseTimings {
     /// the raw work size `postings_lookup_ns`/`keep_ns`/`doc_len_ns` scale
     /// with, so two runs can be compared per-pair, not just in aggregate.
     pub postings_visited: u64,
+    /// Breakdown of what `keep_ns` was spent on, by outcome — measurement-only
+    /// surface for story FTOPT-0 (`docs/adr/0017` §"Resultado do profiling
+    /// (FTOPT-0/S29)"). FT1 measured that `keep` costs 88.8% of the middle,
+    /// but not how much of that is spent on candidates ultimately rejected
+    /// (wasted I/O a lighter-metadata optimization could skip) vs. accepted
+    /// (I/O the caller needs anyway, since the content must load to return the
+    /// hit) — this field is what answers that question. One distinct
+    /// candidate id counted once (same memoization as `keep_ns` itself).
+    pub keep_outcomes: KeepOutcomeCounts,
+}
+
+/// Why a distinct candidate id's `keep` re-check ended the way it did —
+/// counted once per id (matching `keep_ns`'s memoization), not once per
+/// posting occurrence. `search_profiled`'s own `keep: FnMut(Ulid) -> bool`
+/// signature can't carry this — the caller (`Store::search_text_profiled`,
+/// `api.rs`) is the only place that knows *why* a candidate failed
+/// (tombstone/scope vs. metadata filter), so it reports the outcome back via
+/// [`SearchProbe::record_keep_outcome`].
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepOutcome {
+    /// Passed liveness, scope, and every metadata filter — the content will
+    /// be loaded anyway to build the returned `Hit`, so this I/O was never
+    /// avoidable by a lighter-metadata index.
+    Accepted,
+    /// Record is missing, tombstoned, or superseded.
+    Tombstoned,
+    /// Record exists and is live but outside the query's project/agent scope.
+    OutOfScope,
+    /// Record is live and in scope but failed a metadata filter
+    /// (`Query::record_passes_filters`).
+    FilteredOut,
+}
+
+/// Aggregate counts of [`KeepOutcome`] across every distinct candidate id
+/// `keep` was asked about in one [`search_profiled`] call.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KeepOutcomeCounts {
+    pub accepted: u64,
+    pub tombstoned: u64,
+    pub out_of_scope: u64,
+    pub filtered_out: u64,
+}
+
+impl KeepOutcomeCounts {
+    fn record(&mut self, outcome: KeepOutcome) {
+        match outcome {
+            KeepOutcome::Accepted => self.accepted += 1,
+            KeepOutcome::Tombstoned => self.tombstoned += 1,
+            KeepOutcome::OutOfScope => self.out_of_scope += 1,
+            KeepOutcome::FilteredOut => self.filtered_out += 1,
+        }
+    }
+
+    /// Total distinct candidates `keep` was asked about.
+    pub fn total(&self) -> u64 {
+        self.accepted + self.tombstoned + self.out_of_scope + self.filtered_out
+    }
+
+    /// Total rejected (any reason) — the I/O a lighter-metadata `keep` could
+    /// hope to avoid.
+    pub fn rejected(&self) -> u64 {
+        self.tombstoned + self.out_of_scope + self.filtered_out
+    }
 }
 
 /// The **exhaustive** BM25 scan (the pre-FT2 `search` algorithm: every
@@ -1639,7 +1704,7 @@ pub fn search_profiled(
     fts_root_page: u64,
     query: &str,
     k: usize,
-    mut keep: impl FnMut(Ulid) -> bool,
+    mut keep: impl FnMut(Ulid) -> KeepOutcome,
     mut doc_len: impl FnMut(Ulid) -> Result<Option<u32>>,
 ) -> Result<(Vec<Hit>, SearchPhaseTimings)> {
     let mut timings = SearchPhaseTimings::default();
@@ -1695,8 +1760,10 @@ pub fn search_profiled(
                 Some(&v) => v,
                 None => {
                     let keep_started = std::time::Instant::now();
-                    let v = keep(id);
+                    let outcome = keep(id);
                     timings.keep_ns += keep_started.elapsed().as_nanos() as u64;
+                    timings.keep_outcomes.record(outcome);
+                    let v = outcome == KeepOutcome::Accepted;
                     kept.insert(id, v);
                     v
                 }
@@ -2260,11 +2327,81 @@ mod tests {
         let root = pager.header().fts_root_page;
 
         let plain = search(&pager, root, "rust memory", 10, |_| true, len_of(&contents)).unwrap();
-        let (profiled, timings) =
-            search_profiled(&pager, root, "rust memory", 10, |_| true, len_of(&contents)).unwrap();
+        let (profiled, timings) = search_profiled(
+            &pager,
+            root,
+            "rust memory",
+            10,
+            |_| KeepOutcome::Accepted,
+            len_of(&contents),
+        )
+        .unwrap();
         assert_eq!(plain, profiled);
         assert_eq!(timings.terms_matched, 2); // "memory" and "rust"
         assert!(timings.postings_visited >= 3); // doc 0 + doc 2 for "rust", doc 0 + doc 2 for "memory"
+    }
+
+    #[test]
+    fn keep_outcomes_are_counted_once_per_distinct_candidate_by_reason() {
+        // FTOPT-0 (`docs/adr/0017` §"Resultado do profiling (FTOPT-0)"): the
+        // breakdown must attribute each distinct candidate id to exactly one
+        // outcome, matching `keep_ns`'s own once-per-id memoization — a
+        // candidate appearing in both matched terms' postings ("rust" is in
+        // doc 0 and doc 2) must not be double-counted.
+        let mut pager = pager(4096);
+        let ids = index_all(
+            &mut pager,
+            &[
+                "the rust compiler enforces memory safety",  // accepted
+                "python is a dynamic language",              // filtered out
+                "rust rust rust is about memory and safety", // tombstoned
+                "rust engines are fast",                     // out of scope
+            ],
+        );
+        let mut contents = std::collections::HashMap::new();
+        for (i, text) in [
+            "the rust compiler enforces memory safety",
+            "python is a dynamic language",
+            "rust rust rust is about memory and safety",
+            "rust engines are fast",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            contents.insert(ids[i], text.to_owned());
+        }
+        let root = pager.header().fts_root_page;
+
+        let (accepted_id, filtered_id, tombstoned_id, out_of_scope_id) =
+            (ids[0], ids[1], ids[2], ids[3]);
+        let (_, timings) = search_profiled(
+            &pager,
+            root,
+            "rust memory python engines",
+            10,
+            |id| {
+                if id == accepted_id {
+                    KeepOutcome::Accepted
+                } else if id == filtered_id {
+                    KeepOutcome::FilteredOut
+                } else if id == tombstoned_id {
+                    KeepOutcome::Tombstoned
+                } else if id == out_of_scope_id {
+                    KeepOutcome::OutOfScope
+                } else {
+                    KeepOutcome::Tombstoned
+                }
+            },
+            len_of(&contents),
+        )
+        .unwrap();
+
+        assert_eq!(timings.keep_outcomes.accepted, 1);
+        assert_eq!(timings.keep_outcomes.filtered_out, 1);
+        assert_eq!(timings.keep_outcomes.tombstoned, 1);
+        assert_eq!(timings.keep_outcomes.out_of_scope, 1);
+        assert_eq!(timings.keep_outcomes.total(), 4);
+        assert_eq!(timings.keep_outcomes.rejected(), 3);
     }
 
     #[test]
@@ -2327,8 +2464,15 @@ mod tests {
         ] {
             for k in [1, 3, 10, 500] {
                 let plain = search(&pager, root, query, k, |_| true, len_of(&contents)).unwrap();
-                let (full, _) =
-                    search_profiled(&pager, root, query, k, |_| true, len_of(&contents)).unwrap();
+                let (full, _) = search_profiled(
+                    &pager,
+                    root,
+                    query,
+                    k,
+                    |_| KeepOutcome::Accepted,
+                    len_of(&contents),
+                )
+                .unwrap();
                 assert_eq!(plain, full, "query={query:?} k={k}");
                 let lin =
                     search_linear(&pager, root, query, k, |_| true, len_of(&contents)).unwrap();
@@ -2348,7 +2492,13 @@ mod tests {
                     root,
                     query,
                     k,
-                    |id| !dropped.contains(&id),
+                    |id| {
+                        if dropped.contains(&id) {
+                            KeepOutcome::Tombstoned
+                        } else {
+                            KeepOutcome::Accepted
+                        }
+                    },
                     len_of(&contents),
                 )
                 .unwrap();
@@ -2365,8 +2515,15 @@ mod tests {
                 assert_eq!(plain, lin, "query={query:?} k={k} (keep filter, linear)");
 
                 let plain = search(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
-                let (full, _) =
-                    search_profiled(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
+                let (full, _) = search_profiled(
+                    &pager,
+                    root,
+                    query,
+                    k,
+                    |_| KeepOutcome::Accepted,
+                    len_of(&partial),
+                )
+                .unwrap();
                 assert_eq!(plain, full, "query={query:?} k={k} (vanished records)");
                 let lin =
                     search_linear(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
@@ -2396,9 +2553,15 @@ mod tests {
         let root = pager.header().fts_root_page;
         for k in [1, 2, 5, 100, corpus] {
             let bmw = search(&pager, root, "twin entry", k, |_| true, len_of(&contents)).unwrap();
-            let (oracle, _) =
-                search_profiled(&pager, root, "twin entry", k, |_| true, len_of(&contents))
-                    .unwrap();
+            let (oracle, _) = search_profiled(
+                &pager,
+                root,
+                "twin entry",
+                k,
+                |_| KeepOutcome::Accepted,
+                len_of(&contents),
+            )
+            .unwrap();
             assert_eq!(bmw, oracle, "k={k}");
             let lin =
                 search_linear(&pager, root, "twin entry", k, |_| true, len_of(&contents)).unwrap();
@@ -2443,8 +2606,15 @@ mod tests {
 
         let (hits, counters) =
             search_bmw_counted(&pager, root, "common", 1, |_| true, len_of(&contents)).unwrap();
-        let (oracle, _) =
-            search_profiled(&pager, root, "common", 1, |_| true, len_of(&contents)).unwrap();
+        let (oracle, _) = search_profiled(
+            &pager,
+            root,
+            "common",
+            1,
+            |_| KeepOutcome::Accepted,
+            len_of(&contents),
+        )
+        .unwrap();
         assert_eq!(hits, oracle);
         assert_eq!(hits[0].record_id, ids[3]);
 
@@ -2510,8 +2680,21 @@ mod tests {
             let keep = |id: Ulid| kept.contains(&id);
 
             let bmw = search(&pager, root, &q, k, keep, len_of(&contents)).unwrap();
-            let (oracle, _) =
-                search_profiled(&pager, root, &q, k, keep, len_of(&contents)).unwrap();
+            let (oracle, _) = search_profiled(
+                &pager,
+                root,
+                &q,
+                k,
+                |id| {
+                    if keep(id) {
+                        KeepOutcome::Accepted
+                    } else {
+                        KeepOutcome::Tombstoned
+                    }
+                },
+                len_of(&contents),
+            )
+            .unwrap();
             proptest::prop_assert_eq!(&bmw, &oracle);
             let lin = search_linear(&pager, root, &q, k, keep, len_of(&contents)).unwrap();
             proptest::prop_assert_eq!(&bmw, &lin);
