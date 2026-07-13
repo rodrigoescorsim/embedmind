@@ -15,6 +15,21 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **FTS postings compressed with delta+varint — `format_version` 4** (story
+  S26 part 1, [ADR 0021](docs/adr/0021-postings-fts-delta-varint.md)): a
+  term's postings entries are now stored as the varint-encoded delta of each
+  `record_id` from the previous one plus a varint `term_freq`, instead of
+  fixed 20-byte entries — fewer bytes per posting through the pager and the
+  decode loop, zero change in search semantics (same hits, same scores, same
+  order; the `search_profiled` oracle and both-layout round-trip tests pin
+  it). The layout is selected by the file's `format_version`, never mixed
+  within a file: files written by older builds (v ≤ 3) keep reading **and
+  writing** their fixed-width layout under this build — degrading only in
+  size/speed, never in correctness — and `vacuum`'s copy-based rebuild is
+  the upgrade path. The `fuzz_fts_page` body now decodes every input under
+  both layouts, with new v4 corpus seeds alongside the preserved v3 ones
+  ([FORMAT.md](docs/FORMAT.md) §2/§4/§11). NFR impact @ 100k is measured in
+  the FT-phase closing task, not claimed here.
 - **Usage report: `embedmind report`** (story S23) — the trust answer to "is
   the memory actually being used?". Aggregates the op-log written by `serve
   --op-log` over a window (`--since N`, default 7 days): sessions, recalls
