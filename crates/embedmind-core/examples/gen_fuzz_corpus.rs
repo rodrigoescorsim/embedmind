@@ -152,8 +152,17 @@ fn main() {
         // FTS dictionary (0x08) and postings (0x09) pages seed their own
         // target (docs/adr/0011). The dictionary meta/inner/leaf all share
         // 0x08; one real instance of each on-disk type is enough to start.
+        // Version-suffixed name (S26, ADR 0021): this build emits the
+        // delta+varint postings layout, and the committed unsuffixed
+        // `seed-type-08`/`seed-type-09` files stay as the fixed-width-layout
+        // seeds a format_version ≤ 3 store produced — both layouts keep a
+        // seed, so neither decode branch loses corpus coverage.
         if (0x08..=0x09).contains(&page_type) && seen.insert(page_type) {
-            write_seed("fuzz_fts_page", &format!("seed-type-{page_type:02x}"), page);
+            write_seed(
+                "fuzz_fts_page",
+                &format!("seed-type-{page_type:02x}-v4"),
+                page,
+            );
         }
     }
 

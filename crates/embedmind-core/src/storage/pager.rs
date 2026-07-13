@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::format::{
-    DEFAULT_PAGE_SIZE, HEADER_PEEK_LEN, Header, MAX_MODEL_ID_LEN, page_checksum_is_valid,
-    stamp_page_checksum,
+    DEFAULT_PAGE_SIZE, FORMAT_VERSION, HEADER_PEEK_LEN, Header, MAX_MODEL_ID_LEN,
+    page_checksum_is_valid, stamp_page_checksum,
 };
 use crate::storage::vfs::{OpenMode, Vfs, VfsFile};
 use crate::storage::wal::{self, Wal};
@@ -34,6 +34,13 @@ pub struct PagerOptions {
     pub page_size: u32,
     /// WAL size, in bytes, at which a commit triggers a checkpoint.
     pub checkpoint_threshold: u64,
+    /// `format_version` stamped into newly created files. Defaults to
+    /// [`FORMAT_VERSION`]; an older (still supported) version may be given so
+    /// cross-version compatibility tests can produce a genuine old-version
+    /// file — the write paths then use that version's on-disk layouts, the
+    /// same bytes the old build wrote. [`Pager::open`] ignores this and uses
+    /// the version recorded in the file's header.
+    pub format_version: u32,
 }
 
 impl Default for PagerOptions {
@@ -41,6 +48,7 @@ impl Default for PagerOptions {
         PagerOptions {
             page_size: DEFAULT_PAGE_SIZE,
             checkpoint_threshold: DEFAULT_CHECKPOINT_THRESHOLD,
+            format_version: FORMAT_VERSION,
         }
     }
 }
@@ -67,7 +75,13 @@ impl Pager {
     /// Creates a new store at `path` (fails if it exists) and takes the
     /// writer lock.
     pub fn create(vfs: Arc<dyn Vfs>, path: &Path, opts: PagerOptions) -> Result<Self> {
-        let header = Header::new(opts.page_size)?;
+        if opts.format_version == 0 || opts.format_version > FORMAT_VERSION {
+            return Err(Error::InvalidArgument(
+                "format_version must be between 1 and FORMAT_VERSION",
+            ));
+        }
+        let mut header = Header::new(opts.page_size)?;
+        header.format_version = opts.format_version;
         let main = vfs.open(path, OpenMode::CreateNew)?;
         if !main.try_lock_exclusive()? {
             return Err(Error::WriteLocked);
@@ -420,6 +434,13 @@ impl Txn<'_> {
     /// Page size of the underlying store.
     pub fn page_size(&self) -> u32 {
         self.pager.header.page_size
+    }
+
+    /// On-disk `format_version` of the underlying store — fixed at file
+    /// creation, so version-dependent encodings (FTS postings, §11) pick one
+    /// layout per file, never mixing layouts within it.
+    pub fn format_version(&self) -> u32 {
+        self.pager.header.format_version
     }
 
     /// Record B-tree root as seen by this transaction (its own pending move

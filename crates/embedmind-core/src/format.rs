@@ -28,7 +28,14 @@ pub const WAL_MAGIC: [u8; 8] = *b"MINDWAL1";
 ///   `GraphOverflow` pages + the `graph_root_page` header field). Same
 ///   additive pattern: an older file decodes with `graph_root_page` 0 = no
 ///   graph, and `related`/recall expansion degrade to empty.
-pub const FORMAT_VERSION: u32 = 3;
+/// - `4` (S26, `docs/adr/0021`): full-text postings bodies switch from
+///   fixed-width entries to delta+varint encoding (`docs/FORMAT.md` §11). The
+///   layout is selected by the file's `format_version`, never mixed within a
+///   file: a version-≤3 file keeps reading **and writing** the fixed-width
+///   layout under this build (degrades in size/speed, never in correctness),
+///   and `vacuum`'s rebuild-by-copy re-encodes it into a fresh version-4
+///   file. No header field or page type changes.
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Default page size in bytes. The authoritative value for an existing file is
 /// the one recorded in its header.

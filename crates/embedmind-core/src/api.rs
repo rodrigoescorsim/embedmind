@@ -56,6 +56,7 @@ impl StoreOptions {
         PagerOptions {
             page_size: self.page_size,
             checkpoint_threshold: self.checkpoint_threshold,
+            ..PagerOptions::default()
         }
     }
 }

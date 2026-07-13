@@ -37,6 +37,10 @@ pub trait PageSource {
     fn page(&self, page_no: u64) -> Result<Vec<u8>>;
     /// Page size of the underlying store.
     fn page_size(&self) -> u32;
+    /// On-disk `format_version` of the underlying store — version-dependent
+    /// encodings (FTS postings, `docs/FORMAT.md` §11) select their layout
+    /// from it, so a reader over an older file decodes that file's layout.
+    fn format_version(&self) -> u32;
 }
 
 impl PageSource for Pager {
@@ -46,6 +50,9 @@ impl PageSource for Pager {
     fn page_size(&self) -> u32 {
         self.header().page_size
     }
+    fn format_version(&self) -> u32 {
+        self.header().format_version
+    }
 }
 
 impl PageSource for Txn<'_> {
@@ -54,6 +61,9 @@ impl PageSource for Txn<'_> {
     }
     fn page_size(&self) -> u32 {
         Txn::page_size(self)
+    }
+    fn format_version(&self) -> u32 {
+        Txn::format_version(self)
     }
 }
 
