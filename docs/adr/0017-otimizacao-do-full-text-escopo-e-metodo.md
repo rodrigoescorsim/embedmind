@@ -371,16 +371,15 @@ recall lexical introduzida pela reescrita.
 | full-text lift lexical (hybrid vs. vector-only) | sem regressão | 1,0000 (igual à rodada FT) | ✅ aprovado |
 | RSS de pico | < 300 MiB | 113,5 MiB (query) / 112,6 MiB (ingest) | ✅ aprovado |
 
-**Decisão do founder registrada aqui:** o critério de reversão do ADR 0023 ("se o BMW não fechar o
-NFR, vector-only default volta à mesa") é avaliado com este número em mãos. O founder optou por
-**aceitar a limitação de latência como documentada** em vez de reverter para vector-only default —
-o full-text lift medido (FT6, +0,18 recall@10 @100k, dobrando com o corpus) continua sendo maior
-valor de produto do que a economia de latência que tornar o full-text opt-in compraria, e a
-próxima otimização identificada (ajustar o gerador de corpus de benchmark para medir com
-distribuições de postings mais realistas, e/ou revisitar o refinamento block-max para pular
-parcialmente dentro de um bloco) fica registrada como trabalho futuro, não como bloqueio do launch
-M1. O NFR de latência `< 50 ms @ 100k` fica formalmente **não alcançado nesta versão**, reportado
-sem meias-palavras no README/CHANGELOG.
+**O NFR de latência `< 50 ms @ 100k` NÃO foi alcançado (224,00 ms medido).** O critério de reversão
+do ADR 0023 ("se o BMW não fechar o NFR, vector-only default volta à mesa") está em aberto —
+decisão do founder, não tomada nesta sessão. As opções conhecidas com dado em mãos: aceitar a
+limitação de latência como documentada (o full-text lift medido, FT6, +0,18 recall@10 @100k,
+continua sendo valor de produto real), ou reverter full-text para opt-in, ou investir em uma
+próxima otimização (ajustar o gerador de corpus de benchmark para medir com distribuições de
+postings mais realistas, e/ou revisitar o refinamento block-max para pular parcialmente dentro de
+um bloco). Nenhuma dessas opções foi escolhida aqui; o número e a causa raiz estão reportados sem
+meias-palavras no README/CHANGELOG, e a escolha entre elas fica pendente.
 
 ## Alternativas rejeitadas
 

@@ -159,10 +159,10 @@ opt-in — decisão completa, com critério de reversão, em
 | BMW3 | Medição @ 10k e @ 100k pelo harness oficial (`benches/run_all.sh --full`), decidindo se `recall p99 @ 100k < 50 ms` passa | ✅ ENTREGUE — **reprovado**: 224,00 ms @ 100k (praticamente idêntico ao patamar pré-BMW). Causa raiz medida (`benches/src/bin/bmw_reach.rs`): BMW ativa em 82,8% das queries, mas só 0,05% dos blocos tocados são de fato pulados sem decodificar — o corpus sintético não tem a concentração de postings que o BMW foi desenhado para explorar |
 | BMW4 | Fechamento: atualizar ADR 0017/0025, README e ROADMAP com o resultado, qualquer que seja | ✅ ENTREGUE (nesta task) |
 
-**Critério de reversão avaliado:** o BMW não fechou o NFR. O founder optou por **aceitar a
-limitação de latência como documentada** em vez de reverter para vector-only default — o
-full-text lift medido (FT6, +0,18 recall@10 @100k) continua valendo mais que a economia de
-latência que tornar o full-text opt-in compraria. Veredito completo e causa raiz em
+**Critério de reversão avaliado, decisão pendente:** o BMW não fechou o NFR (224,00 ms vs. teto de
+50 ms). O critério de reversão do ADR 0023 (aceitar a limitação de latência documentada vs.
+reverter full-text para opt-in) está em aberto — decisão do founder, não tomada nesta task.
+Veredito completo e causa raiz em
 [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) §"Fechamento da fase BMW" e
 [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md) §"BMW-3".
 

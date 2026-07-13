@@ -180,5 +180,6 @@ inteiro. Termos de alta frequência com postings densas e ~uniformes no espaço 
 que este corpus sintético produz — dão ao refinamento block-max pouquíssimas chances de provar um
 bloco *inteiro* abaixo de `θ`. O algoritmo está correto (a suite de equivalência prova isso); o
 ganho estrutural que ele foi desenhado para explorar (blocos de termos raros e concentrados que
-podem ser inteiramente descartados) não aparece neste workload de medição. Detalhe completo,
-números e leitura do founder: ADR 0017 "Fechamento da fase BMW".
+podem ser inteiramente descartados) não aparece neste workload de medição. Detalhe completo e
+números: ADR 0017 "Fechamento da fase BMW" (inclui o veredito do NFR e o estado da decisão de
+reversão do ADR 0023, ainda em aberto).

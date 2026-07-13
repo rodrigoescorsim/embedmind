@@ -36,9 +36,9 @@ Pre-v0.1 — under active development, repo private until M1 completes
   itself is correct — the equivalence suite still passes — this is a
   benchmark-corpus-shape limitation, not a BMW bug. Full-text lexical lift
   (FT6, `lexical_lift` in the same run) re-checked at 1.0000 hybrid recall@10
-  on both datasets — no regression from the rewrite. Founder's call: accept
-  the latency limitation as documented rather than revert full-text to
-  opt-in — the lift is worth more than what opt-in would save.
+  on both datasets — no regression from the rewrite. The ADR 0023 rollback
+  criterion (accept the documented latency limitation vs. revert full-text to
+  opt-in) is evaluated but left open — a founder decision, not made here.
 - **`fts::search` Pass 1 rewritten as BlockMax-WAND on `format_version` ≥ 6
   files** (BMW-2, [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md)):
   instead of decoding every posting of every matched term to accumulate

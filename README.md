@@ -220,9 +220,9 @@ Notes and honesty caveats:
   is correct (equivalence-tested against the linear oracle); the workload this benchmark measures
   just doesn't have the term concentration BlockMax-WAND is built to exploit. Full accounting in
   [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) ("Fechamento da fase BMW")
-  and [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md). The founder's call: keep the
-  limitation documented rather than revert full-text to opt-in — the lift measured above is worth
-  more than the latency this would save (see [ROADMAP.md](ROADMAP.md) "Fase BMW").
+  and [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md). The ADR 0023 rollback criterion
+  (accept the documented limitation vs. revert full-text to opt-in) is still open — a founder
+  decision, not made in this round (see [ROADMAP.md](ROADMAP.md) "Fase BMW").
 - **recall@10 and peak RSS both pass at 100k**: recall@10 is 1.0000 (tie-aware grading,
   worst query included) and peak RSS is 113.5 MiB — well under the 300 MiB ceiling.
   `remember` p99 < 200 ms end-to-end also passes at 21.7 ms @ 100k.
