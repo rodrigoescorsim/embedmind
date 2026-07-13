@@ -72,7 +72,7 @@ Format-level guarantees:
 | offset | size | field | notes |
 |---|---|---|---|
 | 0 | 8 | magic | ASCII `MINDFMT1` |
-| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12); **4** once postings bodies are delta+varint encoded (ADR 0021, §11); **5** once large postings bodies carry a skip index (ADR 0022, §11) |
+| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12); **4** once postings bodies are delta+varint encoded (ADR 0021, §11); **5** once large postings bodies carry a skip index (ADR 0022, §11); **6** once each skip entry carries the block's `last_id` (per-block impact bound for BlockMax-WAND) (ADR 0024, §11) |
 | 12 | 4 | `page_size` (u32) | default 4096 |
 | 16 | 8 | `page_count` (u64) | total pages incl. header |
 | 24 | 8 | `root_btree_page` (u64) | record B-tree root |
@@ -261,6 +261,12 @@ writing* a version-≤3 file in that file's own fixed-width layout (degrades in
 size/speed, never in correctness or into an error), and the migrate path is
 the existing copy-based rebuild (`vacuum` re-encodes into a fresh version-4
 file). A version-3 build refuses a version-4 file per the G4 policy above.
+`format_version` 4 → 5 (skip index, ADR 0022) and 5 → 6 (per-block impact
+bound, ADR 0024) follow the same rule 3 pattern: each re-encodes the postings
+body (no new page type, no new header field), a newer build reads *and writes*
+an older file in that file's own layout, and `vacuum` is the upgrade path. A
+version-5 build refuses a version-6 file per G4 (read-write); it may still open
+it read-only, since no header field or page type changed.
 
 ## 11. Full-text index (inverted index + BM25)
 
@@ -313,21 +319,38 @@ so such a file degrades to vector-only recall).
   - **`format_version` ≥ 5 (delta+varint + skip index):** after `doc_freq`
     comes `block_count` (u32). `block_count = 0` means a small term (fewer than
     512 entries): the plain delta+varint entries follow, byte-identical to the
-    version-4 body past the count. `block_count > 0` means a large term: a
-    **skip index** of `block_count` entries — each `first_id` (u128, 16 LE
-    bytes) · `byte_offset` (u32, relative to the start of the blocks region) ·
-    `max_term_freq` (u32) — followed by the blocks. Each block holds up to 128
-    entries and **re-bases its delta chain** (its first entry's delta is that
-    entry's absolute id), so a block decodes on its own and a lookup by id
-    jumps to the one block whose range can contain it (ADR 0022). Readers
-    reject a `block_count` that disagrees with `doc_freq`, a skip index that
-    overruns the body, a `byte_offset` that misses a block seam, or a stored
-    `first_id`/`max_term_freq` that disagrees with the block's decoded entries;
-    the strict-ascending order is enforced across block seams too.
+    version-4 body past the count (this small-term case is identical across
+    versions 5 and 6). `block_count > 0` means a large term: a **skip index**
+    of `block_count` entries, followed by the blocks. Each block holds up to
+    128 entries and **re-bases its delta chain** (its first entry's delta is
+    that entry's absolute id), so a block decodes on its own and a lookup by id
+    jumps to the one block whose range can contain it (ADR 0022). The skip
+    entry's width depends on the version:
+    - **version 5 (24 bytes):** `first_id` (u128, 16 LE bytes) · `byte_offset`
+      (u32, relative to the start of the blocks region) · `max_term_freq`
+      (u32).
+    - **version 6 (40 bytes):** `first_id` (u128, 16 LE) · **`last_id`** (u128,
+      16 LE — the block's maximum `record_id`) · `byte_offset` (u32) ·
+      `max_term_freq` (u32). The `(last_id, max_term_freq)` pair is the
+      `(block_max_docid, block_max_impact)` a **BlockMax-WAND** scan skips a
+      whole block by (ADR 0024). `max_term_freq` is the *conservative* impact
+      bound: BM25's per-term partial score is monotonically increasing in `tf`
+      and decreasing in `|D|`, so evaluating it at `tf = max_term_freq` and the
+      shortest possible document (`|D| → 0`) never underestimates any entry in
+      the block — the bound the query engine already uses. `min(doc_len)` would
+      tighten it but is **not** stored: `|D|` is never persisted (it is
+      recomputed at query time, see "Scoring" below), so it is not derivable
+      from the postings body — ADR 0024 records this evaluation.
+
+    Readers reject a `block_count` that disagrees with `doc_freq`, a skip index
+    that overruns the body, a `byte_offset` that misses a block seam, or a
+    stored `first_id`/`last_id`/`max_term_freq` that disagrees with the block's
+    decoded entries; the strict-ascending order is enforced across block seams
+    too.
   A build reading **or writing** an older file uses that file's own layout
-  (fixed-width for v≤3, skip-less delta+varint for v4), so the file stays
-  uniform and readable by the build that created it; `vacuum`'s copy-based
-  rebuild is the migration path to the current layout.
+  (fixed-width for v≤3, skip-less delta+varint for v4, 24-byte skip entries for
+  v5), so the file stays uniform and readable by the build that created it;
+  `vacuum`'s copy-based rebuild is the migration path to the current layout.
 - **FTS_POSTINGS** pages chain an oversized postings body: common header with
   `entry_count` = payload bytes on this page (`next_page` = 0 ends the chain),
   payload at offset 16. The dictionary cell records the exact `total_len`;
@@ -348,8 +371,9 @@ memory is never re-`remember`ed (content is immutable after write), a
 
 All FTS parsers are fully bounds-checked and panic-free — they are a fuzz
 target (`fuzz_fts_page`, [TESTING.md](TESTING.md) §3, which decodes every
-input under **all three** postings layouts — fixed-width, delta+varint, and
-delta+varint+skip — and drives the block-skipping lookup over the same bytes),
+input under **all four** postings layouts — fixed-width, delta+varint, and
+delta+varint+skip with both the v5 (24-byte) and v6 (40-byte) skip entry — and
+drives the block-skipping lookup over the same bytes under both entry widths),
 and the record crash harness now exercises FTS pages because `remember` writes
 them in the same transaction as the record.
 

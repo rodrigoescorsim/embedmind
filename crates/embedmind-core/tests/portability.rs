@@ -89,16 +89,16 @@ fn header_is_fixed_little_endian_per_format_spec() {
         "magic must be ASCII MINDFMT1 at offset 0 (FORMAT §4)"
     );
 
-    // format_version = 5 (FTS postings skip index, ADR 0022), written
-    // little-endian: bytes must be 05 00 00 00, NOT 00 00 00 05 (big-endian).
-    // This is the concrete G3 assertion — it would fail on a big-endian host
-    // if the engine used native byte order.
+    // format_version = 6 (FTS skip index per-block impact bound, ADR 0024),
+    // written little-endian: bytes must be 06 00 00 00, NOT 00 00 00 06
+    // (big-endian). This is the concrete G3 assertion — it would fail on a
+    // big-endian host if the engine used native byte order.
     assert_eq!(
         &header[OFF_FORMAT_VERSION..OFF_FORMAT_VERSION + 4],
-        &[0x05, 0x00, 0x00, 0x00],
-        "format_version must be little-endian 5"
+        &[0x06, 0x00, 0x00, 0x00],
+        "format_version must be little-endian 6"
     );
-    assert_eq!(le_u32(&header, OFF_FORMAT_VERSION), 5);
+    assert_eq!(le_u32(&header, OFF_FORMAT_VERSION), 6);
 
     // page_size = 4096 = 0x1000, little-endian: 00 10 00 00.
     assert_eq!(

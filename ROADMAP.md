@@ -154,13 +154,14 @@ opt-in — decisão completa, com critério de reversão, em
 
 | # | Entrega | Status |
 |---|---|---|
-| BMW1 | Reescrita da passada 1 de `fts::search` em BlockMax-WAND sobre o skip index fv5 (ADR 0022) — pula blocos cujo `max_term_freq` não pode entrar no top-k | ⬜ maior risco de equivalência da fase, requer prova byte-idêntica vs. o oráculo `search_profiled` |
-| BMW2 | Medição @ 10k e @ 100k pelo harness oficial (`benches/run_all.sh --full`), decidindo se `recall p99 @ 100k < 50 ms` passa | ⬜ depende de BMW1 |
-| BMW3 | Fechamento: atualizar ADR 0017/0022/0023, README e ROADMAP com o resultado, qualquer que seja | ⬜ depende de BMW2 |
+| BMW1 | Bound de impacto por bloco no skip index — `format_version` 6 (ADR 0024): cada skip entry ganha `last_id` (block max doc id) ao lado de `max_term_freq`, o par `(block_max_docid, block_max_impact)` que o BMW pula um bloco por. Só formato + bound; a passada 1 segue linear | ✅ ENTREGUE (fv6, round-trip v4/v5/v6 + fuzz/crash verdes; `min(doc_len)` avaliado e rejeitado — não persistível) |
+| BMW2 | Reescrita da passada 1 de `fts::search` em BlockMax-WAND sobre o bound do fv6 — pula blocos cujo `max_term_freq` não pode entrar no top-k | ⬜ maior risco de equivalência da fase, requer prova byte-idêntica vs. o oráculo `search_profiled` |
+| BMW3 | Medição @ 10k e @ 100k pelo harness oficial (`benches/run_all.sh --full`), decidindo se `recall p99 @ 100k < 50 ms` passa | ⬜ depende de BMW2 |
+| BMW4 | Fechamento: atualizar ADR 0017/0022/0023/0024, README e ROADMAP com o resultado, qualquer que seja | ⬜ depende de BMW3 |
 
 **Critério de reversão:** se o BMW não fechar o NFR ou quebrar a equivalência de resultado,
 a opção vector-only default volta à mesa (ver ADR 0023 "Critério de reversão") — decisão do
-founder na task BMW3, com o resultado medido em mãos.
+founder na task BMW4, com o resultado medido em mãos.
 
 ---
 

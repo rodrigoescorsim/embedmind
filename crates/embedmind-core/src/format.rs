@@ -44,7 +44,18 @@ pub const WAL_MAGIC: [u8; 8] = *b"MINDWAL1";
 ///   reading and writing its own (skip-less delta+varint or fixed-width)
 ///   layout, and `vacuum` re-encodes it into a fresh version-5 file. No header
 ///   field or page type changes.
-pub const FORMAT_VERSION: u32 = 5;
+/// - `6` (BMW-1, `docs/adr/0024`): the full-text skip index (version 5) grows a
+///   per-block **impact bound** for BlockMax-WAND — each skip entry additionally
+///   stores the block's `last_id` (its maximum `record_id`), turning the entry
+///   into the standard `(block_max_docid, block_max_impact)` pair BMW needs to
+///   skip a whole block without decoding it (`docs/FORMAT.md` §11). The block's
+///   `max_term_freq` (already present in version 5) is the conservative impact
+///   bound; `min(doc_len)` was evaluated and rejected (not derivable from the
+///   postings body, which never stores `|D|` — ADR 0024). Same "layout selected
+///   by the file's version, never mixed" rule as versions 4/5; a version-≤5 file
+///   keeps reading and writing its own layout, and `vacuum` re-encodes it into a
+///   fresh version-6 file. No header field or page type changes.
+pub const FORMAT_VERSION: u32 = 6;
 
 /// Default page size in bytes. The authoritative value for an existing file is
 /// the one recorded in its header.
