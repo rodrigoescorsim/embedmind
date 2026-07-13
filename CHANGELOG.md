@@ -15,6 +15,30 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Changed
+- **BMW-3/BMW-4 (fase BMW, fechamento): `recall p99 @ 100k < 50 ms` NFR
+  measured with BlockMax-WAND active — still ❌ missed, 224.00 ms**
+  ([ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md)
+  §"Fechamento da fase BMW", [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md)
+  §"BMW-3"). Official `benches/run_all.sh --full` on both datasets regenerated
+  to `format_version` 6 (`MINDFMT1 06` header confirmed before the run):
+  224.00 ms @ 100k, essentially unchanged from the pre-BMW 255.12 ms — three
+  optimization phases (early termination, delta+varint postings, skip-list
+  structure, BlockMax-WAND) cut the original 1,224.6 ms ~5.5x, but not to the
+  50 ms ceiling. Root cause measured, not assumed: a new instrumentation
+  binary (`benches/src/bin/bmw_reach.rs`, via the new
+  `Store::search_text_bmw_counted` hidden surface) shows BlockMax-WAND *does*
+  activate on 82.8% of the official query set, but only 0.05% of the ~2.87M
+  postings blocks touched are actually skipped without decoding — this
+  synthetic benchmark corpus's high-frequency terms spread their postings too
+  evenly across the id space for the block-max refinement to prove a whole
+  block safe to skip (`BmwCursor::advance_to` still decodes the landing block
+  whenever the target isn't exactly a block's `first_id`). The algorithm
+  itself is correct — the equivalence suite still passes — this is a
+  benchmark-corpus-shape limitation, not a BMW bug. Full-text lexical lift
+  (FT6, `lexical_lift` in the same run) re-checked at 1.0000 hybrid recall@10
+  on both datasets — no regression from the rewrite. Founder's call: accept
+  the latency limitation as documented rather than revert full-text to
+  opt-in — the lift is worth more than what opt-in would save.
 - **`fts::search` Pass 1 rewritten as BlockMax-WAND on `format_version` ≥ 6
   files** (BMW-2, [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md)):
   instead of decoding every posting of every matched term to accumulate
