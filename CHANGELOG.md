@@ -36,6 +36,20 @@ Pre-v0.1 — under active development, repo private until M1 completes
   criteria from ADR 0017 ("passes measured" or "founder consciously accepts
   a documented limitation") remain open.
 
+### Fixed
+- **Crash in the FTS skip-index lookup on a malformed `format_version` 5 page**
+  ([ADR 0022](docs/adr/0022-postings-fts-skip-lists.md)): the nightly fuzz job
+  (`fuzz_fts_page`, CI run 29228455653) found a subtract-with-overflow panic in
+  `lookup_via_skip` (`crates/embedmind-core/src/index/fts.rs`) — a hostile
+  `count`/`block_count` pair made the last-block-length arithmetic
+  (`count - b * SKIP_BLOCK_SIZE`) underflow. `lookup_via_skip` now enforces the
+  same `block_count == count.div_ceil(SKIP_BLOCK_SIZE)` invariant the decoder
+  already checked, so a corrupted skip index degrades to a typed `malformed`
+  error instead of a panic (format policy G4). Crash input committed as a
+  regression seed (`fuzz/corpus/fuzz_fts_page/crash-9116d630a5fae3ac97551c97104213cd2f5f4e9a`)
+  plus a dedicated unit test
+  (`index::fts::tests::lookup_via_skip_rejects_corpus_crash_input`).
+
 ### Added
 - **Skip lists in large FTS postings — `format_version` 5** (story S26 part 2,
   [ADR 0022](docs/adr/0022-postings-fts-skip-lists.md)): a term whose postings
