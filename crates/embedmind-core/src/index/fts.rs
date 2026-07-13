@@ -289,6 +289,14 @@ fn lookup_via_skip(body: &[u8], page_no: u64, target: Ulid) -> Result<Option<u32
             .ok()
             .map(|i| decoded.entries[i].term_freq));
     }
+    // Same invariant the decoder enforces (`decode_delta_varint_skip`): a skip
+    // index only exists when `block_count` matches `count` at the fixed block
+    // size. Without this check a hostile `count`/`block_count` pair lets the
+    // last-block-length arithmetic below underflow.
+    let expected_blocks = count.div_ceil(SKIP_BLOCK_SIZE);
+    if count < SKIP_MIN_DOC_FREQ || block_count != expected_blocks {
+        return Err(malformed(page_no, "fts skip block_count mismatch"));
+    }
     let index_len = block_count
         .checked_mul(SKIP_ENTRY_LEN)
         .ok_or_else(|| malformed(page_no, "fts skip index overflow"))?;
@@ -1412,6 +1420,30 @@ mod tests {
         let mut bad = 10_000_000u32.to_le_bytes().to_vec();
         bad.extend_from_slice(&78_125u32.to_le_bytes()); // block_count huge
         reject(&bad, "skip index truncated");
+    }
+
+    /// Regression for the `fuzz_fts_page` crash committed at
+    /// `fuzz/corpus/fuzz_fts_page/crash-9116d630a5fae3ac97551c97104213cd2f5f4e9a`:
+    /// a `count`/`block_count` pair where `block_count * SKIP_BLOCK_SIZE >
+    /// count` made `lookup_via_skip`'s last-block-length arithmetic
+    /// (`count - b * SKIP_BLOCK_SIZE`) underflow and panic. Must now return a
+    /// typed `malformed` error, never panic, on both entry points the fuzz
+    /// target drives.
+    #[test]
+    fn lookup_via_skip_rejects_corpus_crash_input() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/fuzz_fts_page/crash-9116d630a5fae3ac97551c97104213cd2f5f4e9a");
+        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+
+        crate::fuzz::fuzz_fts_page(&data); // must not panic
+
+        // Both entry points `fuzz_decode_page` drives over this body must
+        // return, not panic; the result itself (`Err` or `Ok(None)`) is fine.
+        let target = Ulid::from_parts(0x1234_5678, 0x9abc_def0);
+        let _ = lookup_via_skip(&data, 1, target);
+        if data.len() > PAGE_HEADER_LEN {
+            let _ = lookup_via_skip(&data[PAGE_HEADER_LEN..], 1, target);
+        }
     }
 
     #[test]

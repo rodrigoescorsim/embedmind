@@ -708,6 +708,26 @@ mod tests {
             peak_rss_ingest_mib: 118.57,
             peak_rss_query_mib: 117.79,
             query_vectors: vec![],
+            lexical_lift: crate::lexical::LexicalLift {
+                hybrid: crate::lexical::LexicalReport {
+                    k: 10,
+                    queries: 100,
+                    recall_at_k: 0.98,
+                    latency: crate::lexical::LatencySummary {
+                        p50_ms: 1.0,
+                        p99_ms: 2.0,
+                    },
+                },
+                vector_only: crate::lexical::LexicalReport {
+                    k: 10,
+                    queries: 100,
+                    recall_at_k: 0.4,
+                    latency: crate::lexical::LatencySummary {
+                        p50_ms: 0.5,
+                        p99_ms: 1.0,
+                    },
+                },
+            },
         };
         let competitors: Vec<(&'static crate::competitors::Competitor, CompetitorOutcome)> =
             crate::competitors::COMPETITORS

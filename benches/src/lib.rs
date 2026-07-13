@@ -20,6 +20,10 @@
 //! - [`sysmem`] — peak-RSS sampling across a measured phase.
 //! - [`harness`] — the full metric suite over one dataset (warm + cold-open
 //!   latency, ingest throughput, file size, RSS, recall).
+//! - [`lexical`] — full-text "lift": lexical queries (exact identifiers,
+//!   ULIDs, error strings, CLI flags) with ground truth by construction,
+//!   measuring hybrid (`Store::recall`) vs. vector-only (`Store::recall_vector`)
+//!   recall + latency over the same queries.
 //! - [`competitors`] — the pinned sqlite-vec/zvec registry and comparison
 //!   adapters (feature-gated; honest "not measured" when a toolchain is absent).
 //! - [`report`] — NFR validation and the README-ready markdown + JSON renderers.
@@ -37,6 +41,7 @@ pub mod competitors;
 pub mod corpus;
 pub mod dataset;
 pub mod harness;
+pub mod lexical;
 pub mod metrics;
 pub mod recall;
 pub mod regression;
