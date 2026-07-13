@@ -39,7 +39,7 @@ Repo **privado** até o fim do marco. Prioridade absoluta: crash-safety antes de
 | 1.4 | Servidor MCP: `remember` / `recall` / `forget` | 1.2, 1.3 | ✅ (ADR 0009: stdio direto, sem SDK) |
 | 1.5 | Memória automática de contexto de projeto | 1.4 | ✅ (raiz git / `.embedmind.toml`) |
 | 1.6 | Instalação em 1 comando (`cargo install` + binários); testado com Claude Code **+ 1 outro agente** | 1.4 | 🔶 CLI completo (`serve` = servidor MCP) + pipeline de release por tag `v*` (3 plataformas, teto de tamanho); faltam `cargo publish` (A2) + teste manual com 2 agentes |
-| 1.7 | README final: GIF de demo em 30s + **benchmark honesto** vs. sqlite-vec e zvec | 1.3, 1.6 | ⬜ |
+| 1.7 | README final: GIF de demo em 30s + **benchmark honesto** vs. sqlite-vec e zvec | 1.3, 1.6 | 🔶 README final + harness + benchmark honesto ✅; falta só o GIF/2º agente/`cargo publish`/GitHub Release ([MANUAL — founder]) |
 | 1.8 | Testes de crash-recovery + fuzzing do formato no CI | 1.1 | ✅ |
 
 **🎯 Milestone:** v0.1 funcional de ponta a ponta, **dogfooding diário do founder a partir da semana 2**.
@@ -105,15 +105,41 @@ tarefas: [docs/03-tasks.md](docs/03-tasks.md) "Fase FR".
 
 | # | Entrega | Depende de | Status |
 |---|---|---|---|
-| FR0 | Docs (README/ROADMAP) ao estado real do código | — | ✅ esta atualização |
+| FR0 | Docs (README/ROADMAP) ao estado real do código | — | ✅ (esta atualização e refresh subsequentes) |
 | FR1 | `supersedes` — conhecimento versionado de primeira classe (S19) | grafo (3.1) | ✅ flag no record + aresta de grafo na mesma transação ([ADR 0013](docs/adr/0013-supersedes-flag-no-record.md)); `cargo test -p embedmind-core supersede` + `crash_supersede.rs` |
 | FR2 | Recência na fusão do `recall` (S20) | S9 (RRF) | ✅ terceira lista na fusão RRF (`created_at` desc.) ([ADR 0014](docs/adr/0014-recencia-terceira-lista-rrf.md)) |
-| FR3 | Curadoria na escrita — near-duplicates no `remember` (S21) | FR1 | ⬜ planejada, não implementada |
-| FR4 | Op-log estruturado no `serve` (S22) | — | ⬜ planejada, não implementada |
+| FR3 | Curadoria na escrita — near-duplicates no `remember` (S21) | FR1 | ✅ aviso de near-duplicate na escrita, só considera memórias vivas/não-superseded do mesmo agente |
+| FR4 | Op-log estruturado no `serve` (S22) | — | ✅ `serve --op-log <path>` grava JSONL por chamada (latência, args, ids/scores) |
+| FR5 | Relatório de uso — `embedmind report` (S23) | FR4 | ✅ `embedmind report [--op-log <path>] [--since N] [--json]` — agrega o op-log com o store (top recalled, nunca recalled na janela); degrada a totais do store sem op-log |
 
-**🎯 Direção, não promessa de prontidão:** FR1/FR2 já protegem o dogfooding do painel
-hoje; FR3/FR4 seguem como trabalho pré-launch — nenhuma delas deve ser citada como
-entregue até ter código + teste em `main`.
+**🎯 Fase FR fechada.** As cinco entregas (`supersedes`, recência, curadoria de
+near-duplicates, op-log estruturado e `report`) estão em `main` com teste — "conhecimento
+versionado" (FR1+FR2+FR3) é o diferencial de anúncio do launch.
+
+---
+
+## Fase FT — Fechar as dívidas do NFR de recall/latência/RSS a 100k (pré-launch, decisão do founder 11/jul/2026)
+
+Aberta pelo NFR reprovado da BQ1 (`ef_search` escalonado): `recall` p99 @ 100k medido em
+1.224,62 ms contra o teto de 50 ms (24x acima), recall de pior-caso e RSS de pico também
+fora do alvo na mesma medição. Três frentes independentes, detalhe em
+[docs/03-tasks.md](docs/03-tasks.md) "Fase FT" e [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md).
+
+| # | Entrega | Status |
+|---|---|---|
+| FT1 | Profiling do meio full-text @ 100k (S24) | ✅ causa dominante identificada: a closure `keep` (recarga do registro por candidato), 88,8% do tempo — não I/O de página, não hashing |
+| FT2 | Early termination no scan de BM25 (S25) | ✅ [ADR 0018](docs/adr/0018-early-termination-no-scan-bm25.md) — corte quando o upper bound do próximo candidato fica abaixo do k-ésimo score exato; resultado byte-idêntico |
+| FT3 | Compressão delta+varint + skip lists nas postings (S26) | ✅ `format_version` 4 (delta+varint, [ADR 0021](docs/adr/0021-postings-fts-delta-varint.md)) e 5 (skip lists, [ADR 0022](docs/adr/0022-postings-fts-skip-lists.md)); formato aditivo, arquivo antigo continua legível |
+| FT4 | Recall de pior-caso @ 100k (S27) | ✅ [ADR 0019](docs/adr/0019-recall-tie-aware-no-harness.md) — a cauda era artefato de grading (empates de score em texto duplicado), não miss do HNSW; grading virou tie-aware |
+| FT5 | Estouro de RSS de pico @ 100k (S28) | ✅ [ADR 0020](docs/adr/0020-rss-de-pico-era-o-harness-nao-o-engine.md) — causa era o harness (baseline brute-force retido além do uso), não a engine; RSS caiu para ~118 MiB |
+
+**Fechamento da fase (13/jul/2026):** recall@10 (tie-aware) e RSS de pico **aprovados** a
+100k. `recall p99 @ 100k` **reprovado**: 224,88 ms medido contra o teto de 50 ms — caiu
+~5,4x com FT2+FT3 (de 1.224,62 ms), mas não fechou. O próximo corte conhecido (ligar o
+skip index de `format_version` 5 ao hot path via BlockMax-WAND) é risco de equivalência
+suficiente para exigir task própria — **decisão pendente do founder**: prosseguir com
+essa sexta task ou aceitar 224,88 ms como limitação de escala documentada para o launch
+do M1 (ver ADR 0017 "Fechamento da fase FT"). Nenhuma opção foi escolhida ainda.
 
 ---
 

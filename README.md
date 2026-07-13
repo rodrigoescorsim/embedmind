@@ -4,14 +4,20 @@
 > One file, local, fast, no server. Rust.
 
 **Status: v0.1** — hybrid (vector + full-text) memory with metadata filters, a graph
-layer (entities/relations, `supersedes` for versioned knowledge) and basic provenance,
-crash-safe single file, MCP server + CLI. See [ROADMAP.md](ROADMAP.md) for what shipped
-and what's next.
+layer (entities/relations) and basic provenance, crash-safe single file, MCP server +
+CLI. See [ROADMAP.md](ROADMAP.md) for what shipped and what's next.
 
 EmbedMind is **persistent memory for AI agents** — an embedded storage engine (vector +
 full-text search, metadata filters, and a graph layer, all shipped) packaged as an **MCP
 memory server + CLI**. Think *SQLite for agent memory*: a single crash-safe file on your
 machine, no server process, no cloud, no Python environment.
+
+**Versioned knowledge, not just storage.** `remember ... --supersedes <id>` retires an
+old memory as a correction — `recall` stops surfacing it, but it stays navigable as
+history via `related`. Recall's ranking also weighs recency (a stale-but-similar memory
+no longer beats a newer correction), and `remember` flags near-duplicates at write time
+before they pile up. No embedded competitor has this — most give you a vector table with
+no concept of "this fact was corrected."
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -86,8 +92,8 @@ Your agent now has these tools:
 
 | Tool | What it does |
 |---|---|
-| `remember` | Store a memory (text + metadata; embedded and indexed automatically, long text chunked transparently). Optionally tag explicit `entities` and typed `relations` to earlier memories, or `supersedes: [id]` to retire an older memory as a correction |
-| `recall` | Hybrid search (vector + full-text, RRF-fused) over everything remembered, best match first with scores; `filters: {key: value}` narrows by metadata, `agent` by writing agent, and `expand_related: true` also pulls each hit's explicitly related memories as connected context |
+| `remember` | Store a memory (text + metadata; embedded and indexed automatically, long text chunked transparently). Optionally tag explicit `entities` and typed `relations` to earlier memories, or `supersedes: [id]` to retire an older memory as a correction. Flags near-duplicates of live, unsuperseded memories at write time |
+| `recall` | Hybrid search (vector + full-text + recency, RRF-fused) over everything remembered, best match first with scores; `filters: {key: value}` narrows by metadata, `agent` by writing agent, and `expand_related: true` also pulls each hit's explicitly related memories as connected context |
 | `related` | Navigate the explicit memory graph: one memory's relations (both directions, with kind, including `supersedes`), or every memory tagged with an entity |
 | `forget` | Delete one memory by id (delete by query/age is planned) |
 | `stats` | File size, live/forgotten counts, index health, and a per-agent provenance breakdown |
@@ -110,6 +116,26 @@ entries and the embedding model. Memories live in `~/.embedmind/memory.mind` by 
 (or `--entity NAME`) navigates the links, and `recall --expand-related` pulls
 connected context along with the hits.
 
+**Versioned knowledge from the CLI:**
+
+```bash
+embedmind remember "We use tokio 1.x for async" # earlier, wrong version
+embedmind remember "We use tokio 0.3 for async, see ADR-003" --supersedes <id-above>
+embedmind recall "which tokio version?"   # only the correction surfaces
+embedmind related <id-above>              # the superseded memory is still there, as history
+```
+
+**Observability:** run the server with `--op-log <file>.jsonl` to append a structured
+log of every tool call (latency, args, result ids/scores), then inspect usage with
+`embedmind report --op-log <file>.jsonl` — sessions, recalls served, top recalled
+memories, and memories never recalled in the window. Without `--op-log`, `report` still
+works from the store alone (store totals, no per-call history).
+
+```bash
+embedmind serve --file ~/.embedmind/memory.mind --op-log ~/.embedmind/ops.jsonl
+embedmind report --op-log ~/.embedmind/ops.jsonl --since 7   # window in days
+```
+
 ## Core dependencies
 
 - **Rust** (stable) — the engine and MCP server are pure Rust, one binary.
@@ -127,53 +153,85 @@ planned next — see [ROADMAP.md](ROADMAP.md).
 In embedded infrastructure, trust is the product — so we show real numbers, including
 where we lose, and the methodology is fixed *before* the numbers exist
 ([docs/BENCHMARKS.md](docs/BENCHMARKS.md)). The harness lives in `benches/`, doubles as the
-CI performance-regression guard, and never hand-edits results — the table below is rendered
-straight from `benches/results/`.
+CI performance-regression guard, and never hand-edits results — the tables below are
+rendered straight from [`benches/results/0.1.0-dev.json`](benches/results/0.1.0-dev.json)
+(mirrored in [`benches/results/latest.md`](benches/results/latest.md)), the official
+`run_all.sh --full` run of 2026-07-13.
 
 Measured on the founder's Windows dev box (x86_64, 20 logical CPUs, CPU-only,
-single-thread), EmbedMind `0.1.0-dev`, `agent-mem-10k` (10k short agent memories, 384-dim
-all-MiniLM-L6-v2 int8 embeddings):
+single-thread), EmbedMind `0.1.0-dev`, 384-dim all-MiniLM-L6-v2 int8 embeddings:
 
-| Metric | Value |
-|---|---:|
-| recall@10 (vs. brute-force exact) | 0.9953 |
-| recall@10, worst query | 0.9000 |
-| query p50 / p99 (warm) | 10.4 ms / 14.3 ms |
-| cold open (`Store::open`) + first query | 0.4 ms + 10.6 ms |
-| `remember` p50 / p99 (end-to-end, **incl. embedding**) | 7.5 ms / 22.3 ms |
-| ingest throughput (end-to-end, incl. embedding) | ~68 mem/s |
-| file size on disk | 82 MiB |
-| peak RSS (ingest / query) | ~118 MiB |
+| Metric | agent-mem-10k | agent-mem-100k |
+|---|---:|---:|
+| recall@10 (vs. brute-force, tie-aware) | 1.0000 | 1.0000 |
+| recall@10, worst query | 1.0000 | 1.0000 |
+| query p50 / p99 (warm, end-to-end) | 19.3 ms / 30.2 ms | 111.5 ms / 224.9 ms |
+| ↳ query engine p50 / p99 (no embed) | 15.6 ms / 25.3 ms | 107.8 ms / 219.5 ms |
+| ↳ query vector-only p50 / p99 (HNSW half only) | 6.3 ms / 8.3 ms | 19.3 ms / 29.3 ms |
+| cold open (`Store::open`) + first query | 0.35 ms + 29.0 ms | 0.27 ms + 224.6 ms |
+| `remember` p50 / p99 (end-to-end, **incl. embedding**) | 8.3 ms / 22.6 ms | 8.5 ms / 21.9 ms |
+| ingest throughput (end-to-end, incl. embedding) | ~57 mem/s | ~58 mem/s |
+| file size on disk | 84.9 MiB | 844.8 MiB |
+| peak RSS (ingest / query) | 96.6 MiB / 99.2 MiB | 117.0 MiB / 118.3 MiB |
 
 Notes and honesty caveats:
 
 - **`remember` latency includes embedding on CPU.** That is the real cost your agent pays,
   so we report it — but it means our ingest number is *not* comparable to a vectors-only
-  store's ingest. Embedding, not indexing, dominates that ~68 mem/s.
-- **The 100k targets pass.** The spec NFRs stated at 100k — recall p99 < 50 ms and peak
-  RAM < 300 MiB — are measured on the `agent-mem-100k` dataset and pass (15.5 ms, 281 MiB);
-  see [docs/BENCHMARKS.md](docs/BENCHMARKS.md), [`benches/results/latest.md`](benches/results/latest.md)
-  and the [CHANGELOG](CHANGELOG.md). `remember` p99 < 200 ms end-to-end passes at 22 ms @ 100k.
+  store's ingest. Embedding, not indexing, dominates that ~58 mem/s.
+- **The `query engine` / `query vector-only` split isolates the full-text cost.** `engine`
+  is hybrid search (BM25 + HNSW + RRF fusion + record load) with embedding already
+  excluded; `vector-only` is the HNSW half alone on the same query set. The gap between
+  them (~190 ms @ 100k) is the full-text scan — see the NFR miss below.
+- **recall p99 @ 100k misses the < 50 ms NFR: 224.9 ms, honestly reported, not hidden.**
+  Three rounds of optimization (early termination — [ADR 0018](docs/adr/0018-early-termination-no-scan-bm25.md);
+  delta+varint postings — [ADR 0021](docs/adr/0021-postings-fts-delta-varint.md); skip-list
+  structure — [ADR 0022](docs/adr/0022-postings-fts-skip-lists.md)) cut it ~5.4x from an
+  original 1,224.6 ms, but the ceiling wasn't reached — see
+  [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) for the full
+  accounting and the known next step (wiring the skip index into the scan via
+  BlockMax-WAND), not yet scheduled.
+- **recall@10 and peak RSS both pass at 100k**: recall@10 is 1.0000 (tie-aware grading,
+  worst query included) and peak RSS is 118.3 MiB — well under the 300 MiB ceiling.
+  `remember` p99 < 200 ms end-to-end also passes at 21.9 ms @ 100k.
 
-### Head-to-head vs. sqlite-vec / zvec
+### vs. baselines — index-only (same pre-computed vectors, same queries, same k)
 
-Same vectors, same 1k queries, same `k`, on `agent-mem-10k` (competitor versions pinned in
-`benches/src/competitors.rs`; run behind `--features compare-sqlite-vec,compare-zvec`):
+Same vectors, same 1k queries, same `k`, on `agent-mem-100k` (competitor versions pinned
+in `benches/src/competitors.rs`; run behind `--features
+compare-sqlite-vec,compare-zvec,compare-chroma`). This plane hands every system,
+including EmbedMind, the identical pre-computed vector — EmbedMind's row is its `query
+engine` split (embed time excluded), the like-for-like number against a store that never
+embeds. Each row states its **scope** — what it returns and what it persists — because a
+smaller file or a faster query that does less isn't a win row:
 
-| System | Version | recall@10 | query p50 / p99 | ingest (vec-only) | on-disk size |
-|---|---|---:|---:|---:|---:|
-| **EmbedMind** | 0.1.0-dev | 0.9953 | 10.4 ms / 14.3 ms | — (embeds; see above) | 82 MiB |
-| sqlite-vec | 0.1.10-alpha.4 | 0.9984 | 9.8 ms / 13.2 ms | 196/s | 15.3 MiB |
-| zvec | 0.5.1 | 0.9912 | 1.1 ms / 1.5 ms | 70905/s | 17.4 MiB |
+| System | Version | recall@10 | query p50 / p99 | returns | persists |
+|---|---|---:|---:|---|---|
+| **EmbedMind** | 0.1.0-dev | 1.0000 | 107.8 ms / 219.5 ms | full content + metadata + provenance | text + metadata + full-text index + vectors |
+| sqlite-vec | 0.1.10-alpha.4 | _not measured on this run_ | — | rowid + distance only | vectors only |
+| zvec | 0.5.1 | _not measured on this run_ | — | primary key + distance only | vectors + primary key only |
+| Chroma | 1.5.9 | _not measured on this run_ | — | ids only | vectors + ids |
 
-**Where EmbedMind loses (honesty contract, BENCHMARKS.md §4):** on this 10k set both
-baselines are smaller on disk (they store bare vectors; EmbedMind keeps the memory text,
-metadata and provenance the product is built around), and both are faster on warm query
-p99 — zvec dramatically so, and sqlite-vec's brute-force scan edges out our recall too.
-Their ingest is vectors-only and not comparable to EmbedMind's embed-included `remember`
-(BENCHMARKS.md §1). These rows are rendered straight from `benches/results/`, never
-hand-picked — when a baseline wins a metric it lands in the table and the losses list
-automatically.
+No baseline was built with its `compare-*` feature on this run (each requires an external
+toolchain — the sqlite-vec extension, a zvec build, or a pinned Python + `chromadb`
+install), so no head-to-head numbers exist yet for this snapshot — never fabricated. Build
+with the relevant feature to fill these rows; see `docs/BENCHMARKS.md` §1.
+
+### vs. baselines — text→result (same embedding toll paid by every system)
+
+The product question: an agent hands text in, gets results out. Every system here would
+pay the same embedding toll (all-MiniLM-L6-v2) before it can query — EmbedMind's `query
+p50/p99` above already include it end-to-end. This is the plane index-only comparisons
+hide: a vector-only store can't skip the embedding cost in real use. No baseline is
+measured on this run either, for the same reason as above.
+
+### Where EmbedMind loses (honesty contract, BENCHMARKS.md §4)
+
+No competitor was measured on this run, so no head-to-head loss can be reported yet —
+this section is computed by the harness from `benches/results/`, never hand-edited; when
+a baseline is measured and wins a metric, it lands here automatically. The one loss we
+can already report without a competitor build: **`recall` p99 @ 100k misses its own NFR**
+(224.9 ms vs. a 50 ms target), documented above, not smoothed over.
 
 ## When to use sqlite-vec instead
 
