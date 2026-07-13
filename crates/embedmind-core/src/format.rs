@@ -35,7 +35,16 @@ pub const WAL_MAGIC: [u8; 8] = *b"MINDWAL1";
 ///   layout under this build (degrades in size/speed, never in correctness),
 ///   and `vacuum`'s rebuild-by-copy re-encodes it into a fresh version-4
 ///   file. No header field or page type changes.
-pub const FORMAT_VERSION: u32 = 4;
+/// - `5` (S26 part 2, `docs/adr/0022`): full-text postings bodies large enough
+///   to be worth the overhead gain a **skip index** — fixed-size blocks, each
+///   preceded by its first `record_id` and byte offset — so a lookup by id
+///   jumps straight to the one block that can contain it instead of scanning
+///   the whole list (`docs/FORMAT.md` §11). Same "layout selected by the
+///   file's version, never mixed" rule as version 4; a version-≤4 file keeps
+///   reading and writing its own (skip-less delta+varint or fixed-width)
+///   layout, and `vacuum` re-encodes it into a fresh version-5 file. No header
+///   field or page type changes.
+pub const FORMAT_VERSION: u32 = 5;
 
 /// Default page size in bytes. The authoritative value for an existing file is
 /// the one recorded in its header.

@@ -82,6 +82,30 @@ const POSTING_LEN: usize = 20;
 /// layouts and stays readable by the build that wrote it.
 const DELTA_VARINT_MIN_FORMAT_VERSION: u32 = 4;
 
+/// First `format_version` whose postings bodies carry a skip index when large
+/// (S26 part 2, `docs/adr/0022`, `docs/FORMAT.md` §11).
+const SKIP_MIN_FORMAT_VERSION: u32 = 5;
+
+/// Postings per skip block. A lookup by id decodes at most one block of this
+/// many entries instead of the whole list. Picked so the per-block skip-entry
+/// overhead (24 bytes: 16-byte `first_id` + `u32` offset + `u32` max_tf) stays
+/// a small fraction of a full block (`SKIP_BLOCK_SIZE` × ~2–14 delta+varint
+/// bytes) and a block is a few hundred bytes — coarse enough to skip cheaply,
+/// fine enough that decoding one is far less work than the list. Justified by
+/// measurement in `docs/adr/0022`.
+const SKIP_BLOCK_SIZE: usize = 128;
+
+/// A postings list shorter than this keeps the plain (skip-less) delta+varint
+/// body: below it the skip index costs more bytes and branches than the linear
+/// scan it would save. Set to 4 × [`SKIP_BLOCK_SIZE`] so a skip index only
+/// appears once there are at least a few blocks to skip over. Threshold chosen
+/// by measurement on the test corpus (`docs/adr/0022`).
+const SKIP_MIN_DOC_FREQ: usize = 4 * SKIP_BLOCK_SIZE;
+
+/// Bytes per skip-index entry: `first_id` (16) · `byte_offset` (u32) ·
+/// `max_term_freq` (u32).
+const SKIP_ENTRY_LEN: usize = 24;
+
 /// Longest legal LEB128 varint for a u128: ⌈128 / 7⌉ bytes. A longer run of
 /// continuation bits is malformed, which also bounds the decode loop.
 const MAX_VARINT_LEN: usize = 19;
@@ -95,16 +119,27 @@ enum PostingsLayout {
     /// `format_version` ≤ 3: `doc_freq` (u32) then fixed 20-byte entries of
     /// `record_id` (16 raw bytes) · `term_freq` (u32).
     FixedWidth,
-    /// `format_version` ≥ 4: `doc_freq` (u32) then per entry the varint
+    /// `format_version` 4: `doc_freq` (u32) then per entry the varint
     /// **delta** of `record_id` from the previous entry (the list is sorted
     /// strictly ascending, so deltas after the first are ≥ 1; the first is
     /// the id's raw u128 value) followed by `term_freq` as a varint.
     DeltaVarint,
+    /// `format_version` ≥ 5: same delta+varint entries, but a list with at
+    /// least [`SKIP_MIN_DOC_FREQ`] entries is prefixed by a **skip index** —
+    /// `block_count` (u32) then, per block, `first_id` (16 raw bytes),
+    /// `byte_offset` (u32) into the blocks region, and `max_term_freq` (u32).
+    /// Each block re-bases its delta chain (the block's first entry's delta is
+    /// its absolute id) so a block decodes on its own. A shorter list writes
+    /// `block_count = 0` and the plain delta+varint body, identical to
+    /// [`PostingsLayout::DeltaVarint`]'s bytes after the count.
+    DeltaVarintSkip,
 }
 
 impl PostingsLayout {
     fn for_format_version(version: u32) -> Self {
-        if version >= DELTA_VARINT_MIN_FORMAT_VERSION {
+        if version >= SKIP_MIN_FORMAT_VERSION {
+            PostingsLayout::DeltaVarintSkip
+        } else if version >= DELTA_VARINT_MIN_FORMAT_VERSION {
             PostingsLayout::DeltaVarint
         } else {
             PostingsLayout::FixedWidth
@@ -152,6 +187,154 @@ fn read_varint(body: &[u8], off: &mut usize, page_no: u64) -> Result<u128> {
 
 fn malformed(page_no: u64, what: &'static str) -> Error {
     Error::MalformedPage { page_no, what }
+}
+
+/// Reads a little-endian u128 at `off`. Bounds-checked (fuzz rule).
+fn read_u128_le(body: &[u8], off: usize, page_no: u64) -> Result<u128> {
+    let bytes: [u8; 16] = body
+        .get(off..off + 16)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| malformed(page_no, "fts u128 truncated"))?;
+    Ok(u128::from_le_bytes(bytes))
+}
+
+/// Appends a delta+varint run of `entries`, re-based at `prev = 0` (the first
+/// entry's delta is its absolute id). Used both for a whole plain body and for
+/// one self-contained skip block.
+fn encode_delta_run(out: &mut Vec<u8>, entries: &[Posting]) {
+    let mut prev: u128 = 0;
+    for p in entries {
+        let id = u128::from(p.record_id);
+        // The list is strictly ascending, so this never wraps and deltas after
+        // the first entry are always ≥ 1.
+        put_varint(out, id.wrapping_sub(prev));
+        put_varint(out, u128::from(p.term_freq));
+        prev = id;
+    }
+}
+
+/// Rejects a `count` a hostile body cannot back: every delta+varint entry is at
+/// least two bytes (one-byte delta + one-byte term_freq), so we bound the count
+/// against the buffer *before* allocating a `Vec` of it (fuzz rule,
+/// `docs/TESTING.md` §3). `body` starts at the 4-byte count prefix.
+fn reject_hostile_delta_count(body: &[u8], count: usize, page_no: u64) -> Result<()> {
+    let min_need = 4usize
+        .checked_add(
+            count
+                .checked_mul(2)
+                .ok_or_else(|| malformed(page_no, "fts postings count overflow"))?,
+        )
+        .ok_or_else(|| malformed(page_no, "fts postings length overflow"))?;
+    if body.len() < min_need {
+        return Err(malformed(page_no, "fts postings truncated"));
+    }
+    Ok(())
+}
+
+/// Decodes `count` delta+varint entries starting at `*off` (re-based: the first
+/// entry's delta is its absolute id), appending to `entries` and advancing
+/// `*off`. Enforces the strict-ascending order *within* this run; a caller that
+/// splits the list into blocks checks the order across block seams itself.
+fn decode_delta_run(
+    body: &[u8],
+    off: &mut usize,
+    count: usize,
+    page_no: u64,
+    entries: &mut Vec<Posting>,
+) -> Result<()> {
+    let mut prev: u128 = 0;
+    for i in 0..count {
+        let delta = read_varint(body, off, page_no)?;
+        if i > 0 && delta == 0 {
+            return Err(malformed(page_no, "unsorted fts postings"));
+        }
+        let id = if i == 0 {
+            delta
+        } else {
+            prev.checked_add(delta)
+                .ok_or_else(|| malformed(page_no, "fts posting id overflow"))?
+        };
+        prev = id;
+        let term_freq = u32::try_from(read_varint(body, off, page_no)?)
+            .map_err(|_| malformed(page_no, "fts posting term_freq overflow"))?;
+        if term_freq == 0 {
+            return Err(malformed(page_no, "fts posting zero term_freq"));
+        }
+        entries.push(Posting {
+            record_id: Ulid::from(id),
+            term_freq,
+        });
+    }
+    Ok(())
+}
+
+/// Finds `target`'s `term_freq` in a version-5 skip body **without decoding the
+/// whole list**: binary-searches the skip index for the one block whose id
+/// range can contain `target`, then decodes just that block (≤
+/// [`SKIP_BLOCK_SIZE`] entries). Returns `None` when the term does not cover
+/// `target`. This is the block-skipping lookup the skip index exists for; it is
+/// verified against the linear `binary_search` over a fully decoded list by the
+/// equivalence tests, so wiring it into the hot path never changes a result.
+///
+/// A body without a skip index (`block_count = 0`, a small term) falls back to
+/// a full decode + search — no skip is possible or worthwhile there.
+fn lookup_via_skip(body: &[u8], page_no: u64, target: Ulid) -> Result<Option<u32>> {
+    let count = dict::read_u32(body, 0, page_no)? as usize;
+    let block_count = dict::read_u32(body, 4, page_no)? as usize;
+    if block_count == 0 {
+        let decoded = Postings::decode_delta_varint_skip(body, page_no)?;
+        return Ok(decoded
+            .entries
+            .binary_search_by(|p| p.record_id.cmp(&target))
+            .ok()
+            .map(|i| decoded.entries[i].term_freq));
+    }
+    let index_len = block_count
+        .checked_mul(SKIP_ENTRY_LEN)
+        .ok_or_else(|| malformed(page_no, "fts skip index overflow"))?;
+    let blocks_start = 8usize
+        .checked_add(index_len)
+        .ok_or_else(|| malformed(page_no, "fts skip index overflow"))?;
+    if body.len() < blocks_start {
+        return Err(malformed(page_no, "fts skip index truncated"));
+    }
+    let target_id = u128::from(target);
+
+    // The block that may hold `target` is the last one whose `first_id` is
+    // ≤ target (blocks are id-ordered and contiguous). `partition_point`
+    // counts blocks starting at or before target; the candidate is the one
+    // before that boundary. None before it → target precedes the whole list.
+    let first_id_of =
+        |b: usize| -> Result<u128> { read_u128_le(body, 8 + b * SKIP_ENTRY_LEN, page_no) };
+    let mut lo = 0usize;
+    let mut hi = block_count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if first_id_of(mid)? <= target_id {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        return Ok(None); // target is below the first block's first id
+    }
+    let b = lo - 1;
+    let stored_offset = dict::read_u32(body, 8 + b * SKIP_ENTRY_LEN + 16, page_no)? as usize;
+    let block_len = if b + 1 == block_count {
+        count - b * SKIP_BLOCK_SIZE
+    } else {
+        SKIP_BLOCK_SIZE
+    };
+    let mut block = Vec::with_capacity(block_len);
+    let mut off = blocks_start
+        .checked_add(stored_offset)
+        .ok_or_else(|| malformed(page_no, "fts skip byte_offset overflow"))?;
+    decode_delta_run(body, &mut off, block_len, page_no, &mut block)?;
+    Ok(block
+        .binary_search_by(|p| p.record_id.cmp(&target))
+        .ok()
+        .map(|i| block[i].term_freq))
 }
 
 // ---------------------------------------------------------------------------
@@ -348,18 +531,45 @@ impl Postings {
                 }
             }
             PostingsLayout::DeltaVarint => {
-                let mut prev: u128 = 0;
-                for p in &self.entries {
-                    let id = u128::from(p.record_id);
-                    // The list is strictly ascending, so this never wraps and
-                    // deltas after the first entry are always ≥ 1.
-                    put_varint(&mut out, id.wrapping_sub(prev));
-                    put_varint(&mut out, u128::from(p.term_freq));
-                    prev = id;
-                }
+                encode_delta_run(&mut out, &self.entries);
+            }
+            PostingsLayout::DeltaVarintSkip => {
+                self.encode_skip(&mut out);
             }
         }
         out
+    }
+
+    /// Appends the skip-index body for the version-5 layout after the already
+    /// written `doc_freq`. A list shorter than [`SKIP_MIN_DOC_FREQ`] writes
+    /// `block_count = 0` and a plain delta+varint run — byte-identical to the
+    /// version-4 body past the count — so small terms pay only 4 extra bytes.
+    fn encode_skip(&self, out: &mut Vec<u8>) {
+        if self.entries.len() < SKIP_MIN_DOC_FREQ {
+            out.extend_from_slice(&0u32.to_le_bytes());
+            encode_delta_run(out, &self.entries);
+            return;
+        }
+        let blocks: Vec<&[Posting]> = self.entries.chunks(SKIP_BLOCK_SIZE).collect();
+        out.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
+
+        // Encode each block's entries first (into a scratch buffer) so we know
+        // its byte offset and its max term_freq before writing the skip index.
+        let mut blocks_body: Vec<u8> = Vec::new();
+        let mut skip_index: Vec<u8> = Vec::with_capacity(blocks.len() * SKIP_ENTRY_LEN);
+        for block in &blocks {
+            let first_id = u128::from(block[0].record_id);
+            let byte_offset = blocks_body.len() as u32;
+            let max_tf = block.iter().map(|p| p.term_freq).max().unwrap_or(0);
+            skip_index.extend_from_slice(&first_id.to_le_bytes());
+            skip_index.extend_from_slice(&byte_offset.to_le_bytes());
+            skip_index.extend_from_slice(&max_tf.to_le_bytes());
+            // Each block re-bases (`prev = 0`), so its first delta is the
+            // absolute id and the block decodes without the preceding ones.
+            encode_delta_run(&mut blocks_body, block);
+        }
+        out.extend_from_slice(&skip_index);
+        out.extend_from_slice(&blocks_body);
     }
 
     /// Parses a postings body in `layout`'s encoding. Validates the count
@@ -369,6 +579,7 @@ impl Postings {
         match layout {
             PostingsLayout::FixedWidth => Self::decode_fixed_width(body, page_no),
             PostingsLayout::DeltaVarint => Self::decode_delta_varint(body, page_no),
+            PostingsLayout::DeltaVarintSkip => Self::decode_delta_varint_skip(body, page_no),
         }
     }
 
@@ -412,42 +623,83 @@ impl Postings {
 
     fn decode_delta_varint(body: &[u8], page_no: u64) -> Result<Self> {
         let count = dict::read_u32(body, 0, page_no)? as usize;
-        // Every entry takes at least two bytes (one-varint delta + one-varint
-        // term_freq), so a hostile count is rejected before allocating.
-        let min_need = 4usize
-            .checked_add(
-                count
-                    .checked_mul(2)
-                    .ok_or_else(|| malformed(page_no, "fts postings count overflow"))?,
-            )
-            .ok_or_else(|| malformed(page_no, "fts postings length overflow"))?;
-        if body.len() < min_need {
-            return Err(malformed(page_no, "fts postings truncated"));
-        }
+        reject_hostile_delta_count(body, count, page_no)?;
         let mut entries = Vec::with_capacity(count);
-        let mut prev: u128 = 0;
         let mut off = 4;
-        for i in 0..count {
-            let delta = read_varint(body, &mut off, page_no)?;
-            if i > 0 && delta == 0 {
+        decode_delta_run(body, &mut off, count, page_no, &mut entries)?;
+        Ok(Postings { entries })
+    }
+
+    /// Parses the version-5 skip layout: `doc_freq` (u32), `block_count` (u32),
+    /// the skip index (`block_count` × [`SKIP_ENTRY_LEN`]), then the blocks.
+    /// `block_count = 0` is the plain delta+varint body (a small term). Every
+    /// block re-bases its delta chain, so it decodes independently, and the
+    /// skip index's `first_id`/`byte_offset`/`max_term_freq` are re-derived
+    /// from the decoded entries and checked against what was written — a
+    /// corrupt index can never point past the body or misreport a block.
+    fn decode_delta_varint_skip(body: &[u8], page_no: u64) -> Result<Self> {
+        let count = dict::read_u32(body, 0, page_no)? as usize;
+        let block_count = dict::read_u32(body, 4, page_no)? as usize;
+        if block_count == 0 {
+            reject_hostile_delta_count(body, count, page_no)?;
+            let mut entries = Vec::with_capacity(count);
+            let mut off = 8;
+            decode_delta_run(body, &mut off, count, page_no, &mut entries)?;
+            return Ok(Postings { entries });
+        }
+        // A skip index only appears when the writer chose to (large lists);
+        // `block_count` must match the fixed block size and the count, and the
+        // index itself must fit before we trust any offset in it.
+        let expected_blocks = count.div_ceil(SKIP_BLOCK_SIZE);
+        if count < SKIP_MIN_DOC_FREQ || block_count != expected_blocks {
+            return Err(malformed(page_no, "fts skip block_count mismatch"));
+        }
+        let index_len = block_count
+            .checked_mul(SKIP_ENTRY_LEN)
+            .ok_or_else(|| malformed(page_no, "fts skip index overflow"))?;
+        let blocks_start = 8usize
+            .checked_add(index_len)
+            .ok_or_else(|| malformed(page_no, "fts skip index overflow"))?;
+        if body.len() < blocks_start {
+            return Err(malformed(page_no, "fts skip index truncated"));
+        }
+        reject_hostile_delta_count(&body[blocks_start.saturating_sub(4)..], count, page_no)?;
+
+        let mut entries = Vec::with_capacity(count);
+        let mut prev_block_last: Option<u128> = None;
+        let mut off = blocks_start;
+        for b in 0..block_count {
+            let block_len = if b + 1 == block_count {
+                count - b * SKIP_BLOCK_SIZE
+            } else {
+                SKIP_BLOCK_SIZE
+            };
+            // Re-derive the skip entry from the block bytes and check it against
+            // the stored index: byte offset, first id, and max term_freq.
+            let idx_off = 8 + b * SKIP_ENTRY_LEN;
+            let stored_first = read_u128_le(body, idx_off, page_no)?;
+            let stored_offset = dict::read_u32(body, idx_off + 16, page_no)? as usize;
+            let stored_max_tf = dict::read_u32(body, idx_off + 20, page_no)?;
+            if blocks_start + stored_offset != off {
+                return Err(malformed(page_no, "fts skip byte_offset mismatch"));
+            }
+            let block_start_entry = entries.len();
+            decode_delta_run(body, &mut off, block_len, page_no, &mut entries)?;
+            let block = &entries[block_start_entry..];
+            let first_id = u128::from(block[0].record_id);
+            if stored_first != first_id {
+                return Err(malformed(page_no, "fts skip first_id mismatch"));
+            }
+            let max_tf = block.iter().map(|p| p.term_freq).max().unwrap_or(0);
+            if stored_max_tf != max_tf {
+                return Err(malformed(page_no, "fts skip max_term_freq mismatch"));
+            }
+            // Blocks re-base independently; enforce the strict global order at
+            // the seam between one block's last id and the next block's first.
+            if prev_block_last.is_some_and(|prev_last| first_id <= prev_last) {
                 return Err(malformed(page_no, "unsorted fts postings"));
             }
-            let id = if i == 0 {
-                delta
-            } else {
-                prev.checked_add(delta)
-                    .ok_or_else(|| malformed(page_no, "fts posting id overflow"))?
-            };
-            prev = id;
-            let term_freq = u32::try_from(read_varint(body, &mut off, page_no)?)
-                .map_err(|_| malformed(page_no, "fts posting term_freq overflow"))?;
-            if term_freq == 0 {
-                return Err(malformed(page_no, "fts posting zero term_freq"));
-            }
-            entries.push(Posting {
-                record_id: Ulid::from(id),
-                term_freq,
-            });
+            prev_block_last = Some(u128::from(block[block.len() - 1].record_id));
         }
         Ok(Postings { entries })
     }
@@ -833,19 +1085,32 @@ pub fn search_profiled(
 }
 
 /// Fuzz-only surface: decode one page as each FTS node kind and as postings
-/// — in **both** postings layouts (fixed-width for `format_version` ≤ 3
-/// files, delta+varint for ≥ 4), exercising every parser branch. Must
-/// return, never panic (`fuzz_fts_page` target, `docs/TESTING.md` §3).
+/// — in **every** postings layout (fixed-width for `format_version` ≤ 3
+/// files, delta+varint for 4, delta+varint+skip for ≥ 5), exercising every
+/// parser branch. Also drives the block-skipping [`lookup_via_skip`] over the
+/// same bytes so its offset/bounds handling is fuzzed too. Must return, never
+/// panic (`fuzz_fts_page` target, `docs/TESTING.md` §3).
 #[doc(hidden)]
 pub fn fuzz_decode_page(page: &[u8]) {
     dict::fuzz_decode_node(page, FTS_DICT);
     let _ = FtsMeta::decode(page, 1);
-    for layout in [PostingsLayout::FixedWidth, PostingsLayout::DeltaVarint] {
+    for layout in [
+        PostingsLayout::FixedWidth,
+        PostingsLayout::DeltaVarint,
+        PostingsLayout::DeltaVarintSkip,
+    ] {
         // Postings bodies live at the page content region; try the body too.
         if page.len() > PAGE_HEADER_LEN {
             let _ = Postings::decode(&page[PAGE_HEADER_LEN..], 1, layout);
         }
         let _ = Postings::decode(page, 1, layout);
+    }
+    // The skip lookup parses the same hostile bytes on its own path (skip index
+    // offsets, block bounds) — it must also never panic.
+    let target = Ulid::from_parts(0x1234_5678, 0x9abc_def0);
+    let _ = lookup_via_skip(page, 1, target);
+    if page.len() > PAGE_HEADER_LEN {
+        let _ = lookup_via_skip(&page[PAGE_HEADER_LEN..], 1, target);
     }
 }
 
@@ -1015,6 +1280,140 @@ mod tests {
         reject(&body, "varint overflow bits");
     }
 
+    /// Builds a realistic sorted postings list of `n` entries (ULIDs over
+    /// time, random low bits — FORMAT §11 order), for the skip-layout tests.
+    fn realistic_postings(n: u64, seed: u64) -> Postings {
+        let mut rng = SplitMix64(seed);
+        let mut p = Postings::default();
+        for i in 0..n {
+            let id = Ulid::from_parts(1_700_000_000_000 + i * 37, rng.next_u64().into());
+            p.upsert(id, 1 + (rng.next_u64() % 9) as u32);
+        }
+        p
+    }
+
+    #[test]
+    fn skip_layout_roundtrips_small_and_large() {
+        // Small (< threshold): block_count = 0, body identical past the count
+        // to the plain delta+varint body — the skip index costs only 4 bytes.
+        let small = realistic_postings(10, 0xA1);
+        let skip_body = small.encode(PostingsLayout::DeltaVarintSkip);
+        assert_eq!(
+            Postings::decode(&skip_body, 1, PostingsLayout::DeltaVarintSkip).unwrap(),
+            small
+        );
+        let plain = small.encode(PostingsLayout::DeltaVarint);
+        assert_eq!(
+            &skip_body[8..],
+            &plain[4..],
+            "small body is plain past count"
+        );
+        assert_eq!(le_block_count(&skip_body), 0);
+
+        // Large (≥ threshold): a real skip index, multiple blocks.
+        let large = realistic_postings(SKIP_MIN_DOC_FREQ as u64 + 55, 0xB2);
+        let body = large.encode(PostingsLayout::DeltaVarintSkip);
+        assert_eq!(
+            Postings::decode(&body, 1, PostingsLayout::DeltaVarintSkip).unwrap(),
+            large
+        );
+        let expected_blocks = large.entries.len().div_ceil(SKIP_BLOCK_SIZE);
+        assert_eq!(le_block_count(&body) as usize, expected_blocks);
+        assert!(
+            expected_blocks >= 4,
+            "test corpus should span several blocks"
+        );
+    }
+
+    fn le_block_count(body: &[u8]) -> u32 {
+        u32::from_le_bytes(body[4..8].try_into().unwrap())
+    }
+
+    #[test]
+    fn lookup_via_skip_matches_linear_scan_for_every_id() {
+        // Absolute equivalence: the block-skipping lookup returns exactly what
+        // a full decode + binary_search returns, for present and absent ids.
+        let large = realistic_postings(SKIP_MIN_DOC_FREQ as u64 + 200, 0xC3);
+        let body = large.encode(PostingsLayout::DeltaVarintSkip);
+
+        for p in &large.entries {
+            assert_eq!(
+                lookup_via_skip(&body, 1, p.record_id).unwrap(),
+                Some(p.term_freq),
+                "present id must be found via skip"
+            );
+        }
+        // Absent ids: below the first, above the last, and in the gaps.
+        let below = Ulid::from(0u128);
+        assert_eq!(lookup_via_skip(&body, 1, below).unwrap(), None);
+        let above = Ulid::from(u128::MAX);
+        assert_eq!(lookup_via_skip(&body, 1, above).unwrap(), None);
+        // A value strictly between two consecutive ids, if such a gap exists.
+        for w in large.entries.windows(2) {
+            let a = u128::from(w[0].record_id);
+            let b = u128::from(w[1].record_id);
+            if b - a > 1 {
+                let mid = Ulid::from(a + 1);
+                assert_eq!(lookup_via_skip(&body, 1, mid).unwrap(), None);
+                break;
+            }
+        }
+
+        // The small path (block_count = 0) also answers correctly.
+        let small = realistic_postings(20, 0xD4);
+        let sbody = small.encode(PostingsLayout::DeltaVarintSkip);
+        for p in &small.entries {
+            assert_eq!(
+                lookup_via_skip(&sbody, 1, p.record_id).unwrap(),
+                Some(p.term_freq)
+            );
+        }
+        assert_eq!(
+            lookup_via_skip(&sbody, 1, Ulid::from(u128::MAX)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn skip_layout_rejects_hostile_bodies() {
+        let large = realistic_postings(SKIP_MIN_DOC_FREQ as u64 + 10, 0xE5);
+        let good = large.encode(PostingsLayout::DeltaVarintSkip);
+        let reject = |body: &[u8], what: &str| {
+            assert!(
+                matches!(
+                    Postings::decode(body, 1, PostingsLayout::DeltaVarintSkip),
+                    Err(Error::MalformedPage { .. })
+                ),
+                "must reject: {what}"
+            );
+        };
+
+        // block_count that does not match count / block size.
+        let mut bad = good.clone();
+        bad[4..8].copy_from_slice(&1u32.to_le_bytes());
+        reject(&bad, "block_count mismatch");
+
+        // A corrupted stored first_id in the skip index (flip a byte).
+        let mut bad = good.clone();
+        bad[8] ^= 0xFF;
+        reject(&bad, "first_id mismatch");
+
+        // A corrupted stored byte_offset (points off the block seam).
+        let mut bad = good.clone();
+        bad[8 + 16] = bad[8 + 16].wrapping_add(1);
+        reject(&bad, "byte_offset mismatch");
+
+        // A corrupted stored max_term_freq.
+        let mut bad = good.clone();
+        bad[8 + 20] = bad[8 + 20].wrapping_add(1);
+        reject(&bad, "max_term_freq mismatch");
+
+        // A skip index promising blocks the body cannot hold.
+        let mut bad = 10_000_000u32.to_le_bytes().to_vec();
+        bad.extend_from_slice(&78_125u32.to_le_bytes()); // block_count huge
+        reject(&bad, "skip index truncated");
+    }
+
     #[test]
     fn index_and_search_ranks_by_relevance() {
         let mut pager = pager(4096);
@@ -1092,7 +1491,12 @@ mod tests {
         // duplicates, a keep filter, and vanished records.
         let mut pager = pager(4096);
         let mut docs: Vec<String> = Vec::new();
-        for i in 0..240 {
+        // Above SKIP_MIN_DOC_FREQ so "common"'s postings carry a real skip
+        // index (several blocks) under the version-5 layout: this equivalence
+        // test then also proves `search` matches the exhaustive oracle when the
+        // skip layout is the on-disk form (DoD: identical results with skip).
+        let corpus = SKIP_MIN_DOC_FREQ + 133;
+        for i in 0..corpus {
             // Every doc shares "common"; its tf and the doc length vary so
             // bounds and exact scores disagree in both directions, and the
             // cycles (7, 23) repeat content so exact score ties occur.
@@ -1315,11 +1719,12 @@ mod tests {
         assert_eq!(hits.len(), 3);
     }
 
-    /// A file created by this build (`format_version` 4) stores postings in
-    /// the delta+varint layout — verified on the raw dictionary body, not
-    /// just through `search`.
+    /// A file created by this build (`format_version` 5) stores postings in
+    /// the skip layout — verified on the raw dictionary body. A small term
+    /// carries `block_count = 0` (no skip index, plain delta+varint entries),
+    /// so it costs just 4 bytes over the version-4 body.
     #[test]
-    fn new_files_store_postings_as_delta_varint() {
+    fn new_files_store_postings_as_delta_varint_skip() {
         let mut pager = pager(4096);
         assert_eq!(pager.header().format_version, crate::format::FORMAT_VERSION);
         let ids = index_all(&mut pager, &["memory one", "memory two", "memory three"]);
@@ -1329,14 +1734,113 @@ mod tests {
         let (body, page_no) = dict::get(&pager, FTS_DICT, meta.dict_root, b"memory")
             .unwrap()
             .unwrap();
-        // Strictly smaller than the fixed-width footprint for 3 entries…
+        // Small term → block_count = 0, and still smaller than the fixed-width
+        // footprint for 3 entries even with the 4-byte skip-count prefix.
+        assert_eq!(le_block_count(&body), 0);
         assert!(body.len() < 4 + 3 * POSTING_LEN);
-        // …and it decodes (only) as the new layout to exactly those ids.
-        let decoded = Postings::decode(&body, page_no, PostingsLayout::DeltaVarint).unwrap();
+        // Decodes (only) as the skip layout to exactly those ids.
+        let decoded = Postings::decode(&body, page_no, PostingsLayout::DeltaVarintSkip).unwrap();
         let got: Vec<Ulid> = decoded.entries.iter().map(|p| p.record_id).collect();
         let mut expected = ids.clone();
         expected.sort();
         assert_eq!(got, expected);
+    }
+
+    /// Cross-version round-trip (S26 part 2, `docs/adr/0022`): a
+    /// `format_version` 4 file — created before the skip layout existed —
+    /// keeps reading and writing the skip-less delta+varint layout under this
+    /// (version-5) build, staying uniform so the build that wrote it can still
+    /// read it back. This is the "old file always readable" guarantee.
+    #[test]
+    fn format_version_4_file_reads_and_writes_skipless_postings() {
+        let vfs: Arc<dyn Vfs> = Arc::new(SimVfs::new());
+        let opts = PagerOptions {
+            page_size: 4096,
+            format_version: 4,
+            ..Default::default()
+        };
+        let mut pager = Pager::create(Arc::clone(&vfs), Path::new("memory.mind"), opts).unwrap();
+        // Enough shared-term entries that a version-5 file *would* carry a skip
+        // index — proving the v4 file deliberately does not.
+        let mut docs = Vec::new();
+        for i in 0..(SKIP_MIN_DOC_FREQ + 20) {
+            docs.push(format!("shared unique{i:04}"));
+        }
+        let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+        let ids = index_all(&mut pager, &doc_refs);
+        let mut contents = std::collections::HashMap::new();
+        for (id, d) in ids.iter().zip(&docs) {
+            contents.insert(*id, d.clone());
+        }
+
+        // The stored "shared" body is plain delta+varint (no block_count
+        // prefix): it decodes as DeltaVarint and must *fail* as DeltaVarintSkip
+        // only by coincidence — instead we assert it decodes to the full list
+        // under the v4 layout, which is the file's declared layout.
+        let meta = load_meta(&pager, pager.header().fts_root_page)
+            .unwrap()
+            .unwrap();
+        let (body, page_no) = dict::get(&pager, FTS_DICT, meta.dict_root, b"shared")
+            .unwrap()
+            .unwrap();
+        let decoded = Postings::decode(&body, page_no, PostingsLayout::DeltaVarint).unwrap();
+        assert_eq!(decoded.entries.len(), SKIP_MIN_DOC_FREQ + 20);
+
+        let root = pager.header().fts_root_page;
+        let hits = search(&pager, root, "shared", 5000, |_| true, len_of(&contents)).unwrap();
+        assert_eq!(hits.len(), SKIP_MIN_DOC_FREQ + 20);
+        pager.close().unwrap();
+
+        // Reopen: still v4, and a write extends it in the same skip-less layout.
+        let mut pager = Pager::open(
+            Arc::clone(&vfs),
+            Path::new("memory.mind"),
+            PagerOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(pager.header().format_version, 4);
+        let new_ids = index_all(&mut pager, &["shared fresh entry"]);
+        contents.insert(new_ids[0], "shared fresh entry".to_owned());
+        let meta = load_meta(&pager, pager.header().fts_root_page)
+            .unwrap()
+            .unwrap();
+        let (body, page_no) = dict::get(&pager, FTS_DICT, meta.dict_root, b"shared")
+            .unwrap()
+            .unwrap();
+        assert!(Postings::decode(&body, page_no, PostingsLayout::DeltaVarint).is_ok());
+        let root = pager.header().fts_root_page;
+        let hits = search(&pager, root, "shared", 5000, |_| true, len_of(&contents)).unwrap();
+        assert_eq!(hits.len(), SKIP_MIN_DOC_FREQ + 21);
+    }
+
+    /// A version-5 file's large postings body genuinely carries a skip index
+    /// (block_count > 0), and `search` returns the full list through it.
+    #[test]
+    fn new_files_store_large_postings_with_a_skip_index() {
+        let mut pager = pager(4096);
+        let mut docs = Vec::new();
+        for i in 0..(SKIP_MIN_DOC_FREQ + 40) {
+            docs.push(format!("shared unique{i:04}"));
+        }
+        let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+        let ids = index_all(&mut pager, &doc_refs);
+        let mut contents = std::collections::HashMap::new();
+        for (id, d) in ids.iter().zip(&docs) {
+            contents.insert(*id, d.clone());
+        }
+        let meta = load_meta(&pager, pager.header().fts_root_page)
+            .unwrap()
+            .unwrap();
+        let (body, _) = dict::get(&pager, FTS_DICT, meta.dict_root, b"shared")
+            .unwrap()
+            .unwrap();
+        assert!(
+            le_block_count(&body) > 0,
+            "large term must carry a skip index"
+        );
+        let root = pager.header().fts_root_page;
+        let hits = search(&pager, root, "shared", 5000, |_| true, len_of(&contents)).unwrap();
+        assert_eq!(hits.len(), SKIP_MIN_DOC_FREQ + 40);
     }
 
     /// FTS_POSTINGS overflow chains under the new layout: enough shared-term
