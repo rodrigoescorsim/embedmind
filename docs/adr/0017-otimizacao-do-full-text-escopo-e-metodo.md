@@ -173,43 +173,47 @@ Relatório bruto: [`benches/results/profile-fts-10k-ftopt0.txt`](../../benches/r
 
 9.470.479 candidatos distintos re-checados no total (1000 queries).
 
-### `agent-mem-100k` (1000 queries) — pendente, prerequisito manual do founder
+### `agent-mem-100k` (1000 queries)
 
-A rodada @ 100k **não coube no orçamento desta sessão**: o binário em release roda ~5-8x mais
-lento quando lançado em background com CPU reduzida (mesmo padrão de lentidão já observado em
-sessões anteriores da fase FT — ver as notas de falha-de-run da FT1/FT4/FT5 no histórico do
-projeto), e às 1000 queries em ~8 min só tinha completado 250/1000. O processo foi encerrado para
-não segurar o lock single-writer do arquivo (`docs/adr/0006`) além do tempo desta sessão.
+A rodada @ 100k inicialmente não coube em três tentativas seguidas nesta sessão (o binário parava
+consistentemente perto de 250-300/1000 queries) — investigação por processo (`Get-Process` no
+Windows, não só `ps aux`/`tasklist` do shell Bash) revelou processos residuais de tentativas
+anteriores ainda segurando o lock single-writer do arquivo (`docs/adr/0006`), não um bug real de
+performance. Depois de confirmar ambiente limpo (nenhum processo `embedmind`/`profile_fts` vivo) e
+rebuildar o binário, a 4ª tentativa completou as 1000 queries normalmente. Relatório bruto:
+[`benches/results/profile-fts-100k-ftopt0.txt`](../../benches/results/profile-fts-100k-ftopt0.txt).
 
-A instrumentação está pronta e testada (unit test dedicado, `cargo test --workspace` verde,
-resultado @10k acima confirma que o mecanismo de contagem funciona sobre dado real). Falta só
-rodar, em primeiro plano, sem outro processo competindo pelo arquivo:
+| outcome | contagem | fração |
+|---|---:|---:|
+| aceito (carga de conteúdo inevitável) | 92.525.963 | 99,9% |
+| rejeitado: tombstoned/ausente/superseded | 67.296 | 0,1% |
+| rejeitado: fora de escopo (projeto/agente) | 0 | 0,0% |
+| rejeitado: filtro de metadados | 0 | 0,0% |
+| **rejeitado (qualquer motivo)** | **67.296** | **0,1%** |
 
-```
-cargo run -p embedmind-bench --release --bin profile_fts -- agent-mem-100k > benches/results/profile-fts-100k-ftopt0.txt
-```
-
-e colar a tabela `## FTOPT-0: keep outcome breakdown` resultante nesta seção.
+92.593.259 candidatos distintos re-checados no total (1000 queries).
 
 ### Implicação para o teto de ganho da FTOPT-1
 
-Com base no número confirmado @ 10k (a medição @ 100k fica pendente — ver acima, mas não há razão
-estrutural para o corpus de 100k ter uma proporção de tombstone por candidato muito diferente,
-já que o gerador do harness aplica a mesma taxa de forget/supersede em ambos os tamanhos): a
-esmagadora maioria dos candidatos que `keep` recarrega **é aceita**, não rejeitada — no corpus
-sintético usado pelo harness (que não popula filtros de escopo/agente/metadados na maior parte dos
-registros), a rejeição vem quase inteiramente de tombstone, uma fração pequena (~2%). Isso significa
-que uma otimização que evite a recarga do registro **somente para candidatos rejeitados** — por
-exemplo, indexar um bit de "vivo" mais leve que o registro inteiro só para poder pular tombstoned
-sem tocar o B-tree principal — teria um teto de ganho baixo neste corpus: ela economizaria I/O em
-no máximo ~2-3% dos candidatos, deixando os ~97-98% restantes (aceitos) pagando o mesmo custo de
-recarga que pagam hoje, porque o conteúdo precisa ser lido de qualquer forma para devolver o `Hit`.
+Os dois tamanhos confirmam e reforçam a mesma leitura: a esmagadora maioria dos candidatos que
+`keep` recarrega **é aceita**, não rejeitada — e a fração de rejeitados **cai** com a escala (2,1%
+@10k → 0,1% @100k), o oposto do que seria necessário para uma otimização de "pular I/O nos
+rejeitados" compensar. No corpus sintético (que não popula filtros de escopo/agente/metadados na
+maior parte dos registros), a rejeição vem quase inteiramente de tombstone, e essa fração encolhe
+ainda mais em corpus maior (mais candidatos "de verdade" por query, a mesma quantidade absoluta de
+tombstones). Isso significa que uma otimização que evite a recarga do registro **somente para
+candidatos rejeitados** — por exemplo, indexar um bit de "vivo" mais leve que o registro inteiro só
+para poder pular tombstoned sem tocar o B-tree principal — teria um teto de ganho **baixíssimo** em
+escala real: no máximo ~0,1% dos candidatos @100k, deixando os ~99,9% restantes (aceitos) pagando o
+mesmo custo de recarga que pagam hoje, porque o conteúdo precisa ser lido de qualquer forma para
+devolver o `Hit`.
 
-Isto **não decide** se a FTOPT-1 (ou qualquer otimização de metadados leves) deve prosseguir, ser
-redesenhada para atacar o caso aceito (não só o rejeitado), ou ser abandonada — essa é uma decisão
-de produto/arquitetura do founder. Esta task apenas mede e reporta o número que a decisão precisa.
-A confirmação @ 100k (prerequisito manual acima) deve ser rodada antes de qualquer decisão de
-prosseguir com a FTOPT-1, para descartar que a escala muda a proporção.
+Isto **não decide** se a FTOPT-1 (ou qualquer otimização de metadados leves) deve prosseguir como
+desenhada originalmente, ser redesenhada para atacar o caso aceito (não só o rejeitado — por
+exemplo, acelerando a própria carga do conteúdo para todo candidato, não só evitando carregá-lo
+quando rejeitado), ou ser abandonada — essa é uma decisão de produto/arquitetura do founder. Esta
+task apenas mede e reporta o número que a decisão precisa; com os dois tamanhos confirmados, não há
+mais dúvida de metodologia pendente.
 
 ## Fechamento da fase FT — números finais @ 10k e @ 100k
 
