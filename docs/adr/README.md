@@ -32,5 +32,6 @@ vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvi
 | [0020](0020-rss-de-pico-era-o-harness-nao-o-engine.md) | RSS de pico @ 100k era o harness (VectorSet de baseline), não o engine | Aceito |
 | [0021](0021-postings-fts-delta-varint.md) | Postings FTS comprimidas com delta+varint (`format_version` 4) | Aceito |
 | [0022](0022-postings-fts-skip-lists.md) | Skip lists nas postings FTS grandes (`format_version` 5) | Aceito |
+| [0023](0023-blockmax-wand-decisao-fase-bmw.md) | BlockMax-WAND para fechar o NFR de latência do full-text (decisão do founder) | Aceito |
 
 Template: `Status · Contexto · Decisão · Alternativas rejeitadas · Consequências`.
