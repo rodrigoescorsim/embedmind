@@ -166,6 +166,18 @@ Veredito completo e causa raiz em
 [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) §"Fechamento da fase BMW" e
 [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md) §"BMW-3".
 
+## Fase FTOPT — atacar o custo real do `keep` (pós-BMW, 13/jul/2026)
+
+Com o BMW reprovado por falta de blocos puláveis, o alvo voltou ao custo dominante medido na FT1:
+a recarga do registro completo por candidato na closure `keep` (88,8% do tempo @100k, ADR 0017).
+
+| # | Task | Status |
+|---|---|---|
+| FTOPT-0 | Profiling confirmatório do `keep` (breakdown aceito × rejeitado, `KeepOutcome`) @10k e @100k | ✅ ENTREGUE — 97,9% aceitos @10k, **99,9% @100k**: "pular I/O nos rejeitados" tem teto ~0,1% (ADR 0017 §FTOPT-0) |
+| FTOPT-1 | Filter-meta sidecar (`format_version` 7, [ADR 0027](docs/adr/0027-filter-meta-sidecar-fv7.md)): `record_id → (flags, project, agent, doc_len)` fora do registro, escrito na mesma transação; `keep`/`doc_len` decidem sem tocar o B-tree para aceitos E rejeitados; registro completo só para top-k e filtros custom. Redesenho imposto pelo dado da FTOPT-0 | ✅ ENTREGUE (equivalência vs. oráculo fv6, crash sweep, fuzz; ganho @100k **não medido** — fica para a task de fechamento) |
+| FTOPT-2 | `doc_len` (se ainda relevante após o sidecar, que já o serve) | ⬜ |
+| FTOPT-4 | Medição @100k pelo harness oficial e veredito do NFR `recall p99 < 50 ms` — decisão de produto do founder sobre o resultado | ⬜ |
+
 ---
 
 ## Pós-90 dias (M4–M6, condicionado a GO)

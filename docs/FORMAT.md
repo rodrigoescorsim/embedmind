@@ -66,13 +66,15 @@ Format-level guarantees:
 | 0x09 | FTS_POSTINGS | continuation of an oversized postings list (see §11) |
 | 0x0A | GRAPH_DICT | graph dictionary node (meta/inner/leaf; entity/memory key → value, see §12) |
 | 0x0B | GRAPH_OVERFLOW | continuation of an oversized graph value (see §12) |
+| 0x0C | FILTER_META | filter-meta sidecar entries (fixed-size `record_id → flags/scope/doc_len`, see §13) |
+| 0x0D | FILTER_SYMBOLS | filter-meta symbol table (interned project/agent strings, see §13) |
 
 ## 4. Header (page 0)
 
 | offset | size | field | notes |
 |---|---|---|---|
 | 0 | 8 | magic | ASCII `MINDFMT1` |
-| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12); **4** once postings bodies are delta+varint encoded (ADR 0021, §11); **5** once large postings bodies carry a skip index (ADR 0022, §11); **6** once each skip entry carries the block's `last_id` (per-block impact bound for BlockMax-WAND) (ADR 0024, §11) |
+| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12); **4** once postings bodies are delta+varint encoded (ADR 0021, §11); **5** once large postings bodies carry a skip index (ADR 0022, §11); **6** once each skip entry carries the block's `last_id` (per-block impact bound for BlockMax-WAND) (ADR 0024, §11); **7** once the filter-meta sidecar exists (ADR 0027, §13) |
 | 12 | 4 | `page_size` (u32) | default 4096 |
 | 16 | 8 | `page_count` (u64) | total pages incl. header |
 | 24 | 8 | `root_btree_page` (u64) | record B-tree root |
@@ -87,7 +89,9 @@ Format-level guarantees:
 | 148 | 8 | `kdf_params` | reserved, zero in v1 |
 | 156 | 8 | `fts_root_page` (u64) | full-text index meta page; 0 = none (§11). Added in `format_version` 2 (ADR 0011); this offset was reserved-and-zero in v1, so a v1 file reads back with 0 = no full-text index |
 | 164 | 8 | `graph_root_page` (u64) | graph meta page; 0 = none (§12). Added in `format_version` 3 (ADR 0012); this offset was reserved-and-zero in v1/v2, so an older file reads back with 0 = no graph |
-| 172 | … | reserved (zero) | up to trailer |
+| 172 | 8 | `filter_meta_page` (u64) | newest filter-meta sidecar page; 0 = none (§13). Added in `format_version` 7 (ADR 0027); this offset was reserved-and-zero through v6, so an older file reads back with 0 = no sidecar and `keep` degrades to the full record load |
+| 180 | 8 | `filter_symbols_page` (u64) | newest filter-meta symbol-table page; 0 = none (§13); zero whenever `filter_meta_page` is zero |
+| 188 | … | reserved (zero) | up to trailer |
 | 4088 | 8 | header checksum | `xxh3_64` over bytes `[0, 4088)` |
 
 **Version policy (G4):** a reader seeing `format_version` greater than it understands MUST
@@ -443,3 +447,62 @@ All graph parsers are fully bounds-checked and panic-free — they are a fuzz
 target (`fuzz_graph_page`, [TESTING.md](TESTING.md) §3), and the record crash
 harness exercises graph pages because `remember` writes them in the same
 transaction as the record.
+
+## 13. Filter-meta sidecar
+
+Added in `format_version` 7 (decision: [ADR 0027](adr/0027-filter-meta-sidecar-fv7.md)).
+A light columnar map `record_id → (tombstone/superseded flags, project, agent,
+doc_len)` kept outside the record body, so the `keep` predicate of every
+search and BM25's `doc_len` callback answer from an in-memory table instead of
+one full B-tree record load per candidate (the FT1/FTOPT-0 hot spot, ADR
+0017). It is **derived data**: the record is always the authority, the sidecar
+is written from the same record bytes in the same transaction and can never
+legitimately disagree; any situation the sidecar cannot decide falls back to
+the record — never a wrong answer.
+
+The header's `filter_meta_page` / `filter_symbols_page` (§4) point at the
+**newest** page of two chains (`next_page` = the older page, so an append
+rewrites at most the head page). `0` = no sidecar (any `format_version` ≤ 6
+file), and searches degrade to the full record-load path — never an error.
+`embedmind vacuum` rebuilds the sidecar dense, and its rebuild-by-copy is the
+upgrade path for older files.
+
+- **FILTER_META** (0x0C): `entry_count` fixed-size 29-byte entries after the
+  common header:
+
+  | offset | size | field |
+  |---|---|---|
+  | 0 | 16 | `record_id` (ULID, big-endian per the ULID spec) |
+  | 16 | 1 | `flags` — bit 0 tombstone, bit 1 superseded, bit 2 has_metadata, bit 3 scope_overflow; other bits reserved (written zero, ignored on read) |
+  | 17 | 4 | `project_sym` (u32) — symbol id of the record's project; 0 = global |
+  | 21 | 4 | `agent_sym` (u32) — symbol id of the record's provenance agent; 0 = empty |
+  | 25 | 4 | `doc_len` (u32) — BM25 token count of the record's content (§11), captured at write time; content is immutable after `remember`, so it never goes stale |
+
+  Every write of a `MemoryRecord` (`remember`, `forget`, supersede, vacuum's
+  re-insert) **appends** one entry for that id in the same transaction; the
+  newest occurrence of an id wins when the sidecar is materialized. A hostile
+  `entry_count` is validated against the page size before anything is read.
+
+- **FILTER_SYMBOLS** (0x0D): `entry_count` variable-size entries after the
+  common header, each `sym_id` (u32, never 0 — 0 is the reserved "no string"
+  id) + `len` (u16) + UTF-8 bytes. Symbols are interned once per distinct
+  project/agent string and never removed; ids must be unique across the whole
+  chain (duplicate = corrupt file, typed error). A string longer than one
+  page (or a full u32 symbol space) is **not** interned: the referencing
+  entry sets `scope_overflow` instead, and scoped/agent-filtered queries load
+  the record for that id — correctness over speed.
+
+**Reading.** The whole sidecar is materialized into memory (≈ 29 bytes/entry;
+~2.9 MiB at 100k memories) and cached against the header's `txn_counter`.
+Per query, scope/agent strings resolve to symbol ids once; per candidate the
+decision is integer comparisons. Undecidable cases (missing entry,
+`scope_overflow`, custom metadata filters against a record whose
+`has_metadata` bit is set) re-run the full record predicate, keeping results
+byte-identical to the pre-sidecar path. Chain walks refuse pointer cycles as
+typed errors.
+
+All sidecar parsers are fully bounds-checked and panic-free — they are a fuzz
+target (`fuzz_filter_meta_page`, [TESTING.md](TESTING.md) §3), and a dedicated
+crash sweep (`crash_filter_meta.rs`, TESTING.md §2) proves the
+sidecar-agrees-with-records invariant after recovery from every injected
+crash point.

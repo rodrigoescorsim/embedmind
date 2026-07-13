@@ -15,6 +15,27 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Filter-meta sidecar — `format_version` 7** (FTOPT-1,
+  [ADR 0027](docs/adr/0027-filter-meta-sidecar-fv7.md), 2026-07-13). FT1/FTOPT-0
+  ([ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md)) measured
+  the `keep` closure — one full B-tree record load per evaluated candidate, just
+  to re-read tombstone/scope — at **88.8%** of full-text query time @100k, and
+  showed 99.9% of candidates are *accepted* at that scale, killing the original
+  "skip I/O on rejected candidates" design (ceiling ~0.1%). Redesign: `keep`
+  only needs the *decision* and BM25 only needs `doc_len`, neither of which
+  requires the record body — so a light columnar sidecar
+  (`record_id → flags/project/agent/doc_len`, new `FILTER_META`/`FILTER_SYMBOLS`
+  pages, FORMAT.md §13) now serves accepted and rejected candidates alike; the
+  full record is loaded only for the final top-k hits and for custom metadata
+  filters. Written in the **same transaction** as the record it mirrors (same
+  WAL crash guarantees; dedicated injection sweep `crash_filter_meta.rs` +
+  fuzz target `fuzz_filter_meta_page`). Additive bump, same pattern as v4/v5/v6:
+  a v≤6 file keeps its layout and its full-record `keep` path — result
+  equivalence against a genuine v6 oracle is part of the test suite
+  (`tests/filter_meta.rs`) — and `vacuum`'s rebuild-by-copy is the upgrade path.
+  **No @100k gain is claimed here**: measuring it is FTOPT-4's job, and whether
+  the resulting number closes the `recall p99 < 50 ms` NFR (or another route is
+  taken) remains the founder's call.
 - **Full-text-only (BM25) external comparison: EmbedMind vs. tantivy** (founder
   review 2026-07-13) — the measurement gap flagged in the same review that
   produced BMW-3/BMW-4/BMW-5: every prior external comparison

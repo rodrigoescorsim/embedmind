@@ -57,6 +57,7 @@ invariant violation and becomes a regression test.
 | I3 | No effect of an unconfirmed transaction is visible (no half-records, no dangling vec_refs, no orphan HNSW nodes). |
 | I4 | Every page checksum in main file + surviving WAL prefix validates. |
 | I5 | `recall` over the survivors returns the same results as the in-memory reference model (§4) fed only the confirmed operations. |
+| I6 | The filter-meta sidecar agrees with the records (every record has an entry whose liveness, scope symbols and `doc_len` match — `crash_filter_meta.rs`, ADR 0027). |
 
 Windows runs the **same harness** in CI — `FlushFileBuffers` and `LockFileEx` paths are
 exactly the dogfooding-where-nobody-tests advantage, so they are first-class, not a port.
@@ -71,6 +72,7 @@ Targets (each a `fuzz_target!` over arbitrary bytes):
 | `fuzz_page` | each page type's parser, including slot directories and overflow chains |
 | `fuzz_fts_page` | full-text dictionary (meta/inner/leaf) and postings parsers — every input decoded under **all four** postings layouts (fixed-width v ≤ 3, delta+varint v4 (ADR 0021), delta+varint+skip with the v5 24-byte and v6 40-byte skip entry (ADR 0022/0024)), plus the block-skipping lookup over the same bytes under both entry widths, plus opening and walking a BlockMax-WAND cursor (`BmwCursor`, ADR 0025) over the same hostile bytes — incl. variable-length terms, huge counts, hostile varints and corrupt skip indexes (§11, ADR 0011) |
 | `fuzz_graph_page` | graph dictionary nodes, overflow chains, and the entity-members/adjacency value bodies (§12, ADR 0012) |
+| `fuzz_filter_meta_page` | filter-meta sidecar entry and symbol-table page parsers — hostile entry counts, symbol lengths, reserved-id 0, invalid UTF-8 (FORMAT §13, ADR 0027); chain-cycle refusal is covered by the module's own tests since walking needs a page source |
 | `fuzz_wal_replay` | full recovery: arbitrary WAL bytes against a valid base file |
 | `fuzz_record` | `MemoryRecord` deserialization, incl. tagged scalars and huge length prefixes |
 | `fuzz_open_full` | end-to-end: arbitrary bytes as a whole `.mind` file → `Store::open` must return `Ok` or a typed error, never panic/UB/OOM |
