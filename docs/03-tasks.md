@@ -520,6 +520,14 @@ arquivo de versão anterior continua legível pelo layout antigo, nunca erro.
   path exige reescrever a passada de bounds do scan em BlockMax-WAND (risco de
   equivalência, task própria) — esta entrega é o formato + estrutura. Medição
   @ 100k que fecha o NFR e o ADR 0017 fica para a task de fechamento da fase FT.
+- **Fechamento da fase FT (2026-07-13):** ADR 0017 recebeu a seção final de
+  números (`benches/results/0.1.0-dev.json`, rodada oficial pós-FT2+FT3-parte-1):
+  `recall` p99 @ 100k caiu de 1.224,62 ms para 224,88 ms (~5,4x) — **NFR < 50 ms
+  segue reprovado**, honestamente registrado, não enterrado. recall@10 e RSS
+  aprovados em ambos os datasets. Decisão de prosseguir com BlockMax-WAND (para
+  ativar o skip index de fv5 no hot path) vs. aceitar 224,88 ms como limitação
+  de escala documentada para o M1 **fica pendente do founder** — nenhuma das
+  duas escolhida nesta task, que é só a contabilidade dos números.
 
 ### FT4. Fechar o recall de pior-caso @ 100k (story S27) — independente de FT1-FT3
 
