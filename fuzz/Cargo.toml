@@ -65,6 +65,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_filter_meta_page"
+path = "fuzz_targets/fuzz_filter_meta_page.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
 

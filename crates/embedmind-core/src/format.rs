@@ -55,7 +55,17 @@ pub const WAL_MAGIC: [u8; 8] = *b"MINDWAL1";
 ///   by the file's version, never mixed" rule as versions 4/5; a version-≤5 file
 ///   keeps reading and writing its own layout, and `vacuum` re-encodes it into a
 ///   fresh version-6 file. No header field or page type changes.
-pub const FORMAT_VERSION: u32 = 6;
+/// - `7` (FTOPT-1, `docs/adr/0027`): adds the **filter-meta sidecar** — a light
+///   columnar map `record_id → (tombstone/superseded flags, project, agent,
+///   doc_len)` (`FilterMeta`/`FilterSymbols` pages + the `filter_meta_page` and
+///   `filter_symbols_page` header fields, both previously reserved-zero), so
+///   the `keep` predicate of every search decides liveness/scope and BM25
+///   length normalization from an in-memory table instead of one full B-tree
+///   record load per candidate. Written in the same transaction as the record
+///   it mirrors, never independently. An older file decodes with both roots 0
+///   = no sidecar, and `keep` degrades to the full record load — never an
+///   error; `vacuum`'s rebuild-by-copy is the upgrade path.
+pub const FORMAT_VERSION: u32 = 7;
 
 /// Default page size in bytes. The authoritative value for an existing file is
 /// the one recorded in its header.
@@ -119,6 +129,14 @@ pub enum PageType {
     /// body spilled out of its dictionary leaf cell, chained like
     /// [`PageType::FtsPostings`] (`docs/FORMAT.md` §12).
     GraphOverflow = 0x0B,
+    /// Filter-meta sidecar entries (`docs/FORMAT.md` §13, `docs/adr/0027`):
+    /// fixed-size `record_id → (flags, project_sym, agent_sym, doc_len)`
+    /// entries, newest page first (`next_page` points at the older page).
+    FilterMeta = 0x0C,
+    /// Filter-meta symbol table (`docs/FORMAT.md` §13): the interned
+    /// project/agent strings the sidecar entries reference by `u32` id,
+    /// chained newest-first like [`PageType::FilterMeta`].
+    FilterSymbols = 0x0D,
 }
 
 impl PageType {
@@ -137,6 +155,8 @@ impl PageType {
             0x09 => Some(PageType::FtsPostings),
             0x0A => Some(PageType::GraphDict),
             0x0B => Some(PageType::GraphOverflow),
+            0x0C => Some(PageType::FilterMeta),
+            0x0D => Some(PageType::FilterSymbols),
             _ => None,
         }
     }
@@ -241,6 +261,12 @@ const OFF_FTS_ROOT: usize = 156;
 // `graph_root_page` (docs/adr/0012) lives at offset 164, reserved-and-zero
 // through format_version 2 — an older file reads back with no graph (root 0).
 const OFF_GRAPH_ROOT: usize = 164;
+// `filter_meta_page` and `filter_symbols_page` (docs/adr/0027) live at offsets
+// 172 and 180, reserved-and-zero through format_version 6 — an older file
+// reads back with no filter-meta sidecar (both roots 0), the same degradation
+// pattern as the full-text and graph roots.
+const OFF_FILTER_META: usize = 172;
+const OFF_FILTER_SYMBOLS: usize = 180;
 
 /// Minimum prefix of page 0 needed by [`Header::peek_page_size`].
 pub const HEADER_PEEK_LEN: usize = 16;
@@ -271,6 +297,14 @@ pub struct Header {
     /// §12). Always 0 in a file written by format_version ≤ 2 (the bytes were
     /// reserved), so older files degrade to "no related memories".
     pub graph_root_page: u64,
+    /// Newest filter-meta sidecar page; 0 = no sidecar (`docs/adr/0027`,
+    /// `docs/FORMAT.md` §13). Always 0 in a file written by format_version
+    /// ≤ 6 (the bytes were reserved), so older files degrade to the full
+    /// record-load `keep` path.
+    pub filter_meta_page: u64,
+    /// Newest filter-meta symbol-table page; 0 = no interned strings yet
+    /// (`docs/FORMAT.md` §13). Zero whenever `filter_meta_page` is zero.
+    pub filter_symbols_page: u64,
     /// Last committed transaction id.
     pub txn_counter: u64,
     /// Embedding dimensions (0 = embeddings not configured yet).
@@ -299,6 +333,8 @@ impl Header {
             hnsw_meta_page: 0,
             fts_root_page: 0,
             graph_root_page: 0,
+            filter_meta_page: 0,
+            filter_symbols_page: 0,
             txn_counter: 0,
             embedding_dims: 0,
             embedding_quant: 0,
@@ -353,6 +389,8 @@ impl Header {
         // kdf_salt (132..148) and kdf_params (148..156) stay zero in v1.
         write_u64(page, OFF_FTS_ROOT, self.fts_root_page);
         write_u64(page, OFF_GRAPH_ROOT, self.graph_root_page);
+        write_u64(page, OFF_FILTER_META, self.filter_meta_page);
+        write_u64(page, OFF_FILTER_SYMBOLS, self.filter_symbols_page);
         stamp_page_checksum(page);
         Ok(())
     }
@@ -415,6 +453,10 @@ impl Header {
             // Reserved-and-zero through format_version 2: older files decode
             // with no graph, same degradation pattern (docs/adr/0012).
             graph_root_page: read_u64(page, OFF_GRAPH_ROOT).ok_or(Error::BadHeader)?,
+            // Reserved-and-zero through format_version 6: older files decode
+            // with no filter-meta sidecar (docs/adr/0027).
+            filter_meta_page: read_u64(page, OFF_FILTER_META).ok_or(Error::BadHeader)?,
+            filter_symbols_page: read_u64(page, OFF_FILTER_SYMBOLS).ok_or(Error::BadHeader)?,
             txn_counter: read_u64(page, OFF_TXN_COUNTER).ok_or(Error::BadHeader)?,
             embedding_dims: read_u16(page, OFF_DIMS).ok_or(Error::BadHeader)?,
             embedding_quant: read_u16(page, OFF_QUANT).ok_or(Error::BadHeader)?,
@@ -961,6 +1003,8 @@ mod tests {
             hnsw_meta_page: 9,
             fts_root_page: 11,
             graph_root_page: 13,
+            filter_meta_page: 15,
+            filter_symbols_page: 17,
             txn_counter: 1234,
             embedding_dims: 384,
             embedding_quant: 0,
@@ -1015,6 +1059,8 @@ mod tests {
         h.format_version = 1;
         h.fts_root_page = 0;
         h.graph_root_page = 0;
+        h.filter_meta_page = 0;
+        h.filter_symbols_page = 0;
         let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
         h.encode(&mut page).unwrap();
         // Bytes at OFF_FTS_ROOT must be zero — nothing a v1 writer would touch.
@@ -1034,6 +1080,8 @@ mod tests {
         let mut h = sample_header();
         h.format_version = 2;
         h.graph_root_page = 0;
+        h.filter_meta_page = 0;
+        h.filter_symbols_page = 0;
         let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
         h.encode(&mut page).unwrap();
         assert_eq!(read_u64(&page, OFF_GRAPH_ROOT), Some(0));
@@ -1041,6 +1089,28 @@ mod tests {
         assert_eq!(back.format_version, 2);
         assert_eq!(back.fts_root_page, 11, "v2 keeps its full-text index");
         assert_eq!(back.graph_root_page, 0);
+    }
+
+    #[test]
+    fn version_6_file_decodes_with_no_filter_meta() {
+        // A format_version ≤ 6 file had offsets 172/180 reserved-and-zero.
+        // Simulate one and confirm it decodes cleanly with both filter-meta
+        // roots 0 — the degradation path that keeps the full record-load
+        // `keep` for pre-sidecar files (docs/adr/0027).
+        let mut h = sample_header();
+        h.format_version = 6;
+        h.filter_meta_page = 0;
+        h.filter_symbols_page = 0;
+        let mut page = vec![0u8; DEFAULT_PAGE_SIZE as usize];
+        h.encode(&mut page).unwrap();
+        assert_eq!(read_u64(&page, OFF_FILTER_META), Some(0));
+        assert_eq!(read_u64(&page, OFF_FILTER_SYMBOLS), Some(0));
+        let back = Header::decode(&page).unwrap();
+        assert_eq!(back.format_version, 6);
+        assert_eq!(back.fts_root_page, 11, "v6 keeps its full-text index");
+        assert_eq!(back.graph_root_page, 13, "v6 keeps its graph");
+        assert_eq!(back.filter_meta_page, 0);
+        assert_eq!(back.filter_symbols_page, 0);
     }
 
     #[test]

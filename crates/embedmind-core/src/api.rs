@@ -91,6 +91,12 @@ pub struct Store {
     /// rebuilt file and post-swap reopen keep the same tuning rather than
     /// silently reverting to a default.
     checkpoint_threshold: u64,
+    /// The filter-meta sidecar (`docs/adr/0027`) materialized in memory,
+    /// keyed on the `txn_counter` it was built from — any commit bumps the
+    /// counter and naturally invalidates it. `RwLock` (not `RefCell`) so
+    /// shared `&self` queries can fill it without giving up `Sync`; the
+    /// on-disk chains stay authoritative, this is a pure read cache.
+    filter_meta_cache: std::sync::RwLock<Option<(u64, Arc<index::filter_meta::Table>)>>,
 }
 
 impl Store {
@@ -141,6 +147,7 @@ impl Store {
             vfs,
             path: path.to_path_buf(),
             checkpoint_threshold: opts.checkpoint_threshold,
+            filter_meta_cache: std::sync::RwLock::new(None),
         };
         store.init_embedding_header()?;
         Ok(store)
@@ -168,6 +175,7 @@ impl Store {
             vfs,
             path: path.to_path_buf(),
             checkpoint_threshold: opts.checkpoint_threshold,
+            filter_meta_cache: std::sync::RwLock::new(None),
         };
         store.init_embedding_header()?;
         Ok(store)
@@ -459,12 +467,22 @@ impl Store {
         // Flag each superseded target in this same transaction: the new
         // version and the exclusion of the old one land atomically, or
         // neither does.
-        for (target, mut target_rec) in supersedes_targets {
+        for (target, target_rec) in &mut supersedes_targets {
             target_rec.superseded = true;
             btree::insert(&mut txn, target.to_bytes(), &target_rec.encode()?)?;
         }
         let bytes = record.encode()?;
         btree::insert(&mut txn, record.id.to_bytes(), &bytes)?;
+        // Filter-meta sidecar (`docs/adr/0027`): one entry per record this
+        // transaction wrote — the new memory and every re-flagged supersede
+        // target — so the sidecar and the records commit atomically.
+        let mut meta_updates = vec![filter_meta_update(&record)];
+        meta_updates.extend(
+            supersedes_targets
+                .iter()
+                .map(|(_, target_rec)| filter_meta_update(target_rec)),
+        );
+        index::filter_meta::record_updates(&mut txn, &meta_updates)?;
         txn.commit()?;
         Ok(Memory::from_record(record))
     }
@@ -531,10 +549,25 @@ impl Store {
         // the search widen, never silently under-return. A filter type
         // mismatch is a typed error, but `keep` must yield a plain `bool`, so
         // the first such error is stashed here and surfaced after the search.
+        //
+        // The filter-meta sidecar (`docs/adr/0027`) answers most candidates
+        // without touching the record B-tree; only undecidable ones (entry
+        // missing, custom metadata filters over a record that has metadata)
+        // fall through to the full record predicate below — same result,
+        // fewer loads. `None` on a pre-sidecar file: pure record path.
+        let meta = self.filter_meta()?;
+        let meta = meta.as_ref().map(|t| (t, meta_needs(t, &query)));
         let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
         let keep = |id: Ulid| -> bool {
             if filter_error.borrow().is_some() {
                 return false; // a mismatch already occurred; stop admitting
+            }
+            if let Some((table, needs)) = &meta {
+                match table.decide(id, needs) {
+                    index::filter_meta::Decision::Accept => return true,
+                    index::filter_meta::Decision::Reject(_) => return false,
+                    index::filter_meta::Decision::NeedRecord => {}
+                }
             }
             match load(id) {
                 Ok(Some(rec)) if in_scope(&query, &rec) => {
@@ -593,7 +626,17 @@ impl Store {
                 &query.text,
                 query.limit,
                 &keep,
-                |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),
+                // BM25 doc_len from the sidecar when it has the id (content is
+                // immutable, so the stored count never goes stale); the record
+                // itself only for ids the sidecar has never seen.
+                |id| {
+                    if let Some((table, _)) = &meta
+                        && let Some(entry) = table.get(id)
+                    {
+                        return Ok(Some(entry.doc_len));
+                    }
+                    Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content)))
+                },
             )?;
             if let Some(e) = filter_error.borrow_mut().take() {
                 return Err(e);
@@ -717,11 +760,21 @@ impl Store {
         };
 
         // Same live + in-scope + metadata-filter `keep` as `recall_detailed`,
-        // with the type-mismatch error stashed and surfaced after the search.
+        // with the type-mismatch error stashed and surfaced after the search,
+        // and the same sidecar fast path in front of the record load.
+        let meta = self.filter_meta()?;
+        let meta = meta.as_ref().map(|t| (t, meta_needs(t, &query)));
         let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
         let keep = |id: Ulid| -> bool {
             if filter_error.borrow().is_some() {
                 return false;
+            }
+            if let Some((table, needs)) = &meta {
+                match table.decide(id, needs) {
+                    index::filter_meta::Decision::Accept => return true,
+                    index::filter_meta::Decision::Reject(_) => return false,
+                    index::filter_meta::Decision::NeedRecord => {}
+                }
             }
             match load(id) {
                 Ok(Some(rec)) if in_scope(&query, &rec) => {
@@ -802,6 +855,10 @@ impl Store {
 
         // keep: live + in-scope + metadata filters (same re-check the vector
         // path does); a filter type mismatch is stashed and surfaced below.
+        // The filter-meta sidecar answers most candidates without a record
+        // load (`docs/adr/0027`); undecidable ones fall through to it.
+        let meta = self.filter_meta()?;
+        let meta = meta.as_ref().map(|t| (t, meta_needs(t, &query)));
         let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
         let hits = index::fts::search(
             &self.pager,
@@ -811,6 +868,13 @@ impl Store {
             |id| {
                 if filter_error.borrow().is_some() {
                     return false;
+                }
+                if let Some((table, needs)) = &meta {
+                    match table.decide(id, needs) {
+                        index::filter_meta::Decision::Accept => return true,
+                        index::filter_meta::Decision::Reject(_) => return false,
+                        index::filter_meta::Decision::NeedRecord => {}
+                    }
                 }
                 match load(id) {
                     Ok(Some(rec)) if in_scope(&query, &rec) => {
@@ -825,8 +889,17 @@ impl Store {
                     _ => false,
                 }
             },
-            // doc_len: BM25 length normalization from the current content.
-            |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),
+            // doc_len: BM25 length normalization — from the sidecar when it
+            // has the id (content is immutable, the count never goes stale),
+            // else from the current content.
+            |id| {
+                if let Some((table, _)) = &meta
+                    && let Some(entry) = table.get(id)
+                {
+                    return Ok(Some(entry.doc_len));
+                }
+                Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content)))
+            },
         )?;
         if let Some(e) = filter_error.borrow_mut().take() {
             return Err(e);
@@ -872,6 +945,11 @@ impl Store {
             Ok(rec)
         };
 
+        // The same sidecar fast path production `search_text` uses, so the
+        // timings this surface reports keep describing the production path;
+        // the sidecar's reject reason feeds the same outcome buckets.
+        let meta = self.filter_meta()?;
+        let meta = meta.as_ref().map(|t| (t, meta_needs(t, &query)));
         let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
         let (hits, timings) = index::fts::search_profiled(
             &self.pager,
@@ -879,9 +957,23 @@ impl Store {
             &query.text,
             query.limit,
             |id| {
+                use index::filter_meta::{Decision, RejectReason};
                 use index::fts::KeepOutcome;
                 if filter_error.borrow().is_some() {
                     return KeepOutcome::Tombstoned;
+                }
+                if let Some((table, needs)) = &meta {
+                    match table.decide(id, needs) {
+                        Decision::Accept => return KeepOutcome::Accepted,
+                        Decision::Reject(RejectReason::Dead) => return KeepOutcome::Tombstoned,
+                        Decision::Reject(RejectReason::OutOfScope) => {
+                            return KeepOutcome::OutOfScope;
+                        }
+                        Decision::Reject(RejectReason::FilteredOut) => {
+                            return KeepOutcome::FilteredOut;
+                        }
+                        Decision::NeedRecord => {}
+                    }
                 }
                 match load(id) {
                     Ok(Some(rec)) if !rec.tombstone && !rec.superseded => {
@@ -901,7 +993,14 @@ impl Store {
                     _ => KeepOutcome::Tombstoned,
                 }
             },
-            |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),
+            |id| {
+                if let Some((table, _)) = &meta
+                    && let Some(entry) = table.get(id)
+                {
+                    return Ok(Some(entry.doc_len));
+                }
+                Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content)))
+            },
         )?;
         if let Some(e) = filter_error.borrow_mut().take() {
             return Err(e);
@@ -950,6 +1049,10 @@ impl Store {
             Ok(rec)
         };
 
+        // Same sidecar fast path as production `search_text`, so the BMW
+        // counters this surface reports keep describing the production path.
+        let meta = self.filter_meta()?;
+        let meta = meta.as_ref().map(|t| (t, meta_needs(t, &query)));
         let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
         let (hits, counters) = index::fts::search_bmw_counted(
             &self.pager,
@@ -959,6 +1062,13 @@ impl Store {
             |id| {
                 if filter_error.borrow().is_some() {
                     return false;
+                }
+                if let Some((table, needs)) = &meta {
+                    match table.decide(id, needs) {
+                        index::filter_meta::Decision::Accept => return true,
+                        index::filter_meta::Decision::Reject(_) => return false,
+                        index::filter_meta::Decision::NeedRecord => {}
+                    }
                 }
                 match load(id) {
                     Ok(Some(rec)) if in_scope(&query, &rec) => {
@@ -973,7 +1083,14 @@ impl Store {
                     _ => false,
                 }
             },
-            |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),
+            |id| {
+                if let Some((table, _)) = &meta
+                    && let Some(entry) = table.get(id)
+                {
+                    return Ok(Some(entry.doc_len));
+                }
+                Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content)))
+            },
         )?;
         if let Some(e) = filter_error.borrow_mut().take() {
             return Err(e);
@@ -1021,6 +1138,9 @@ impl Store {
         }
         record.tombstone = true;
         btree::insert(&mut txn, key, &record.encode()?)?;
+        // The sidecar mirrors the tombstone in the same transaction
+        // (`docs/adr/0027`), so `keep` never resurrects a forgotten memory.
+        index::filter_meta::record_updates(&mut txn, &[filter_meta_update(&record)])?;
         txn.commit()?;
         Ok(true)
     }
@@ -1168,6 +1288,12 @@ impl Store {
         let parked = std::mem::replace(&mut self.pager, reopened);
         parked.close().ok();
         self.vfs.delete(&scratch).ok();
+        // The rebuilt file restarts its txn_counter, so the counter-keyed
+        // filter-meta cache could look "current" while holding the old
+        // file's table — drop it explicitly.
+        if let Ok(mut guard) = self.filter_meta_cache.write() {
+            *guard = None;
+        }
         Ok(())
     }
 
@@ -1248,6 +1374,10 @@ impl Store {
         index::graph::add_memory(&mut txn, record.id, entities, relations)?;
         let bytes = record.encode()?;
         btree::insert(&mut txn, record.id.to_bytes(), &bytes)?;
+        // Sidecar entry in the same transaction (`docs/adr/0027`) — this is
+        // also how `vacuum` upgrades a pre-sidecar file: the rebuilt copy is
+        // written at the current format_version, sidecar included.
+        index::filter_meta::record_updates(&mut txn, &[filter_meta_update(&record)])?;
         txn.commit()?;
         Ok(Memory::from_record(record))
     }
@@ -1327,6 +1457,90 @@ impl Store {
     pub fn txn_counter(&self) -> u64 {
         self.pager.header().txn_counter
     }
+
+    /// Checks the filter-meta sidecar against the records it mirrors — the
+    /// crash-harness invariant of `docs/adr/0027`: after any recovery, every
+    /// record (tombstoned included) has a sidecar entry whose liveness
+    /// decision, scope symbols and `doc_len` agree with the record itself.
+    /// A pre-sidecar file (root 0) passes trivially. Never called by
+    /// production paths; measurement/test surface only.
+    #[doc(hidden)]
+    pub fn verify_filter_meta_invariant(&self) -> Result<()> {
+        use index::filter_meta::{Decision, QueryNeeds, RejectReason, Want};
+        let Some(table) = self.filter_meta()? else {
+            return Ok(());
+        };
+        for memory in self.iter_all() {
+            let m = memory?;
+            let entry = index::filter_meta::Table::get(&table, m.id)
+                .ok_or(Error::Internal("filter-meta entry missing for a record"))?;
+            if entry.doc_len != index::fts::doc_len(&m.content) {
+                return Err(Error::Internal("filter-meta doc_len disagrees"));
+            }
+            let dead = m.tombstone || m.superseded;
+            let unscoped = QueryNeeds {
+                project: Want::Any,
+                agent: Want::Any,
+                has_metadata_filters: false,
+            };
+            match table.decide(m.id, &unscoped) {
+                Decision::Accept if !dead => {}
+                Decision::Reject(RejectReason::Dead) if dead => {}
+                _ => return Err(Error::Internal("filter-meta liveness disagrees")),
+            }
+            if dead {
+                continue; // scope wants below only ever see live entries
+            }
+            // The record's own project/agent must never be rejected; a
+            // never-interned string must never be accepted. (A global record
+            // has no project of its own — `Scope::All` stands in for it.)
+            let own = QueryNeeds {
+                project: table.want_project(m.project.as_deref()),
+                agent: table.want_agent(Some(&m.provenance.agent)),
+                has_metadata_filters: false,
+            };
+            if matches!(table.decide(m.id, &own), Decision::Reject(_)) {
+                return Err(Error::Internal("filter-meta rejects a record's own scope"));
+            }
+            let foreign = QueryNeeds {
+                project: Want::Absent,
+                agent: Want::Any,
+                has_metadata_filters: false,
+            };
+            if matches!(table.decide(m.id, &foreign), Decision::Accept) {
+                return Err(Error::Internal("filter-meta accepts an absent project"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The filter-meta sidecar (`docs/adr/0027`) materialized for the current
+    /// committed state, or `None` on a pre-sidecar file (root 0) — the `keep`
+    /// closures then fall back to the full record load, exactly the pre-FTOPT-1
+    /// behavior. Rebuilt only when `txn_counter` moved since the cached build,
+    /// so query bursts between writes pay for one materialization.
+    fn filter_meta(&self) -> Result<Option<Arc<index::filter_meta::Table>>> {
+        let header = self.pager.header();
+        if header.filter_meta_page == 0 {
+            return Ok(None);
+        }
+        let stamp = header.txn_counter;
+        if let Ok(guard) = self.filter_meta_cache.read()
+            && let Some((cached_stamp, table)) = guard.as_ref()
+            && *cached_stamp == stamp
+        {
+            return Ok(Some(Arc::clone(table)));
+        }
+        let table = Arc::new(index::filter_meta::load(
+            &self.pager,
+            header.filter_meta_page,
+            header.filter_symbols_page,
+        )?);
+        if let Ok(mut guard) = self.filter_meta_cache.write() {
+            *guard = Some((stamp, Arc::clone(&table)));
+        }
+        Ok(Some(table))
+    }
 }
 
 /// Whether a record is live, not superseded, within `query`'s project scope,
@@ -1336,6 +1550,36 @@ impl Store {
 /// re-checked against the record at query time exactly like tombstones —
 /// exclusion is never trusted to an index or to the graph. Metadata filters
 /// ([`Query::record_passes_filters`]) compose on top of this.
+/// The sidecar mirror of one record as it is being written — every write
+/// path (`remember`, `forget`, supersede, vacuum's `insert_record`) derives
+/// its filter-meta update from the exact record bytes it stores, in the same
+/// transaction, so the two can never diverge (`docs/adr/0027`).
+fn filter_meta_update(rec: &MemoryRecord) -> index::filter_meta::Update<'_> {
+    index::filter_meta::Update {
+        id: rec.id,
+        tombstone: rec.tombstone,
+        superseded: rec.superseded,
+        has_metadata: !rec.metadata.is_empty(),
+        project: rec.project.as_deref(),
+        agent: &rec.provenance.agent,
+        doc_len: index::fts::doc_len(&rec.content),
+    }
+}
+
+/// Resolves a query's scope/agent strings against the sidecar's symbol table
+/// **once per query**, so the per-candidate [`index::filter_meta::Table::decide`]
+/// compares plain `u32`s.
+fn meta_needs(table: &index::filter_meta::Table, query: &Query) -> index::filter_meta::QueryNeeds {
+    index::filter_meta::QueryNeeds {
+        project: match &query.scope {
+            Scope::All => table.want_project(None),
+            Scope::Project(p) => table.want_project(Some(p)),
+        },
+        agent: table.want_agent(query.agent.as_deref()),
+        has_metadata_filters: !query.filters.is_empty(),
+    }
+}
+
 fn in_scope(query: &Query, rec: &MemoryRecord) -> bool {
     !rec.tombstone
         && !rec.superseded

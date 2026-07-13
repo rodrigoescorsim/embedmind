@@ -194,6 +194,16 @@ fn main() {
                 page,
             );
         }
+        // Filter-meta sidecar pages (0x0C entries, 0x0D symbols) seed their
+        // own target (FTOPT-1, docs/adr/0027). The store above wrote real
+        // entries (projects, agents, one tombstone), so both chains exist.
+        if (0x0C..=0x0D).contains(&page_type) && seen.insert(page_type) {
+            write_seed(
+                "fuzz_filter_meta_page",
+                &format!("seed-type-{page_type:02x}"),
+                page,
+            );
+        }
     }
 
     // A large-vocabulary store so one term's postings body actually carries a
