@@ -69,7 +69,7 @@ Targets (each a `fuzz_target!` over arbitrary bytes):
 |---|---|
 | `fuzz_header` | header parse: magic, versions, bogus page counts/offsets, flag bit 0 set |
 | `fuzz_page` | each page type's parser, including slot directories and overflow chains |
-| `fuzz_fts_page` | full-text dictionary (meta/inner/leaf) and postings parsers — every input decoded under **both** postings layouts (fixed-width v ≤ 3 and delta+varint v4, ADR 0021), incl. variable-length terms, huge counts and hostile varints (§11, ADR 0011) |
+| `fuzz_fts_page` | full-text dictionary (meta/inner/leaf) and postings parsers — every input decoded under **all three** postings layouts (fixed-width v ≤ 3, delta+varint v4 (ADR 0021), delta+varint+skip v5 (ADR 0022)), plus the block-skipping lookup over the same bytes, incl. variable-length terms, huge counts, hostile varints and corrupt skip indexes (§11, ADR 0011) |
 | `fuzz_graph_page` | graph dictionary nodes, overflow chains, and the entity-members/adjacency value bodies (§12, ADR 0012) |
 | `fuzz_wal_replay` | full recovery: arbitrary WAL bytes against a valid base file |
 | `fuzz_record` | `MemoryRecord` deserialization, incl. tagged scalars and huge length prefixes |

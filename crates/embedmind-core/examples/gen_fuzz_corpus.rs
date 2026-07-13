@@ -65,6 +65,34 @@ fn build_store(page_size: u32) -> (SimVfs, &'static str) {
     (vfs, "seed.mind")
 }
 
+/// A store whose shared term appears in enough documents that its postings
+/// body carries a real skip index (block_count > 0) under the version-5
+/// layout — for a fuzz seed that exercises the skip-index parser branch
+/// (S26 part 2, ADR 0022).
+fn build_skip_store(page_size: u32) -> (SimVfs, &'static str) {
+    let vfs = SimVfs::new();
+    let path = Path::new("skip.mind");
+    let mut store = Store::create_with(
+        Arc::new(vfs.clone()),
+        path,
+        StoreOptions {
+            page_size,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // ≥ 4 skip blocks of 128 = 512 shared postings; a margin puts it well over.
+    for i in 0..700 {
+        store
+            .remember(MemoryDraft::new(format!(
+                "shared corpus token unique{i:04}"
+            )))
+            .unwrap();
+    }
+    store.close().unwrap();
+    (vfs, "skip.mind")
+}
+
 fn main() {
     // fuzz_header: a real header page + a fresh minimal one.
     let mut page0 = vec![0u8; DEFAULT_PAGE_SIZE as usize];
@@ -152,17 +180,42 @@ fn main() {
         // FTS dictionary (0x08) and postings (0x09) pages seed their own
         // target (docs/adr/0011). The dictionary meta/inner/leaf all share
         // 0x08; one real instance of each on-disk type is enough to start.
-        // Version-suffixed name (S26, ADR 0021): this build emits the
-        // delta+varint postings layout, and the committed unsuffixed
-        // `seed-type-08`/`seed-type-09` files stay as the fixed-width-layout
-        // seeds a format_version ≤ 3 store produced — both layouts keep a
-        // seed, so neither decode branch loses corpus coverage.
+        // Version-suffixed name (S26, ADR 0021/0022): this build emits the
+        // delta+varint+skip postings layout (format_version 5), and the
+        // committed unsuffixed `seed-type-08`/`seed-type-09` (fixed-width) and
+        // `-v4` (skip-less delta+varint) seeds stay put — every layout keeps a
+        // seed, so no decode branch loses corpus coverage.
         if (0x08..=0x09).contains(&page_type) && seen.insert(page_type) {
             write_seed(
                 "fuzz_fts_page",
-                &format!("seed-type-{page_type:02x}-v4"),
+                &format!("seed-type-{page_type:02x}-v5"),
                 page,
             );
+        }
+    }
+
+    // A large-vocabulary store so one term's postings body actually carries a
+    // skip index (block_count > 0): seeds the fuzzer with the version-5 skip
+    // layout, whose skip-index offsets/bounds are their own parser branch
+    // (S26 part 2, ADR 0022). A 512-byte page keeps such a body in an
+    // FTS_POSTINGS (0x09) chain; we capture the first chained page.
+    let (vfs, path) = build_skip_store(512);
+    Store::open_with(
+        Arc::new(vfs.clone()),
+        Path::new(path),
+        StoreOptions {
+            page_size: 512,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .close()
+    .unwrap();
+    let file = vfs.snapshot(Path::new(path)).unwrap();
+    for page in file.chunks(512).skip(1) {
+        if page[0] == 0x09 {
+            write_seed("fuzz_fts_page", "seed-postings-skip-v5", page);
+            break;
         }
     }
 

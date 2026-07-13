@@ -31,7 +31,7 @@ Format-level guarantees:
 ## 2. Encoding conventions
 
 - **Endianness:** all multi-byte integers are **little-endian**, always.
-- **Integers:** fixed-width (`u16`/`u32`/`u64`). No varints in versions ≤ 3 (simplicity > space; pages are the compression unit anyway). `format_version` 4 introduces **LEB128 varints** (7 data bits per byte, low bits first, high bit = continuation, minimal-length) in exactly one place: the entries of a full-text postings body (§11). Everything else stays fixed-width.
+- **Integers:** fixed-width (`u16`/`u32`/`u64`). No varints in versions ≤ 3 (simplicity > space; pages are the compression unit anyway). `format_version` 4 introduces **LEB128 varints** (7 data bits per byte, low bits first, high bit = continuation, minimal-length) in exactly one place: the entries of a full-text postings body (§11); `format_version` 5 keeps those varints and adds a fixed-width skip index in front of a large postings body (§11). Everything else stays fixed-width.
 - **Strings / blobs:** `u32` byte-length prefix + UTF-8 bytes (strings) or raw bytes (blobs). No NUL terminators.
 - **Checksums:** `xxh3_64` (64-bit). Stored little-endian like everything else.
 - **Nothing is `memcpy`'d from structs.** Every field is explicitly (de)serialized so the parsers are fuzzable and layout is compiler-independent (DESIGN §3.1).
@@ -72,7 +72,7 @@ Format-level guarantees:
 | offset | size | field | notes |
 |---|---|---|---|
 | 0 | 8 | magic | ASCII `MINDFMT1` |
-| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12); **4** once postings bodies are delta+varint encoded (ADR 0021, §11) |
+| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12); **4** once postings bodies are delta+varint encoded (ADR 0021, §11); **5** once large postings bodies carry a skip index (ADR 0022, §11) |
 | 12 | 4 | `page_size` (u32) | default 4096 |
 | 16 | 8 | `page_count` (u64) | total pages incl. header |
 | 24 | 8 | `root_btree_page` (u64) | record B-tree root |
@@ -303,16 +303,31 @@ so such a file degrades to vector-only recall).
   tagged per body (ADR 0021):
   - **`format_version` ≤ 3 (fixed-width):** each entry is `record_id` (ULID,
     16 raw bytes) · `term_freq` (u32) — 20 bytes.
-  - **`format_version` ≥ 4 (delta+varint):** each entry is the LEB128 varint
+  - **`format_version` 4 (delta+varint):** each entry is the LEB128 varint
     (§2) **delta** of `record_id` (as a u128) from the previous entry's,
     followed by `term_freq` as a varint. The first entry's delta is its raw
     u128 value; because the list is strictly ascending, every later delta is
     ≥ 1 — readers reject a zero delta (duplicate id), an id summing past
     `u128::MAX`, a varint longer than 19 bytes, or a `term_freq` of 0 or
     beyond u32.
-  A version-4 build reading **or writing** an older file uses that file's
-  fixed-width layout, so the file stays uniform and readable by the build
-  that created it; `vacuum`'s copy-based rebuild is the migration path.
+  - **`format_version` ≥ 5 (delta+varint + skip index):** after `doc_freq`
+    comes `block_count` (u32). `block_count = 0` means a small term (fewer than
+    512 entries): the plain delta+varint entries follow, byte-identical to the
+    version-4 body past the count. `block_count > 0` means a large term: a
+    **skip index** of `block_count` entries — each `first_id` (u128, 16 LE
+    bytes) · `byte_offset` (u32, relative to the start of the blocks region) ·
+    `max_term_freq` (u32) — followed by the blocks. Each block holds up to 128
+    entries and **re-bases its delta chain** (its first entry's delta is that
+    entry's absolute id), so a block decodes on its own and a lookup by id
+    jumps to the one block whose range can contain it (ADR 0022). Readers
+    reject a `block_count` that disagrees with `doc_freq`, a skip index that
+    overruns the body, a `byte_offset` that misses a block seam, or a stored
+    `first_id`/`max_term_freq` that disagrees with the block's decoded entries;
+    the strict-ascending order is enforced across block seams too.
+  A build reading **or writing** an older file uses that file's own layout
+  (fixed-width for v≤3, skip-less delta+varint for v4), so the file stays
+  uniform and readable by the build that created it; `vacuum`'s copy-based
+  rebuild is the migration path to the current layout.
 - **FTS_POSTINGS** pages chain an oversized postings body: common header with
   `entry_count` = payload bytes on this page (`next_page` = 0 ends the chain),
   payload at offset 16. The dictionary cell records the exact `total_len`;
@@ -333,9 +348,10 @@ memory is never re-`remember`ed (content is immutable after write), a
 
 All FTS parsers are fully bounds-checked and panic-free — they are a fuzz
 target (`fuzz_fts_page`, [TESTING.md](TESTING.md) §3, which decodes every
-input under **both** postings layouts), and the record crash harness now
-exercises FTS pages because `remember` writes them in the same transaction
-as the record.
+input under **all three** postings layouts — fixed-width, delta+varint, and
+delta+varint+skip — and drives the block-skipping lookup over the same bytes),
+and the record crash harness now exercises FTS pages because `remember` writes
+them in the same transaction as the record.
 
 ## 12. Graph layer (entities + relations)
 
