@@ -12,6 +12,7 @@
 | `sqlite-vec` (latest release, inside SQLite) | the incumbent "embedded vector search in one file" — index-layer baseline |
 | `zvec` | the closest new embedded vector store — index-layer baseline |
 | Chroma (local/embedded mode, pinned version) | the product-category competitor: a local store that also embeds (same all-MiniLM-L6-v2) — the alternative an agent developer actually weighs |
+| `tantivy` (pinned version) | the mature full-text engine ADR 0011 chose *not* to embed — a full-text-only (BM25) plane, isolated from the three vector comparisons above |
 | Brute-force exact scan (our own, in-memory) | recall ceiling + sanity floor for latency claims |
 
 Two comparison planes, always labeled and rendered as separate tables (S17):
@@ -53,6 +54,24 @@ Python subprocess (`benches/chroma_bench.py`, needs Python 3 + `pip install
 chromadb==1.5.9` on the box — an external, founder-managed dependency, the same shape as
 the sqlite-vec/zvec native toolchains) so the adapter never re-embeds: it receives the
 same pre-computed vectors every other system in the comparison does.
+
+### 1a. Full-text-only (BM25) plane: EmbedMind vs. tantivy
+
+A separate, fourth plane (`benches/src/fts_compare.rs`, gated behind `compare-tantivy`,
+pure Rust so it needs no native toolchain — the simplest of the four adapters to build):
+EmbedMind's own inverted index (`Store::search_text`, the keyword half in isolation, no
+RRF/vector fusion) against tantivy's BM25 query, on the same corpus and the same lexical
+ground-truth queries `benches/src/lexical.rs` already generates (each query's literal
+occurs in exactly one document, so recall is graded against an unambiguous target — no
+brute-force oracle needed here, unlike the three vector planes). Rendered as its own
+labeled table ("Full-text only (BM25): EmbedMind vs. tantivy"), separate from the
+index-only/text→result vector planes, since it compares two full-text engines, not a
+vector index against a vector-in baseline. This plane exists to put an external number on
+[ADR 0011](adr/0011-full-text-indice-invertido-proprio.md)'s architectural decision to
+implement full-text as our own inverted index rather than embed tantivy — **the number does
+not reopen that decision**, which was made for crash-safety/single-file reasons independent
+of relative speed (CLAUDE.md decision 4). What to do with the measured gap, if any, is a
+founder call.
 
 ## 2. Datasets
 

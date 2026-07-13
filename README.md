@@ -257,13 +257,48 @@ p50/p99` above already include it end-to-end. This is the plane index-only compa
 hide: a vector-only store can't skip the embedding cost in real use. No baseline is
 measured on this run either, for the same reason as above.
 
+### Full-text only (BM25): EmbedMind vs. tantivy
+
+The comparisons above all measure the *vector* half against vector-only stores; this is the
+first measurement of the *full-text* half against a dedicated full-text engine.
+[ADR 0011](docs/adr/0011-full-text-indice-invertido-proprio.md) rejected embedding
+[tantivy](https://github.com/quickwit-oss/tantivy) (the "Lucene of Rust") for an
+**architectural** reason: it writes its own segments outside the `.mind` file with its own
+commit schedule, which would give the engine two independent sources of commit truth — the
+exact "unrecoverable half-state after a crash" the single-WAL design exists to rule out
+(CLAUDE.md decision 4). That decision never had a number attached to it; this table supplies
+one, on `agent-mem-10k`'s lexical ground-truth queries (`benches/src/fts_compare.rs`, same
+literal-in-content cases `benches/src/lexical.rs` uses, so both engines are graded against an
+unambiguous target, not a brute-force oracle):
+
+| System | Version | recall@10 (lexical) | query p50 | query p99 | ingest (docs/sec) | on-disk size | returns | persists |
+|---|---|---:|---:|---:|---:|---:|---|---|
+| EmbedMind | 0.1.0-dev | 1.0000 | 0.11 ms | 0.74 ms | 1196/s | 0.1 MiB | full content + metadata (`Recalled` records) | text + metadata + full-text index (same `.mind` file, WAL-covered) |
+| tantivy | 0.26.1 | 1.0000 | 0.04 ms | 0.21 ms | 441/s | 0.0 MiB | doc id + BM25 score only (no content store) | tokenized postings only (own segment files, outside any `.mind`) |
+
+Both hit perfect recall on this ground truth; on query latency tantivy is roughly 3x faster
+at this (small, 100-document) scale, while EmbedMind ingests faster (it batches less
+aggressively than tantivy's buffered-commit model, which is also why tantivy's ingest number
+looks lower per-document here — see `benches/src/fts_compare.rs` for the exact protocol).
+**This number does not reopen ADR 0011.** The decision to keep full-text as our own
+inverted index was made for crash-safety and single-file reasons, independent of which
+engine is faster — a mature engine with decades of optimization being quicker at BM25 scoring
+is not a surprise, and it isn't evidence the architectural tradeoff was wrong. What (if
+anything) to do with this gap — invest further in the caseworn BM25 path, accept it, or
+revisit the decision — is a founder call, not made here; this section only makes the honest
+number available for that call. Run with `COMPARE="--features compare-tantivy"
+./benches/run_all.sh agent-mem-10k` (tantivy is pure Rust — no external toolchain needed,
+the simplest of the three `compare-*` adapters to build).
+
 ### Where EmbedMind loses (honesty contract, BENCHMARKS.md §4)
 
-No competitor was measured on this run, so no head-to-head loss can be reported yet —
-this section is computed by the harness from `benches/results/`, never hand-edited; when
-a baseline is measured and wins a metric, it lands here automatically. The one loss we
-can already report without a competitor build: **`recall` p99 @ 100k misses its own NFR**
-(224.9 ms vs. a 50 ms target), documented above, not smoothed over.
+No vector competitor was measured on this run, so no vector head-to-head loss can be
+reported yet — this section is computed by the harness from `benches/results/`, never
+hand-edited; when a baseline is measured and wins a metric, it lands here automatically.
+The one loss we can already report without a competitor build: **`recall` p99 @ 100k misses
+its own NFR** (224.9 ms vs. a 50 ms target), documented above, not smoothed over. On the
+full-text-only plane above, **tantivy is faster on query latency** (p50/p99 roughly 3x lower
+than EmbedMind's own `search_text` at this scale) — reported there, not hidden here.
 
 ## When to use sqlite-vec instead
 

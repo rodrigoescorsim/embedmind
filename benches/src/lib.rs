@@ -26,6 +26,9 @@
 //!   recall + latency over the same queries.
 //! - [`competitors`] — the pinned sqlite-vec/zvec registry and comparison
 //!   adapters (feature-gated; honest "not measured" when a toolchain is absent).
+//! - [`fts_compare`] — full-text-only (BM25) comparison: EmbedMind's own
+//!   `Store::search_text` vs. tantivy (feature-gated), the external
+//!   measurement ADR 0011 never had a number for.
 //! - [`report`] — NFR validation and the README-ready markdown + JSON renderers.
 //! - [`regression`] — baseline comparison for the CI regression guard
 //!   (BENCHMARKS.md §5 thresholds; spec S15).
@@ -40,6 +43,7 @@ pub mod baseline;
 pub mod competitors;
 pub mod corpus;
 pub mod dataset;
+pub mod fts_compare;
 pub mod harness;
 pub mod lexical;
 pub mod metrics;
