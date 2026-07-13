@@ -15,45 +15,45 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Changed
-- **Full-text lift measured on lexical queries — the benefit side of the FT
-  phase, not just the cost** (product review 2026-07-13,
+- **Full-text lift measured on lexical queries, @ 10k and @ 100k — the benefit
+  side of the FT phase, not just the cost** (product review 2026-07-13,
   [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) §"O
-  benefício do full-text"): new `benches/src/lexical.rs` harness generates 100
+  benefício do full-text"): `benches/src/lexical.rs` harness generates 100
   deterministic ground-truth-by-construction lexical queries (exact code
   identifiers, ULIDs, hex hashes, CLI flags, literal error fragments) and
   measures hybrid (`Store::recall`) vs. vector-only (`Store::recall_vector`)
-  recall@10 + latency over the same queries — the delta is the measured
-  full-text benefit that `benches/src/recall.rs` (vector-only against
-  semantic-paraphrase queries, by design) never captured. @ 10k
-  (`agent-mem-10k`, 100 cases): recall@10 hybrid **1.0000** vs. vector-only
-  **0.9000** (+0.10 lift), p99 89.15 ms vs. 52.76 ms. Honest reading: the
-  absolute lift is small @ 10k against the already-documented latency cost,
-  but the opposite hypothesis (a larger corpus has more near-duplicate
-  literals colliding in embedding space, worsening vector-only recall) is not
-  ruled out without the @ 100k number — **pending, manual founder
-  prerequisite** (the 100k run did not fit this session's budget). This task
-  does not decide between pursuing BlockMax-WAND or a vector-only default; it
-  only produces the missing measurement.
+  recall@10 + latency over the same queries. Official run, published in
+  [`benches/results/0.1.0-dev.json`](benches/results/0.1.0-dev.json): recall@10
+  lift **+0.09 @ 10k (1.0000 vs. 0.9100) → +0.18 @ 100k (1.0000 vs. 0.8200)** —
+  the lift **doubles** as the corpus grows 10x, because vector-only recall
+  degrades with more near-duplicate embeddings colliding, while the hybrid
+  holds 100% on both. p99 on the lexical query set: 22.14 ms hybrid vs.
+  18.63 ms vector-only @ 10k; 139.38 ms vs. 32.45 ms @ 100k.
 - **Full-text optimization phase (FT) closes its accounting — `recall p99 @
   100k` NFR still misses target** (closing task, [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md)):
   official `benches/run_all.sh --full` run, 2026-07-13, published in
   [`benches/results/0.1.0-dev.json`](benches/results/0.1.0-dev.json). `recall`
   p99 end-to-end dropped from the phase's original baseline of **1,224.62 ms
-  to 224.88 ms @ 100k (~5.4x)** through the accumulated effect of early
+  to 255.12 ms @ 100k (~4.8x)** through the accumulated effect of early
   termination (ADR 0018) and delta+varint postings (ADR 0021) — the target
-  of **< 50 ms is not met**. @ 10k: ~115 ms → **30.15 ms**. recall@10
+  of **< 50 ms is not met**. @ 10k: ~115 ms → **31.84 ms**. recall@10
   (tie-aware, ADR 0019) stays 1.0000 mean/p10/p50/min on both datasets — no
-  regression. Peak RSS stays within the 300 MiB ceiling (117–120 MiB @ 100k,
+  regression. Peak RSS stays within the 300 MiB ceiling (117–118 MiB @ 100k,
   consistent with ADR 0020). This run does **not** exercise the FTS skip
   index (ADR 0022, `format_version` 5): the benchmark `.mind` files are v4
   (delta+varint only), and even on a v5 file the skip structure only cuts
   work once `fts::search`'s bounds pass is rewritten as BlockMax-WAND — a
   separate, equivalence-risky task the skip-list story deliberately left
-  undone. **Founder decision pending, not made in this commit**: pursue that
-  rewrite to close the remaining ~190 ms of full-text cost, or accept
-  224.88 ms as a documented scale limitation for the M1 launch. Both exit
-  criteria from ADR 0017 ("passes measured" or "founder consciously accepts
-  a documented limitation") remain open.
+  undone.
+- **Decision: keep full-text as default, invest in BlockMax-WAND** ([ADR
+  0023](docs/adr/0023-blockmax-wand-decisao-fase-bmw.md), founder decision
+  2026-07-13, made with the lexical lift data above in hand): the growing lift
+  (+0.09 → +0.18) rejects a vector-only default — it would cut full-text
+  exactly where it delivers the most value (large corpus, exact literals).
+  Opens the BMW phase ([ROADMAP.md](ROADMAP.md) "Fase BMW") to wire the fv5
+  skip index into `fts::search`'s hot path via BlockMax-WAND. Honest rollback
+  criterion: if BMW doesn't close the < 50 ms p99 @ 100k NFR or breaks result
+  equivalence, the vector-only default option returns to the table.
 
 ### Fixed
 - **Crash in the FTS skip-index lookup on a malformed `format_version` 5 page**

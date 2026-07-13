@@ -134,12 +134,33 @@ fora do alvo na mesma medição. Três frentes independentes, detalhe em
 | FT5 | Estouro de RSS de pico @ 100k (S28) | ✅ [ADR 0020](docs/adr/0020-rss-de-pico-era-o-harness-nao-o-engine.md) — causa era o harness (baseline brute-force retido além do uso), não a engine; RSS caiu para ~118 MiB |
 
 **Fechamento da fase (13/jul/2026):** recall@10 (tie-aware) e RSS de pico **aprovados** a
-100k. `recall p99 @ 100k` **reprovado**: 224,88 ms medido contra o teto de 50 ms — caiu
-~5,4x com FT2+FT3 (de 1.224,62 ms), mas não fechou. O próximo corte conhecido (ligar o
-skip index de `format_version` 5 ao hot path via BlockMax-WAND) é risco de equivalência
-suficiente para exigir task própria — **decisão pendente do founder**: prosseguir com
-essa sexta task ou aceitar 224,88 ms como limitação de escala documentada para o launch
-do M1 (ver ADR 0017 "Fechamento da fase FT"). Nenhuma opção foi escolhida ainda.
+100k. `recall p99 @ 100k` **reprovado**: 255,12 ms medido contra o teto de 50 ms — caiu
+~4,8x com FT2+FT3 (de 1.224,62 ms), mas não fechou (ver ADR 0017 "Fechamento da fase FT").
+
+**FT6 — o benefício do full-text (13/jul/2026):** mediu pela primeira vez o que o full-text
+*compra*, não só o que custa — 100 queries lexicais (identificadores, flags CLI, erros
+literais, hashes, ULIDs) comparando `recall` híbrido vs. `recall_vector` puro. Lift de
+recall@10: **+0,09 @10k → +0,18 @100k** — dobra com o corpus, não encolhe (o vetor-puro
+degrada de 0,9100 para 0,8200 com mais colisão vetorial; o híbrido segura 1,0000 nos dois).
+Detalhe em [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) §"O
+benefício do full-text".
+
+## Fase BMW — BlockMax-WAND para fechar o NFR de latência (decisão do founder 13/jul/2026)
+
+Com o lift medido em mãos (FT6, crescente com o corpus), o founder decidiu manter o
+full-text como default e investir na reescrita BlockMax-WAND em vez de tornar o full-text
+opt-in — decisão completa, com critério de reversão, em
+[ADR 0023](docs/adr/0023-blockmax-wand-decisao-fase-bmw.md).
+
+| # | Entrega | Status |
+|---|---|---|
+| BMW1 | Reescrita da passada 1 de `fts::search` em BlockMax-WAND sobre o skip index fv5 (ADR 0022) — pula blocos cujo `max_term_freq` não pode entrar no top-k | ⬜ maior risco de equivalência da fase, requer prova byte-idêntica vs. o oráculo `search_profiled` |
+| BMW2 | Medição @ 10k e @ 100k pelo harness oficial (`benches/run_all.sh --full`), decidindo se `recall p99 @ 100k < 50 ms` passa | ⬜ depende de BMW1 |
+| BMW3 | Fechamento: atualizar ADR 0017/0022/0023, README e ROADMAP com o resultado, qualquer que seja | ⬜ depende de BMW2 |
+
+**Critério de reversão:** se o BMW não fechar o NFR ou quebrar a equivalência de resultado,
+a opção vector-only default volta à mesa (ver ADR 0023 "Critério de reversão") — decisão do
+founder na task BMW3, com o resultado medido em mãos.
 
 ---
 

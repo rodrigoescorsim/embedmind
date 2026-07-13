@@ -1,15 +1,15 @@
 # ADR 0017 — Otimização do full-text: escopo e método (profiling antes de estrutura)
 
 **Status:** Aceito (jul/2026); **fase FT fechada nos números em 2026-07-13, NFR de latência
-segue reprovado** (ver "Fechamento da fase FT" abaixo — decisão de prosseguir vs. aceitar a
-limitação é do founder, pendente). Abre a fase FT (`03-tasks.md`), motivada pelo NFR
-reprovado da story S16/BQ1 ([ADR 0015](0015-ef-search-default-escalado-pelo-indice.md)):
+segue reprovado** (ver "Fechamento da fase FT" abaixo). Abre a fase FT (`03-tasks.md`), motivada
+pelo NFR reprovado da story S16/BQ1 ([ADR 0015](0015-ef-search-default-escalado-pelo-indice.md)):
 `recall` p99 @ 100k medido em 1.224,62 ms contra o teto de 50 ms — 24x acima.
 
 **Atualização 2026-07-13 (revisão do produto):** ver "O benefício do full-text: queries
 lexicais" abaixo — mede pela primeira vez o *ganho* do full-text (não só o custo), sobre
-queries lexicais com ground truth por construção. Medido @ 10k; @ 100k pendente (prereq manual
-do founder, comando registrado na seção).
+queries lexicais com ground truth por construção, @ 10k e @ 100k. A decisão de prosseguir com
+BlockMax-WAND (em vez de vector-only default) está registrada no [ADR 0023](0023-blockmax-wand-decisao-fase-bmw.md),
+com base no lift medido crescente (+0,09 @10k → +0,18 @100k).
 
 ## Contexto
 
@@ -154,15 +154,20 @@ do escopo do ADR 0022 (ver esse ADR §5, "Honestidade sobre onde o ganho entra")
 
 | dataset | antes (baseline desta ADR / FT5 confirm) | depois (FT2+FT3-parte-1, esta rodada) | razão |
 |---|---:|---:|---:|
-| agent-mem-10k | ~115 ms (§Contexto, pré-FT) | **30,15 ms** | ~3,8x |
-| agent-mem-100k | 1.224,62 ms (§Contexto) / 956,80 ms (confirmação oficial FT5, `docs/adr/0020`) | **224,88 ms** | ~5,5x vs. FT5, ~5,4x vs. baseline original |
+| agent-mem-10k | ~115 ms (§Contexto, pré-FT) | **31,84 ms** | ~3,6x |
+| agent-mem-100k | 1.224,62 ms (§Contexto) / 956,80 ms (confirmação oficial FT5, `docs/adr/0020`) | **255,12 ms** | ~4,8x vs. FT5, ~4,8x vs. baseline original |
 
 Decomposição @ 100k desta rodada (`query_embed_p99_ms` / `query_engine_p99_ms` / `query_vector_p99_ms`
-do JSON): embed 6,21 ms · engine (FTS+fusão+load, sem embed) 219,55 ms · vetor puro (HNSW só) 29,32
-ms. Os ~190 ms de diferença entre engine e vetor-only continuam sendo o meio full-text — o mesmo
+do JSON): embed 7,67 ms · engine (FTS+fusão+load, sem embed) 249,26 ms · vetor puro (HNSW só) 41,02
+ms. Os ~208 ms de diferença entre engine e vetor-only continuam sendo o meio full-text — o mesmo
 gargalo isolado na FT1, reduzido de ordem de grandeza mas não eliminado.
 
-@ 10k a mesma decomposição: embed 5,52 ms · engine 25,29 ms · vetor puro 8,26 ms.
+@ 10k a mesma decomposição: embed 5,69 ms · engine 27,05 ms · vetor puro 8,47 ms.
+
+Números desta rodada incluem, pela primeira vez, o `lexical_lift` do harness FT6 (`benches/src/lexical.rs`)
+medido junto — ver seção "O benefício do full-text" abaixo — o que explica a pequena variação de
+p99 frente a rodadas anteriores (mesma ordem de grandeza, mesmo `format_version` 4, sem mudança de
+código de produção entre as rodadas).
 
 ### recall@10 (tie-aware, ADR 0019) — média / p10 / p50 / mín
 
@@ -179,8 +184,8 @@ paridade era esperada, não uma surpresa desta rodada.
 
 | dataset | ingest | query |
 |---|---:|---:|
-| agent-mem-10k | 96,60 MiB | 99,24 MiB |
-| agent-mem-100k | 117,01 MiB | 118,25 MiB |
+| agent-mem-10k | 97,59 MiB | 99,41 MiB |
+| agent-mem-100k | 117,54 MiB | 117,74 MiB |
 
 Consistente com o fechamento da FT5 (ADR 0020, ~120 MiB nessa mesma medição em 2026-07-12) — bem
 dentro do teto de 300 MiB, nenhuma regressão introduzida pela FT3.
@@ -189,24 +194,25 @@ dentro do teto de 300 MiB, nenhuma regressão introduzida pela FT3.
 
 | NFR | alvo | medido @ 100k | veredito |
 |---|---|---:|:---:|
-| `recall` p99 (end-to-end) | < 50 ms | 224,88 ms | ❌ **reprovado** |
+| `recall` p99 (end-to-end) | < 50 ms | 255,12 ms | ❌ **reprovado** |
 | pior query (recall@10, tie-aware) | ≥ 0,70 | 1,0000 (mín) | ✅ aprovado |
-| RSS de pico | < 300 MiB | 118,3 MiB (query) / 117,0 MiB (ingest) | ✅ aprovado |
+| RSS de pico | < 300 MiB | 117,7 MiB (query) / 117,5 MiB (ingest) | ✅ aprovado |
 
 **O NFR de latência segue reprovado, registrado sem meias-palavras.** A fase FT reduziu o p99 do
-`recall` híbrido @ 100k em ~5,4x (1.224,62 ms → 224,88 ms) através de três mudanças que preservam
+`recall` híbrido @ 100k em ~4,8x (1.224,62 ms → 255,12 ms) através de três mudanças que preservam
 byte-a-byte a equivalência de resultado (FT2 early termination, FT3 delta+varint, FT3 skip-index
 estrutural) — mas o teto de 50 ms definido no NFR original não foi alcançado. O caminho conhecido e
 já projetado para o próximo corte (ligar o skip index de fv5 ao hot path via BlockMax-WAND, ADR
 0022 §5) não foi executado nesta fase porque muda a ordem de avaliação dos candidatos e é
-equivalence-risky o bastante para exigir sua própria task, com o dado desta medição em mãos.
+equivalence-risky o bastante para exigir sua própria task — a decisão de segui-lo está registrada
+no [ADR 0023](0023-blockmax-wand-decisao-fase-bmw.md), com o dado desta medição e do lift lexical
+em mãos.
 
-**Decisão pendente do founder** (não tomada nesta sessão, apenas documentation-only): prosseguir com
-uma quinta task (BlockMax-WAND sobre o skip index fv5, mirando fechar os ~190 ms restantes do meio
-full-text) ou aceitar 224,88 ms como limitação de escala documentada para o lançamento do M1,
-revisitando pós-tração. As duas opções descritas no ADR original (§"Critério de saída da fase") —
-"passa medido" ou "founder decide conscientemente aceitar uma limitação documentada" — continuam
-ambas em aberto; esta sessão só fecha a contabilidade de números, não escolhe entre elas.
+**Decisão tomada** ([ADR 0023](0023-blockmax-wand-decisao-fase-bmw.md), 2026-07-13, com o lift
+medido em mãos — ver seção abaixo): prosseguir com a fase BMW, ligando o skip index fv5 ao hot
+path via BlockMax-WAND, em vez de tornar o full-text opt-in. Critério de reversão honesto
+registrado no ADR 0023: se o BMW não fechar o NFR (< 50 ms p99 @ 100k) ou quebrar a equivalência
+de resultado, a opção vector-only default volta à mesa.
 
 ## O benefício do full-text: queries lexicais (revisão do founder, 2026-07-13)
 
@@ -243,23 +249,40 @@ que um embedding semântico "erra tudo" fora de vocabulário. O full-text fecha 
 do custo total do meio full-text já documentado acima (que cresce ~linear com o corpus, não
 com o número de queries lexicais).
 
-**Leitura honesta, sem escolher:** a 10k o lift absoluto é pequeno (+0,10 em recall@10) pelo
-custo de latência já conhecido. Isso pesa a favor de vector-only como default (FTS opt-in) **se**
-o mesmo padrão se confirmar @ 100k — mas a hipótese testável na direção oposta também é real: um
-corpus maior tem mais literais colidindo por proximidade vetorial (mais "quase-sinônimos" no
-espaço de embedding), o que tende a *piorar* o recall vetor-puro relativo, não melhorá-lo,
-enquanto o custo do full-text (o gargalo linear já medido) piora junto. Sem o número @ 100k,
-não é possível saber qual efeito domina — a medição @ 10k sozinha **não** decide a favor de
-nenhuma das duas opções (continuar BlockMax-WAND vs. vector-only default); ela é a metade da
-evidência que faltava, não o veredito.
+**Leitura honesta @ 10k, sem escolher (na época):** a 10k o lift absoluto era pequeno (+0,10 em
+recall@10) pelo custo de latência já conhecido — o que pesaria, isoladamente, a favor de
+vector-only como default (FTS opt-in). Mas a hipótese testável na direção oposta também era
+real: um corpus maior tem mais literais colidindo por proximidade vetorial (mais
+"quase-sinônimos" no espaço de embedding), o que tenderia a *piorar* o recall vetor-puro
+relativo, não melhorá-lo, enquanto o custo do full-text (o gargalo linear já medido) piora
+junto. Sem o número @ 100k, não era possível saber qual efeito dominava.
 
-### Pendente: mesma medição @ 100k
+### Resultado medido @ 100k (`agent-mem-100k`, 100 casos lexicais, rodada oficial 2026-07-13)
 
-A rodada @ 100k (`cargo run -p embedmind-bench --release --bin run_all -- agent-mem-100k`, ou
-`benches/run_all.sh --full`) não coube no orçamento desta sessão (ingest + 1000 queries +ᵃ 100
-casos lexicais sobre um `.mind` de ~886 MiB é uma execução de dezenas de minutos). Fica como
-pré-requisito manual do founder: rodar o comando acima e substituir esta subseção pelo par de
-linhas @ 100k assim que existir, antes de fechar a decisão continuar-BlockMax-WAND-vs-vector-only.
+| métrica | híbrido (BM25+vetor+RRF) | vetor-puro (`recall_vector`) | delta |
+|---|---:|---:|---:|
+| recall@10 | **1,0000** | 0,8200 | **+0,18** |
+| query p50 | 28,03 ms | 25,86 ms | +2,16 ms |
+| query p99 | 139,38 ms | 32,45 ms | +106,92 ms |
+
+### Veredito: a hipótese de piora do vetor-puro se confirmou — lift dobra, não encolhe
+
+| dataset | recall@10 híbrido | recall@10 vetor-puro | lift |
+|---|---:|---:|---:|
+| agent-mem-10k | 1,0000 | 0,9100 | +0,09 |
+| agent-mem-100k | 1,0000 | 0,8200 | **+0,18** |
+
+O lift **dobra** de @10k para @100k: o vetor-puro degrada (0,9100 → 0,8200) conforme o corpus
+cresce — mais literais parecidos colidem no espaço de embedding —, enquanto o híbrido segura
+100% nos dois tamanhos porque o BM25 encontra o literal exato independentemente da densidade do
+espaço vetorial ao redor. Essa é exatamente a direção que teria justificado vector-only default
+se tivesse ido para o outro lado — foi o oposto. O custo do full-text sobre essas queries
+lexicais também cresce com o corpus (p99 híbrido 139,38 ms vs. 22,14 ms @10k), consistente com o
+mesmo gargalo linear já isolado nesta ADR.
+
+Com esse dado em mãos, o founder decidiu (2026-07-13): manter o full-text como default e investir
+na reescrita BlockMax-WAND para fechar a latência, em vez de tornar o full-text opt-in — decisão
+completa, com critério de reversão, no [ADR 0023](0023-blockmax-wand-decisao-fase-bmw.md).
 
 ## Alternativas rejeitadas
 
