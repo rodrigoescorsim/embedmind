@@ -69,7 +69,7 @@ Targets (each a `fuzz_target!` over arbitrary bytes):
 |---|---|
 | `fuzz_header` | header parse: magic, versions, bogus page counts/offsets, flag bit 0 set |
 | `fuzz_page` | each page type's parser, including slot directories and overflow chains |
-| `fuzz_fts_page` | full-text dictionary (meta/inner/leaf) and postings parsers — every input decoded under **all four** postings layouts (fixed-width v ≤ 3, delta+varint v4 (ADR 0021), delta+varint+skip with the v5 24-byte and v6 40-byte skip entry (ADR 0022/0024)), plus the block-skipping lookup over the same bytes under both entry widths, incl. variable-length terms, huge counts, hostile varints and corrupt skip indexes (§11, ADR 0011) |
+| `fuzz_fts_page` | full-text dictionary (meta/inner/leaf) and postings parsers — every input decoded under **all four** postings layouts (fixed-width v ≤ 3, delta+varint v4 (ADR 0021), delta+varint+skip with the v5 24-byte and v6 40-byte skip entry (ADR 0022/0024)), plus the block-skipping lookup over the same bytes under both entry widths, plus opening and walking a BlockMax-WAND cursor (`BmwCursor`, ADR 0025) over the same hostile bytes — incl. variable-length terms, huge counts, hostile varints and corrupt skip indexes (§11, ADR 0011) |
 | `fuzz_graph_page` | graph dictionary nodes, overflow chains, and the entity-members/adjacency value bodies (§12, ADR 0012) |
 | `fuzz_wal_replay` | full recovery: arbitrary WAL bytes against a valid base file |
 | `fuzz_record` | `MemoryRecord` deserialization, incl. tagged scalars and huge length prefixes |
@@ -96,6 +96,11 @@ cosine for vector queries). Strategy generates operation sequences
   — checks the index isn't broken without demanding exactness.
 - `reopen` inside sequences catches "works until you restart" bugs; `vacuum` inside
   sequences catches index-rebuild divergence.
+- **BM25 search-path equivalence (ADR 0025):** the BlockMax-WAND production path must
+  return exactly — same ids, bit-identical scores, same order — what the exhaustive
+  oracle (`search_profiled`) and the linear two-pass scan (`search_linear`) return.
+  Property test over arbitrary corpora/queries/keep-filters/vanished records, plus
+  deterministic large-corpus, tie-boundary and skip-counter unit tests in `fts.rs`.
 
 ## 5. CI matrix
 
