@@ -70,6 +70,29 @@ Pre-v0.1 — under active development, repo private until M1 completes
   (`index::fts::tests::lookup_via_skip_rejects_corpus_crash_input`).
 
 ### Added
+- **Per-block impact bound in the FTS skip index — `format_version` 6** (BMW-1,
+  [ADR 0024](docs/adr/0024-bound-de-impacto-por-bloco-fv6.md)): each skip-index
+  entry now also carries the block's **`last_id`** (its maximum `record_id`),
+  turning the entry into the `(block_max_docid, block_max_impact)` pair a
+  **BlockMax-WAND** scan needs to skip a whole block without decoding it. The
+  block's `max_term_freq` (already stored since v5) is the *conservative* impact
+  bound — BM25's per-term partial score is monotone increasing in `tf`,
+  decreasing in `|D|`, so evaluating it at `max_term_freq` and `|D| → 0` never
+  underestimates any entry (the exact bound `fts::search` already uses).
+  `min(doc_len)` was evaluated and **rejected**: it would tighten the bound but
+  is not derivable from the postings body (`|D|` is never persisted — it is
+  recomputed at query time) and persisting it would break that invariant. The
+  skip-entry width is selected by the file's `format_version`, never mixed:
+  v ≤ 5 files keep reading **and writing** their own layout (24-byte entries for
+  v5), and `vacuum`'s copy-based rebuild is the upgrade path; a v5 reader refuses
+  a v6 file read-write (G4) but can open it read-only (no header/page-type
+  change). Search results are unchanged — this ships format + bound only; the
+  scan still runs its linear bound pass (the BlockMax-WAND rewrite that consumes
+  the bound is the next BMW task). `fuzz_fts_page` now decodes every input under
+  **all four** postings layouts (fixed-width, delta+varint, skip v5, skip v6) and
+  drives the block-skipping lookup under both entry widths, with new v6 corpus
+  seeds — including one with a real skip index — alongside the preserved
+  v3/v4/v5 ones ([FORMAT.md](docs/FORMAT.md) §2/§4/§11).
 - **Skip lists in large FTS postings — `format_version` 5** (story S26 part 2,
   [ADR 0022](docs/adr/0022-postings-fts-skip-lists.md)): a term whose postings
   list reaches 512 entries now carries a **skip index** in front of the body —
