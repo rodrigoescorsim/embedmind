@@ -868,18 +868,46 @@ pub struct Hit {
 /// or out of scope — the same re-check the vector path does, `docs/adr/0003`,
 /// DESIGN §7). `doc_len` yields a candidate's current token length for BM25
 /// length normalization; returning `None` drops the candidate (its record is
-/// gone). Both closures are called at most once per candidate record.
+/// gone). Both closures are called only for candidates that get evaluated
+/// exactly, at most once per candidate record (`docs/adr/0018` semantics).
 ///
-/// Scan strategy (FT2, `docs/adr/0018`): FT1 measured `keep` + `doc_len` —
-/// both of which reload the candidate's record — at 93% of query time @ 100k,
-/// so this evaluates candidates lazily: a first pass scores a cheap upper
-/// bound per candidate from the postings alone (no closures), then a second
-/// pass evaluates candidates exactly, best bound first, stopping as soon as
-/// the remaining bounds fall strictly below the k-th best exact score. The
+/// Scan strategy: on a `format_version` ≥ 6 file — whose skip index carries
+/// the per-block `(last_id, max_term_freq)` bounds of BMW-1 — this runs
+/// BlockMax-WAND ([`search_bmw_counted`], BMW-2, `docs/adr/0025`), skipping
+/// whole postings blocks whose summed impact bounds cannot beat the current
+/// top-k. Older files (v4/v5, no per-block bounds) keep the linear two-pass
+/// scan of FT2 ([`search_linear`], `docs/adr/0018`) unchanged. Either way the
 /// result is identical — same hits, same scores, same order — to the
 /// exhaustive scan ([`search_profiled`] keeps that scan as the test oracle);
-/// early termination only skips work that provably cannot change the top k.
+/// the equivalence tests below compare all three paths directly.
 pub fn search(
+    src: &dyn PageSource,
+    fts_root_page: u64,
+    query: &str,
+    k: usize,
+    keep: impl FnMut(Ulid) -> bool,
+    doc_len: impl FnMut(Ulid) -> Result<Option<u32>>,
+) -> Result<Vec<Hit>> {
+    // BMW navigates by the per-block bounds only the version-6 skip entries
+    // carry; a v4/v5 file has no (complete) bounds, so it stays on the linear
+    // path — never a silently-wrong result from missing metadata.
+    if PostingsLayout::for_format_version(src.format_version())
+        == PostingsLayout::DeltaVarintSkip(SkipEntry::V6)
+    {
+        Ok(search_bmw_counted(src, fts_root_page, query, k, keep, doc_len)?.0)
+    } else {
+        search_linear(src, fts_root_page, query, k, keep, doc_len)
+    }
+}
+
+/// The linear two-pass scan (FT2, `docs/adr/0018`): Pass 1 decodes every
+/// matched term's postings and accumulates a per-candidate upper bound, Pass 2
+/// evaluates candidates exactly, best bound first, stopping when the remaining
+/// bounds fall strictly below the k-th exact score. Production path for
+/// `format_version` ≤ 5 files (their skip entries lack the per-block bounds
+/// BMW needs) and the reference oracle the BMW-2 equivalence tests compare
+/// [`search_bmw_counted`] against — do not fold it into the BMW path.
+fn search_linear(
     src: &dyn PageSource,
     fts_root_page: u64,
     query: &str,
@@ -936,10 +964,7 @@ pub fn search(
         // because df <= N (a term's postings are a subset of the corpus).
         let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
         for p in &postings.entries {
-            let tf = p.term_freq as f32;
-            let norm = tf + BM25_K1 * (1.0 - BM25_B);
-            let bound = idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
-            *bounds.entry(p.record_id).or_insert(0.0) += bound;
+            *bounds.entry(p.record_id).or_insert(0.0) += bound_contribution(idf, p.term_freq);
         }
         matched.push((idf, postings));
     }
@@ -1000,6 +1025,555 @@ pub fn search(
         }
     }
     Ok(hits)
+}
+
+// ---------------------------------------------------------------------------
+// BlockMax-WAND search (BMW-2, `docs/adr/0025`)
+// ---------------------------------------------------------------------------
+
+/// One term's largest possible BM25 contribution to any document holding it
+/// with term frequency `tf`: the exact-score expression evaluated at `dl = 0`,
+/// which minimizes the length norm. Shared by the linear Pass 1 and the BMW
+/// block bounds so both paths reason from bit-identical f32 values; sound
+/// under f32 rounding because the exact score's `norm` is ≥ this one and
+/// division rounds monotonically.
+fn bound_contribution(idf: f32, tf: u32) -> f32 {
+    let tf = tf as f32;
+    let norm = tf + BM25_K1 * (1.0 - BM25_B);
+    idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE)
+}
+
+/// Multiplicative slack that makes the f64 bound-sum comparisons in
+/// [`search_bmw_counted`] safe against f32 rounding. The oracle sums a
+/// document's exact f32 contributions in term order; a round-to-nearest f32
+/// sum of `m` non-negative terms exceeds the exact real sum by at most a
+/// factor `(1 + 2^-24)^(m-1)`, and the f64 accumulation error here is orders
+/// of magnitude below that. `1.2e-7 > 2 × 2^-24` per term over-covers both,
+/// so `sum_f64 × slack ≤ θ` proves no skipped document's oracle score can
+/// exceed `θ` — the "bound that under-estimates" silent-recall bug the BMW-2
+/// equivalence suite exists to catch (`docs/adr/0025`).
+fn bound_slack(terms: usize) -> f64 {
+    1.0 + terms as f64 * 1.2e-7
+}
+
+/// Per-block metadata one BMW cursor navigates by, parsed once from the
+/// version-6 skip index (or derived from the decoded list for a small,
+/// skip-less term, which becomes one synthetic block).
+struct BmwBlock {
+    /// First posting id in the block (a real id — skip entry field).
+    first_id: u128,
+    /// Last posting id in the block — the block max doc id (BMW-1).
+    last_id: u128,
+    /// Byte offset of the block's delta run, relative to the blocks region.
+    offset: usize,
+    /// Number of postings in the block.
+    len: usize,
+    /// Stored per-block `max_term_freq` (BMW-1's impact bound).
+    max_tf: u32,
+    /// [`bound_contribution`] at `max_tf` — the block max impact, idf-scaled.
+    ub: f32,
+}
+
+/// Work counters for one BlockMax-WAND search — bench-only surface for BMW-3's
+/// measurement (`docs/adr/0025`), same pattern as [`SearchPhaseTimings`]:
+/// production callers go through [`search`], which throws the counters away;
+/// keeping them always-on costs four u64 bumps, nothing else.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BmwCounters {
+    /// Blocks across every matched term's postings list (small lists = 1).
+    pub blocks_total: u64,
+    /// Blocks actually decoded. `blocks_total - blocks_decoded` were skipped —
+    /// the decode work BMW saved over the linear Pass 1, which always decodes
+    /// every block.
+    pub blocks_decoded: u64,
+    /// Documents evaluated exactly (`keep`/`doc_len` called, BM25 scored).
+    pub docs_evaluated: u64,
+    /// Pivot candidates discarded by the block-max check without evaluation.
+    pub pivot_skips: u64,
+}
+
+impl BmwCounters {
+    /// Blocks never decoded — what the skip index actually cut.
+    pub fn blocks_skipped(&self) -> u64 {
+        self.blocks_total.saturating_sub(self.blocks_decoded)
+    }
+}
+
+/// A document-at-a-time cursor over one term's version-6 postings body
+/// (BMW-2, `docs/adr/0025`): walks the list in id order decoding **only the
+/// blocks it lands inside**, navigating by the skip index alone. Landing
+/// exactly on a block's `first_id` needs no decode — the skip entry carries
+/// it — so a block jumped over or merely landed-on stays undecoded.
+///
+/// Every block it does decode is re-verified against its skip entry exactly
+/// like the full decoder (`decode_delta_varint_skip`) does, and the skip
+/// index itself is sanity-checked at open — a fast read path replicates all
+/// of the decoder's invariant checks (the `lookup_via_skip` fuzz lesson).
+struct BmwCursor {
+    idf: f32,
+    body: Vec<u8>,
+    page_no: u64,
+    /// Start of the blocks region within `body` (0 for a small decoded list).
+    blocks_start: usize,
+    blocks: Vec<BmwBlock>,
+    /// Index of the block `cur_id` lives in.
+    cur_block: usize,
+    /// Decoded entries of `cur_block`; empty = not decoded yet (the cursor
+    /// then sits on the block's `first_id`, known from the skip entry alone).
+    entries: Vec<Posting>,
+    /// Position of `cur_id` within `entries` (meaningful only when decoded).
+    pos: usize,
+    /// The id the cursor currently sits on — always a real posting id.
+    cur_id: u128,
+    /// Largest [`bound_contribution`] over the whole list (max of block ubs) —
+    /// the WAND term upper bound.
+    term_ub: f32,
+    exhausted: bool,
+}
+
+impl BmwCursor {
+    /// Opens a cursor over `body`; `None` when the list is empty. A small list
+    /// (`block_count = 0`, no skip index) is fully decoded through the normal
+    /// layout decoder and served as one synthetic block; a blocked list parses
+    /// and validates the skip index only, deferring block decodes to
+    /// navigation.
+    fn open(
+        idf: f32,
+        body: Vec<u8>,
+        page_no: u64,
+        counters: &mut BmwCounters,
+    ) -> Result<Option<BmwCursor>> {
+        let count = dict::read_u32(&body, 0, page_no)? as usize;
+        let block_count = dict::read_u32(&body, 4, page_no)? as usize;
+        if block_count == 0 {
+            let decoded = Postings::decode_delta_varint_skip(&body, page_no, SkipEntry::V6)?;
+            let Some((first, last)) = decoded.entries.first().zip(decoded.entries.last()) else {
+                return Ok(None);
+            };
+            let max_tf = decoded
+                .entries
+                .iter()
+                .map(|p| p.term_freq)
+                .max()
+                .unwrap_or(0);
+            let ub = bound_contribution(idf, max_tf);
+            let block = BmwBlock {
+                first_id: u128::from(first.record_id),
+                last_id: u128::from(last.record_id),
+                offset: 0,
+                len: decoded.entries.len(),
+                max_tf,
+                ub,
+            };
+            counters.blocks_total += 1;
+            counters.blocks_decoded += 1;
+            let cur_id = block.first_id;
+            return Ok(Some(BmwCursor {
+                idf,
+                body,
+                page_no,
+                blocks_start: 0,
+                blocks: vec![block],
+                cur_block: 0,
+                entries: decoded.entries,
+                pos: 0,
+                cur_id,
+                term_ub: ub,
+                exhausted: false,
+            }));
+        }
+        // Blocked list: the same header sanity the full decoder enforces,
+        // before trusting any offset in the index.
+        let expected_blocks = count.div_ceil(SKIP_BLOCK_SIZE);
+        if count < SKIP_MIN_DOC_FREQ || block_count != expected_blocks {
+            return Err(malformed(page_no, "fts skip block_count mismatch"));
+        }
+        let entry_len = SkipEntry::V6.len();
+        let index_len = block_count
+            .checked_mul(entry_len)
+            .ok_or_else(|| malformed(page_no, "fts skip index overflow"))?;
+        let blocks_start = 8usize
+            .checked_add(index_len)
+            .ok_or_else(|| malformed(page_no, "fts skip index overflow"))?;
+        if body.len() < blocks_start {
+            return Err(malformed(page_no, "fts skip index truncated"));
+        }
+        reject_hostile_delta_count(&body[blocks_start.saturating_sub(4)..], count, page_no)?;
+
+        let mut blocks: Vec<BmwBlock> = Vec::with_capacity(block_count);
+        let mut term_ub = 0.0f32;
+        for b in 0..block_count {
+            let idx = 8 + b * entry_len;
+            let first_id = read_u128_le(&body, idx, page_no)?;
+            let last_id = read_u128_le(&body, idx + 16, page_no)?;
+            let tail = idx + SkipEntry::V6.tail_off();
+            let offset = dict::read_u32(&body, tail, page_no)? as usize;
+            let max_tf = dict::read_u32(&body, tail + 4, page_no)?;
+            let len = if b + 1 == block_count {
+                count - b * SKIP_BLOCK_SIZE
+            } else {
+                SKIP_BLOCK_SIZE
+            };
+            // The metadata-level invariants navigation relies on before any
+            // block is decoded: ids ordered within and across blocks, offsets
+            // strictly increasing from 0, a positive impact bound (every
+            // posting has term_freq ≥ 1). A block that is decoded later is
+            // still re-checked against its bytes (`decode_block`).
+            if first_id > last_id
+                || max_tf == 0
+                || (b == 0 && offset != 0)
+                || blocks
+                    .last()
+                    .is_some_and(|p| p.last_id >= first_id || p.offset >= offset)
+            {
+                return Err(malformed(page_no, "fts skip index inconsistent"));
+            }
+            let ub = bound_contribution(idf, max_tf);
+            term_ub = term_ub.max(ub);
+            blocks.push(BmwBlock {
+                first_id,
+                last_id,
+                offset,
+                len,
+                max_tf,
+                ub,
+            });
+        }
+        counters.blocks_total += block_count as u64;
+        let cur_id = blocks[0].first_id;
+        Ok(Some(BmwCursor {
+            idf,
+            body,
+            page_no,
+            blocks_start,
+            blocks,
+            cur_block: 0,
+            entries: Vec::new(),
+            pos: 0,
+            cur_id,
+            term_ub,
+            exhausted: false,
+        }))
+    }
+
+    /// Decodes block `b` into `entries` and re-verifies its skip entry against
+    /// the decoded bytes — the same `first_id`/`last_id`/`max_term_freq`
+    /// checks the full decoder performs.
+    fn decode_block(&mut self, b: usize, counters: &mut BmwCounters) -> Result<()> {
+        let (offset, len, first_id, last_id, max_tf) = {
+            let m = &self.blocks[b];
+            (m.offset, m.len, m.first_id, m.last_id, m.max_tf)
+        };
+        let mut off = self
+            .blocks_start
+            .checked_add(offset)
+            .ok_or_else(|| malformed(self.page_no, "fts skip byte_offset overflow"))?;
+        let mut entries = Vec::with_capacity(len);
+        decode_delta_run(&self.body, &mut off, len, self.page_no, &mut entries)?;
+        if entries.first().map(|p| u128::from(p.record_id)) != Some(first_id) {
+            return Err(malformed(self.page_no, "fts skip first_id mismatch"));
+        }
+        if entries.last().map(|p| u128::from(p.record_id)) != Some(last_id) {
+            return Err(malformed(self.page_no, "fts skip last_id mismatch"));
+        }
+        if entries.iter().map(|p| p.term_freq).max() != Some(max_tf) {
+            return Err(malformed(self.page_no, "fts skip max_term_freq mismatch"));
+        }
+        self.entries = entries;
+        self.cur_block = b;
+        counters.blocks_decoded += 1;
+        Ok(())
+    }
+
+    /// Moves the cursor to the first posting with id ≥ `target` (no-op when
+    /// already there), decoding a block only when the landing position falls
+    /// strictly inside one. Blocks passed over are never decoded — that jump
+    /// is the whole point of the skip index.
+    fn advance_to(&mut self, target: u128, counters: &mut BmwCounters) -> Result<()> {
+        if self.exhausted || target <= self.cur_id {
+            return Ok(());
+        }
+        let rel = self.blocks[self.cur_block..].partition_point(|m| m.last_id < target);
+        let b = self.cur_block + rel;
+        if b >= self.blocks.len() {
+            self.exhausted = true;
+            return Ok(());
+        }
+        if self.blocks[b].first_id >= target {
+            // Land on the block's first posting without decoding it.
+            if b != self.cur_block {
+                self.entries.clear();
+                self.cur_block = b;
+            }
+            self.pos = 0;
+            self.cur_id = self.blocks[b].first_id;
+            return Ok(());
+        }
+        if b != self.cur_block || self.entries.is_empty() {
+            self.decode_block(b, counters)?;
+        }
+        let pos = self
+            .entries
+            .partition_point(|p| u128::from(p.record_id) < target);
+        // Unreachable when the verified `last_id` ≥ target held, but a typed
+        // error beats an index panic on a byzantine body (G4).
+        let posting = self
+            .entries
+            .get(pos)
+            .ok_or_else(|| malformed(self.page_no, "fts skip cursor past block"))?;
+        self.pos = pos;
+        self.cur_id = u128::from(posting.record_id);
+        Ok(())
+    }
+
+    /// Advances to the first posting with id strictly greater than `id`.
+    fn advance_past(&mut self, id: u128, counters: &mut BmwCounters) -> Result<()> {
+        match id.checked_add(1) {
+            Some(next) => self.advance_to(next, counters),
+            None => {
+                self.exhausted = true;
+                Ok(())
+            }
+        }
+    }
+
+    /// The block that could contain `target` — the first block at or after the
+    /// cursor whose `last_id` ≥ `target` — without decoding anything. `None`
+    /// when the list ends before `target`: the term cannot contribute to it or
+    /// anything past it.
+    fn covering_block(&self, target: u128) -> Option<&BmwBlock> {
+        let rel = self.blocks[self.cur_block..].partition_point(|m| m.last_id < target);
+        self.blocks.get(self.cur_block + rel)
+    }
+
+    /// Term frequency at the cursor's current posting, decoding the current
+    /// block if the cursor sits on an undecoded block's `first_id`.
+    fn current_tf(&mut self, counters: &mut BmwCounters) -> Result<u32> {
+        if self.entries.is_empty() {
+            self.decode_block(self.cur_block, counters)?;
+            self.pos = 0; // the undecoded cursor always sits on first_id
+        }
+        let posting = self
+            .entries
+            .get(self.pos)
+            .ok_or_else(|| malformed(self.page_no, "fts skip cursor past block"))?;
+        if u128::from(posting.record_id) != self.cur_id {
+            return Err(malformed(self.page_no, "fts skip cursor desync"));
+        }
+        Ok(posting.term_freq)
+    }
+}
+
+/// BlockMax-WAND BM25 search (BMW-2, `docs/adr/0025`) over a `format_version`
+/// ≥ 6 file, returning the same `(hits, counters)` the bench harness needs —
+/// [`search`] is the production entry and discards the counters.
+///
+/// Document-at-a-time over one [`BmwCursor`] per matched term: WAND pivot
+/// selection over term upper bounds, then the block-max refinement — if the
+/// summed per-block impact bounds of the blocks that could contain the pivot
+/// cannot beat the current k-th exact score, the whole id range up to the
+/// shallowest covering block's `last_id` is skipped without decoding a single
+/// block. Evaluated documents are scored with the exact oracle expression, in
+/// sorted term order, so scores are bit-identical to the linear scan; ties
+/// break by `record_id` before the cut on every path, and all bound
+/// comparisons carry [`bound_slack`], so the top-k is provably identical to
+/// [`search_linear`]/[`search_profiled`] — the equivalence suite (unit +
+/// property tests below) verifies exactly that.
+#[doc(hidden)]
+pub fn search_bmw_counted(
+    src: &dyn PageSource,
+    fts_root_page: u64,
+    query: &str,
+    k: usize,
+    mut keep: impl FnMut(Ulid) -> bool,
+    mut doc_len: impl FnMut(Ulid) -> Result<Option<u32>>,
+) -> Result<(Vec<Hit>, BmwCounters)> {
+    let mut counters = BmwCounters::default();
+    if k == 0 {
+        return Ok((Vec::new(), counters));
+    }
+    let Some(meta) = load_meta(src, fts_root_page)? else {
+        return Ok((Vec::new(), counters));
+    };
+    if meta.doc_count == 0 || meta.dict_root == 0 {
+        return Ok((Vec::new(), counters));
+    }
+
+    let mut query_terms: Vec<String> = tokenize(query)
+        .into_iter()
+        .map(|t| clip_term(&t).to_owned())
+        .filter(|t| !t.is_empty())
+        .collect();
+    query_terms.sort();
+    query_terms.dedup();
+    if query_terms.is_empty() {
+        return Ok((Vec::new(), counters));
+    }
+
+    let n = meta.doc_count as f32;
+    let avgdl = if meta.doc_count == 0 {
+        0.0
+    } else {
+        meta.total_tokens as f32 / meta.doc_count as f32
+    };
+
+    // One cursor per matched term, in sorted term order — the exact-score
+    // loop below then visits terms in the same order as the oracle, keeping
+    // scores bit-identical. `df` is the stored posting count, which is what
+    // the oracle's decoded `entries.len()` equals, so idf matches bit-for-bit.
+    let mut cursors: Vec<BmwCursor> = Vec::with_capacity(query_terms.len());
+    for term in &query_terms {
+        let Some((body, page_no)) = dict::get(src, FTS_DICT, meta.dict_root, term.as_bytes())?
+        else {
+            continue;
+        };
+        let df = dict::read_u32(&body, 0, page_no)? as usize;
+        if df == 0 {
+            continue;
+        }
+        let idf = (1.0 + (n - df as f32 + 0.5) / (df as f32 + 0.5)).ln();
+        if let Some(cursor) = BmwCursor::open(idf, body, page_no, &mut counters)? {
+            cursors.push(cursor);
+        }
+    }
+    if cursors.is_empty() {
+        return Ok((Vec::new(), counters));
+    }
+    let slack = bound_slack(cursors.len());
+
+    // Top-k under (score desc, id asc) — the same order and insert rule as
+    // the linear Pass 2, so the boundary tie-break is identical by
+    // construction. No preallocation: a huge caller `k` must not allocate.
+    let mut hits: Vec<Hit> = Vec::new();
+    let mut order: Vec<usize> = (0..cursors.len()).collect();
+    loop {
+        order.retain(|&i| !cursors[i].exhausted);
+        if order.is_empty() {
+            break;
+        }
+        // Deterministic id order; ties by term index (evaluation order never
+        // depends on iteration incidentals — G3).
+        order.sort_by(|&a, &b| {
+            cursors[a]
+                .cur_id
+                .cmp(&cursors[b].cur_id)
+                .then_with(|| a.cmp(&b))
+        });
+        let theta: Option<f32> = (hits.len() == k).then(|| hits[k - 1].score);
+
+        // WAND pivot: the shortest id-ordered prefix whose summed term bounds
+        // could beat θ. No such prefix ⇒ nothing left can enter the top k.
+        let mut acc = 0.0f64;
+        let mut pivot: Option<usize> = None;
+        for (oi, &ci) in order.iter().enumerate() {
+            acc += f64::from(cursors[ci].term_ub);
+            if theta.is_none_or(|t| acc * slack > f64::from(t)) {
+                pivot = Some(oi);
+                break;
+            }
+        }
+        let Some(p) = pivot else {
+            break;
+        };
+        let pivot_id = cursors[order[p]].cur_id;
+        // Cursors past `p` sitting on the same id contribute to the same
+        // document; the block-max check must bound its *full* potential score.
+        let prefix_end = p + order[p + 1..]
+            .iter()
+            .take_while(|&&ci| cursors[ci].cur_id == pivot_id)
+            .count();
+
+        // BMW refinement: re-bound the pivot document by the per-block impact
+        // bounds of the blocks that could contain it (BMW-1's `last_id` +
+        // `max_term_freq`), instead of whole-list maxima.
+        let mut block_acc = 0.0f64;
+        let mut min_block_last = u128::MAX;
+        for &ci in &order[..=prefix_end] {
+            if let Some(block) = cursors[ci].covering_block(pivot_id) {
+                block_acc += f64::from(block.ub);
+                min_block_last = min_block_last.min(block.last_id);
+            }
+        }
+        if theta.is_some_and(|t| block_acc * slack <= f64::from(t)) {
+            // No document in [pivot_id, min_block_last] can beat θ: every
+            // term that could touch one is in the prefix (later cursors sit
+            // beyond), and its contribution is bounded by this same covering
+            // block's impact bound. Jump past the shallowest covering block —
+            // or to the next cursor's id, whichever is nearer — without
+            // decoding anything.
+            counters.pivot_skips += 1;
+            let next = match (min_block_last.checked_add(1), order.get(prefix_end + 1)) {
+                (Some(n), Some(&after)) => Some(n.min(cursors[after].cur_id)),
+                (None, Some(&after)) => Some(cursors[after].cur_id),
+                (n, None) => n,
+            };
+            match next {
+                Some(n) => {
+                    for &ci in &order[..=prefix_end] {
+                        cursors[ci].advance_to(n, &mut counters)?;
+                    }
+                }
+                // The covering blocks reach u128::MAX and no cursor sits
+                // beyond: nothing after the pivot range is left in these
+                // lists.
+                None => {
+                    for &ci in &order[..=prefix_end] {
+                        cursors[ci].exhausted = true;
+                    }
+                }
+            }
+            continue;
+        }
+        if cursors[order[0]].cur_id != pivot_id {
+            // Not aligned yet: bring the earlier cursors up to the pivot.
+            // Documents jumped over are ruled out by the pivot choice — the
+            // terms that could touch them form a proper prefix, whose slacked
+            // bound sum was ≤ θ (the pivot is the *first* prefix exceeding
+            // it).
+            for &ci in &order[..p] {
+                cursors[ci].advance_to(pivot_id, &mut counters)?;
+            }
+            continue;
+        }
+        // Aligned on the pivot: evaluate it exactly — identical expression
+        // and (sorted) term order to the oracle, so the score is
+        // bit-identical, then insert under the same (score desc, id asc)
+        // boundary rule.
+        counters.docs_evaluated += 1;
+        let id = Ulid::from(pivot_id);
+        if keep(id)
+            && let Some(dl) = doc_len(id)?
+        {
+            let mut score = 0.0f32;
+            for c in cursors.iter_mut() {
+                if c.exhausted || c.cur_id != pivot_id {
+                    continue;
+                }
+                let tf = c.current_tf(&mut counters)? as f32;
+                let norm = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl as f32 / avgdl.max(1.0));
+                score += c.idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
+            }
+            if score > 0.0 {
+                let pos = hits
+                    .partition_point(|h| h.score > score || (h.score == score && h.record_id < id));
+                if pos < k {
+                    hits.insert(
+                        pos,
+                        Hit {
+                            record_id: id,
+                            score,
+                        },
+                    );
+                    hits.truncate(k);
+                }
+            }
+        }
+        for &ci in &order[..=prefix_end] {
+            cursors[ci].advance_past(pivot_id, &mut counters)?;
+        }
+    }
+    Ok((hits, counters))
 }
 
 /// Number of documents recorded in the full-text index (`embedmind stats`).
@@ -1204,6 +1778,35 @@ pub fn fuzz_decode_page(page: &[u8]) {
             let _ = lookup_via_skip(&page[PAGE_HEADER_LEN..], 1, target, entry);
         }
     }
+    // The BMW cursor (BMW-2) navigates the same hostile bytes by the skip
+    // metadata alone — opening and walking it must never panic or loop.
+    fuzz_bmw_cursor(page);
+    if page.len() > PAGE_HEADER_LEN {
+        fuzz_bmw_cursor(&page[PAGE_HEADER_LEN..]);
+    }
+}
+
+/// Drives a [`BmwCursor`] over one hostile body: open, step posting by
+/// posting (forcing block decodes via `current_tf`), and take a shallow jump —
+/// every navigation path the BMW search uses. Must return, never panic; the
+/// step count is bounded so a huge (but valid) body cannot stall the fuzzer.
+fn fuzz_bmw_cursor(body: &[u8]) {
+    let mut counters = BmwCounters::default();
+    let Ok(Some(mut cursor)) = BmwCursor::open(1.0, body.to_vec(), 1, &mut counters) else {
+        return;
+    };
+    let _ = cursor.covering_block(cursor.cur_id);
+    for _ in 0..64 {
+        if cursor.exhausted {
+            return;
+        }
+        let _ = cursor.current_tf(&mut counters);
+        if cursor.advance_past(cursor.cur_id, &mut counters).is_err() {
+            return;
+        }
+    }
+    // A long valid list: finish with one shallow far jump instead of a walk.
+    let _ = cursor.advance_to(u128::MAX, &mut counters);
 }
 
 #[cfg(test)]
@@ -1666,9 +2269,11 @@ mod tests {
 
     #[test]
     fn early_termination_matches_exhaustive_scan_on_larger_corpus() {
-        // FT2 (`docs/adr/0018`) hard invariant: the bounded scan in `search`
-        // must return exactly what the exhaustive scan returns — same hits,
-        // same (bit-identical) scores, same order — including when the cut
+        // FT2 (`docs/adr/0018`) / BMW-2 (`docs/adr/0025`) hard invariant: the
+        // production `search` — BlockMax-WAND here, since the default file is
+        // `format_version` 6 — must return exactly what the exhaustive scan
+        // *and* the linear two-pass scan return: same hits, same
+        // (bit-identical) scores, same order — including when the cut
         // actually triggers: k far below the candidate count, common + rare
         // terms, varied document lengths and term frequencies, exact-tie
         // duplicates, a keep filter, and vanished records.
@@ -1725,6 +2330,9 @@ mod tests {
                 let (full, _) =
                     search_profiled(&pager, root, query, k, |_| true, len_of(&contents)).unwrap();
                 assert_eq!(plain, full, "query={query:?} k={k}");
+                let lin =
+                    search_linear(&pager, root, query, k, |_| true, len_of(&contents)).unwrap();
+                assert_eq!(plain, lin, "query={query:?} k={k} (linear)");
 
                 let plain = search(
                     &pager,
@@ -1745,12 +2353,168 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(plain, full, "query={query:?} k={k} (keep filter)");
+                let lin = search_linear(
+                    &pager,
+                    root,
+                    query,
+                    k,
+                    |id| !dropped.contains(&id),
+                    len_of(&contents),
+                )
+                .unwrap();
+                assert_eq!(plain, lin, "query={query:?} k={k} (keep filter, linear)");
 
                 let plain = search(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
                 let (full, _) =
                     search_profiled(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
                 assert_eq!(plain, full, "query={query:?} k={k} (vanished records)");
+                let lin =
+                    search_linear(&pager, root, query, k, |_| true, len_of(&partial)).unwrap();
+                assert_eq!(plain, lin, "query={query:?} k={k} (vanished, linear)");
             }
+        }
+    }
+
+    /// BMW-2 boundary-tie regression (`docs/adr/0025` risk #1): identical
+    /// documents produce bit-identical BM25 scores, so the top-k boundary is
+    /// decided purely by the `record_id` tie-break — which must match the
+    /// oracle exactly even when the tie group spans the cut, with enough
+    /// duplicates that the shared term carries a real multi-block skip index.
+    #[test]
+    fn bmw_breaks_boundary_ties_exactly_like_the_oracle() {
+        let mut pager = pager(4096);
+        let corpus = SKIP_MIN_DOC_FREQ + 64;
+        let docs: Vec<String> = (0..corpus)
+            .map(|_| "twin memory entry".to_owned())
+            .collect();
+        let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+        let ids = index_all(&mut pager, &doc_refs);
+        let mut contents = std::collections::HashMap::new();
+        for (id, d) in ids.iter().zip(&docs) {
+            contents.insert(*id, d.clone());
+        }
+        let root = pager.header().fts_root_page;
+        for k in [1, 2, 5, 100, corpus] {
+            let bmw = search(&pager, root, "twin entry", k, |_| true, len_of(&contents)).unwrap();
+            let (oracle, _) =
+                search_profiled(&pager, root, "twin entry", k, |_| true, len_of(&contents))
+                    .unwrap();
+            assert_eq!(bmw, oracle, "k={k}");
+            let lin =
+                search_linear(&pager, root, "twin entry", k, |_| true, len_of(&contents)).unwrap();
+            assert_eq!(bmw, lin, "k={k} (linear)");
+            // All scores tie, so the cut must be exactly id-ascending.
+            let mut expected = ids.clone();
+            expected.sort();
+            expected.truncate(k);
+            let got: Vec<Ulid> = bmw.iter().map(|h| h.record_id).collect();
+            assert_eq!(got, expected, "k={k} boundary ids");
+        }
+    }
+
+    /// BMW must actually *skip* (`docs/adr/0025`): on a corpus where one early
+    /// short document dominates (high tf, low length norm) and every later
+    /// block's impact bound cannot beat it, the search decodes only the block
+    /// it evaluates in and discards every later block via the block-max check
+    /// — while still returning exactly the oracle's top-k. This pins the
+    /// counters BMW-3 will measure with, so the instrumentation cannot rot.
+    #[test]
+    fn bmw_skips_blocks_and_still_matches_the_oracle() {
+        let mut pager = pager(4096);
+        let corpus = SKIP_MIN_DOC_FREQ * 3;
+        let mut docs: Vec<String> = Vec::new();
+        for i in 0..corpus {
+            if i == 3 {
+                // Short and term-heavy: its exact score beats the tf-1 blocks'
+                // upper bound, so once it is in the heap, later blocks skip.
+                docs.push("common ".repeat(30));
+            } else {
+                // Long and term-light: high length norm, weak everywhere.
+                docs.push(format!("common {}", "filler ".repeat(50)));
+            }
+        }
+        let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+        let ids = index_all(&mut pager, &doc_refs);
+        let mut contents = std::collections::HashMap::new();
+        for (id, d) in ids.iter().zip(&docs) {
+            contents.insert(*id, d.clone());
+        }
+        let root = pager.header().fts_root_page;
+
+        let (hits, counters) =
+            search_bmw_counted(&pager, root, "common", 1, |_| true, len_of(&contents)).unwrap();
+        let (oracle, _) =
+            search_profiled(&pager, root, "common", 1, |_| true, len_of(&contents)).unwrap();
+        assert_eq!(hits, oracle);
+        assert_eq!(hits[0].record_id, ids[3]);
+
+        let total_blocks = (corpus.div_ceil(SKIP_BLOCK_SIZE)) as u64;
+        assert_eq!(counters.blocks_total, total_blocks);
+        assert!(
+            counters.pivot_skips > 0,
+            "block-max check never fired: {counters:?}"
+        );
+        assert!(
+            counters.blocks_skipped() > counters.blocks_total / 2,
+            "BMW must skip most blocks: {counters:?}"
+        );
+        assert!(
+            counters.docs_evaluated <= (SKIP_BLOCK_SIZE + 8) as u64,
+            "documents outside the dominant block must never be evaluated: {counters:?}"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(40))]
+        /// BMW-2 property equivalence (`docs/adr/0025`): on arbitrary corpora
+        /// and queries, the BMW path returns exactly — same ids, bit-identical
+        /// scores, same order — what the exhaustive oracle and the linear scan
+        /// return, under arbitrary keep filters and vanished records. This is
+        /// the detector for both known BMW failure modes: a bound that
+        /// under-estimates (silent recall loss) and a boundary tie broken
+        /// differently.
+        #[test]
+        fn bmw_equals_oracle_on_random_corpora(
+            docs in proptest::collection::vec(
+                proptest::collection::vec(0usize..8, 1..24),
+                1..48,
+            ),
+            query in proptest::collection::vec(0usize..8, 1..5),
+            k in 1usize..12,
+            keep_mask in proptest::prelude::any::<u64>(),
+            vanish_mask in proptest::prelude::any::<u64>(),
+        ) {
+            const VOCAB: [&str; 8] = [
+                "alpha", "beta", "gamma", "delta", "memo", "rust", "engine", "wal",
+            ];
+            let mut pager = pager(4096);
+            let rendered: Vec<String> = docs
+                .iter()
+                .map(|d| d.iter().map(|&w| VOCAB[w]).collect::<Vec<_>>().join(" "))
+                .collect();
+            let doc_refs: Vec<&str> = rendered.iter().map(String::as_str).collect();
+            let ids = index_all(&mut pager, &doc_refs);
+            let mut contents = std::collections::HashMap::new();
+            for (i, (id, d)) in ids.iter().zip(&rendered).enumerate() {
+                if vanish_mask & (1 << (i % 64)) == 0 {
+                    contents.insert(*id, d.clone());
+                }
+            }
+            let kept: std::collections::HashSet<Ulid> = ids
+                .iter()
+                .enumerate()
+                .filter_map(|(i, id)| (keep_mask & (1 << (i % 64)) != 0).then_some(*id))
+                .collect();
+            let q = query.iter().map(|&w| VOCAB[w]).collect::<Vec<_>>().join(" ");
+            let root = pager.header().fts_root_page;
+            let keep = |id: Ulid| kept.contains(&id);
+
+            let bmw = search(&pager, root, &q, k, keep, len_of(&contents)).unwrap();
+            let (oracle, _) =
+                search_profiled(&pager, root, &q, k, keep, len_of(&contents)).unwrap();
+            proptest::prop_assert_eq!(&bmw, &oracle);
+            let lin = search_linear(&pager, root, &q, k, keep, len_of(&contents)).unwrap();
+            proptest::prop_assert_eq!(&bmw, &lin);
         }
     }
 
