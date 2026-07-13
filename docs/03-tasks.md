@@ -505,6 +505,21 @@ arquivo de versão anterior continua legível pelo layout antigo, nunca erro.
   limitação documentada).
 - **Verificação:** `cargo test --workspace` incluindo fuzz do parser novo de
   `FTS_POSTINGS`; `benches/run_all.sh --full` nos dois datasets.
+- **Status (2026-07-13): ENTREGUE em duas partes.** Parte 1 (delta+varint,
+  `format_version` 4, [ADR 0021](adr/0021-postings-fts-delta-varint.md)) em
+  2026-07-12. Parte 2 (skip lists, `format_version` 5,
+  [ADR 0022](adr/0022-postings-fts-skip-lists.md)) em 2026-07-13: gate reaberto
+  sobre o dataset fv4 regenerado pelo founder mediu recall p99 @ 100k = 224,88 ms
+  (< 50 ms segue reprovado), então a skip list prossegue. Corpo de postings v5
+  ganha skip index em listas ≥ 512 (blocos de 128, `first_id`/offset/max_tf por
+  bloco); resultado de busca byte-idêntico com/sem skip (oráculo
+  `search_profiled` + round-trip nos três layouts + equivalência
+  `lookup_via_skip`-vs-linear sobre corpus acima do limiar); fuzz decodifica os
+  três layouts + o lookup; seeds v5 (um com skip index real) somados aos v3/v4
+  preservados; round-trip cross-version v3/v4 sob build v5 verde. O ganho no hot
+  path exige reescrever a passada de bounds do scan em BlockMax-WAND (risco de
+  equivalência, task própria) — esta entrega é o formato + estrutura. Medição
+  @ 100k que fecha o NFR e o ADR 0017 fica para a task de fechamento da fase FT.
 
 ### FT4. Fechar o recall de pior-caso @ 100k (story S27) — independente de FT1-FT3
 

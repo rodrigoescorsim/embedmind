@@ -15,6 +15,27 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Added
+- **Skip lists in large FTS postings — `format_version` 5** (story S26 part 2,
+  [ADR 0022](docs/adr/0022-postings-fts-skip-lists.md)): a term whose postings
+  list reaches 512 entries now carries a **skip index** in front of the body —
+  fixed 128-entry blocks, each preceded by its first `record_id`, byte offset,
+  and max `term_freq` — so a lookup by id jumps straight to the one block that
+  can contain it and decodes only that block instead of the whole list. Each
+  block re-bases its delta chain so it decodes independently. Search results
+  are byte-identical with or without the skip index (the `search_profiled`
+  oracle, three-layout round-trip, and a dedicated `lookup_via_skip`-vs-linear
+  equivalence test — run over a corpus above the threshold so the skip layout
+  is the on-disk form — pin it). The layout is selected by the file's
+  `format_version`, never mixed: files from older builds (v ≤ 4) keep reading
+  **and writing** their own (fixed-width or skip-less delta+varint) layout, and
+  `vacuum`'s copy-based rebuild is the upgrade path. `fuzz_fts_page` now decodes
+  every input under all three postings layouts and drives the block-skipping
+  lookup over the same hostile bytes, with new v5 corpus seeds — including one
+  with a real skip index — alongside the preserved v3/v4 ones
+  ([FORMAT.md](docs/FORMAT.md) §2/§4/§11). The gain on the hot path needs a
+  BlockMax-WAND rewrite of the scan's bound pass (equivalence-risky, split into
+  its own task); this ships the format + structure. NFR impact @ 100k is
+  measured in the FT-phase closing task, not claimed here.
 - **FTS postings compressed with delta+varint — `format_version` 4** (story
   S26 part 1, [ADR 0021](docs/adr/0021-postings-fts-delta-varint.md)): a
   term's postings entries are now stored as the varint-encoded delta of each
