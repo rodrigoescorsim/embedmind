@@ -18,6 +18,7 @@
 use std::fmt::Write as _;
 
 use crate::competitors::{Competitor, CompetitorOutcome};
+use crate::fts_compare::{EMBEDMIND_FTS_SCOPE, FtsOutcome, TANTIVY_SCOPE, TANTIVY_VERSION};
 use crate::harness::SuiteResult;
 
 /// The spec's numeric NFRs (docs/01-spec.md §NFR / DESIGN targets). Kept here so
@@ -156,6 +157,21 @@ pub fn render_markdown(
     competitors: &[(&'static Competitor, CompetitorOutcome)],
     compared_on: Option<&str>,
 ) -> String {
+    render_markdown_with_fts(env, results, competitors, compared_on, None)
+}
+
+/// Same as [`render_markdown`], plus the full-text-only (BM25) comparison
+/// section when the caller ran it (`crate::fts_compare`, founder review
+/// 2026-07-13, external measurement for ADR 0011). `fts` is `None` when the
+/// caller did not run that comparison on this invocation — the section is
+/// simply omitted, never rendered with fabricated numbers.
+pub fn render_markdown_with_fts(
+    env: &RunEnv,
+    results: &[SuiteResult],
+    competitors: &[(&'static Competitor, CompetitorOutcome)],
+    compared_on: Option<&str>,
+    fts: Option<(&FtsOutcome, &FtsOutcome)>,
+) -> String {
     let mut out = String::new();
 
     // --- provenance header ---
@@ -183,6 +199,12 @@ pub fn render_markdown(
     // --- competitor comparison: two labeled planes (BENCHMARKS.md §1, S17) ---
     render_index_only_table(&mut out, compare_result, competitors);
     render_text_to_result_table(&mut out, compare_result, competitors);
+
+    // --- full-text-only (BM25): EmbedMind vs. tantivy (founder review
+    // 2026-07-13, external measurement for ADR 0011) ---
+    if let Some((embedmind, tantivy)) = fts {
+        render_fts_only_table(&mut out, embedmind, tantivy);
+    }
 
     // --- honesty: where EmbedMind loses ---
     render_losses(&mut out, compare_result, competitors);
@@ -343,6 +365,82 @@ fn render_lexical_lift_table(out: &mut String, results: &[SuiteResult]) {
         )
     });
     let _ = writeln!(out);
+}
+
+/// Full-text-only (BM25) comparison: EmbedMind's own inverted index
+/// (`Store::search_text`) vs. tantivy (`crate::fts_compare`), the external
+/// measurement gap ADR 0011 never had a number for (founder review
+/// 2026-07-13). Unlike the two vector planes above, both sides here are
+/// full-text engines — recall is graded against the same lexical
+/// ground-truth-by-construction cases `crate::lexical` uses, not a
+/// brute-force vector baseline.
+fn render_fts_only_table(out: &mut String, embedmind: &FtsOutcome, tantivy: &FtsOutcome) {
+    let _ = writeln!(
+        out,
+        "### Full-text only (BM25): EmbedMind vs. tantivy (same corpus, same queries, same k)\n"
+    );
+    let _ = writeln!(
+        out,
+        "_ADR 0011 rejected embedding tantivy for an **architectural** reason — it writes its own \
+         segments outside the `.mind` file with its own commit schedule, which would give the engine \
+         two independent sources of commit truth (CLAUDE.md decision 4, \"crash-safety before features\"). \
+         That decision does not depend on which engine is faster, and this table does not reopen it — it \
+         only puts a number on the tradeoff already made. What to do with the number (optimize the \
+         caseworn BM25 further, accept the gap, or revisit) is left to the founder. Ground truth is by \
+         construction (`crate::lexical`): each query is the exact literal of one ingested document, so \
+         recall is graded against an unambiguous target, not a brute-force oracle. Rows that could not \
+         run on this machine say so explicitly — never fabricated (BENCHMARKS.md §4 rule 6 scope notes \
+         apply here too)._\n"
+    );
+    let _ = writeln!(
+        out,
+        "| System | Version | recall@10 (lexical) | query p50 | query p99 | ingest (docs/sec) | on-disk size | returns | persists |"
+    );
+    let _ = writeln!(out, "|---|---|---:|---:|---:|---:|---:|---|---|");
+
+    render_fts_row(
+        out,
+        "EmbedMind",
+        env!("CARGO_PKG_VERSION"),
+        embedmind,
+        &EMBEDMIND_FTS_SCOPE,
+    );
+    render_fts_row(out, "tantivy", TANTIVY_VERSION, tantivy, &TANTIVY_SCOPE);
+    let _ = writeln!(out);
+}
+
+fn render_fts_row(
+    out: &mut String,
+    name: &str,
+    version: &str,
+    outcome: &FtsOutcome,
+    scope: &crate::fts_compare::FtsScope,
+) {
+    match outcome {
+        FtsOutcome::Measured(m) => {
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                name,
+                version,
+                opt_f4(m.recall_at_k),
+                opt_ms(m.query_p50_ms),
+                opt_ms(m.query_p99_ms),
+                opt_per_sec(m.ingest_per_sec),
+                m.index_bytes.map(human_bytes).unwrap_or_else(|| "—".into()),
+                scope.returns,
+                scope.persists,
+            );
+        }
+        FtsOutcome::NotMeasured { reason } => {
+            let _ = writeln!(
+                out,
+                "| {name} | {version} (target) | _not measured_ | _not measured_ | _not measured_ | _not measured_ | _not measured_ | {} | {} |",
+                scope.returns, scope.persists
+            );
+            let _ = writeln!(out, "|   ↳ | | | | | | _{reason}_ | | |");
+        }
+    }
 }
 
 /// Plane 1 (BENCHMARKS.md §1, S17): **index-only** — pre-computed vectors in,

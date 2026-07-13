@@ -28,9 +28,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use embedmind_bench::dataset::{self, DATASETS, DatasetSpec, VectorSet};
+use embedmind_bench::fts_compare::FtsOutcome;
 use embedmind_bench::harness::SuiteResult;
 use embedmind_bench::report::{self, RunEnv};
-use embedmind_bench::{competitors, default_data_dir, harness, regression};
+use embedmind_bench::{competitors, default_data_dir, fts_compare, harness, lexical, regression};
 use embedmind_core::api::{Store, StoreOptions};
 use embedmind_core::embed::{Embedder, OnnxEmbedder};
 use embedmind_core::storage::vfs::RealVfs;
@@ -127,6 +128,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut results: Vec<SuiteResult> = Vec::new();
     let mut competitor_outcomes = Vec::new();
     let mut compared_on: Option<&'static str> = None;
+    let mut fts_outcomes: Option<(FtsOutcome, FtsOutcome)> = None;
 
     for spec in &specs {
         println!("=== {} ({} memories) ===", spec.name, spec.count);
@@ -190,13 +192,70 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             )?;
             competitor_outcomes = competitors::run_all(&set, &result.query_vectors, harness::K);
             compared_on = Some(spec.name);
+
+            // Full-text-only (BM25) comparison: EmbedMind's own `search_text`
+            // vs. tantivy (`fts_compare`, founder review 2026-07-13, external
+            // measurement gap for ADR 0011). Same lexical ground-truth cases
+            // `harness::run_suite` already generates for the lift table, but
+            // ingested into a fresh scratch store here — reopening the just-
+            // measured dataset store for a second writer would violate the
+            // single-writer invariant (`docs/adr/0006`), and the dataset
+            // `.mind` on disk must stay unchanged run to run.
+            println!("  full-text-only (BM25) vs. tantivy...");
+            let fts_seed = spec.seed ^ 0x4654_5343_4F4D_5041_u64;
+            let fts_cases = lexical::generate_cases(fts_seed, LEXICAL_CASES);
+            let mut fts_store = Store::create_with(
+                Arc::new(embedmind_core::storage::sim::SimVfs::new()),
+                std::path::Path::new("fts-compare-scratch.mind"),
+                StoreOptions::default(),
+            )?;
+            let embedmind_fts = fts_compare::run_embedmind(&mut fts_store, &fts_cases, harness::K);
+            let tantivy_fts = fts_compare::run_tantivy(&fts_cases, harness::K);
+            if let FtsOutcome::Measured(m) = &embedmind_fts {
+                println!(
+                    "    EmbedMind search_text: recall@10 {} p50 {} p99 {}",
+                    m.recall_at_k
+                        .map(|v| format!("{v:.4}"))
+                        .unwrap_or_else(|| "—".into()),
+                    m.query_p50_ms
+                        .map(|v| format!("{v:.2} ms"))
+                        .unwrap_or_else(|| "—".into()),
+                    m.query_p99_ms
+                        .map(|v| format!("{v:.2} ms"))
+                        .unwrap_or_else(|| "—".into()),
+                );
+            }
+            match &tantivy_fts {
+                FtsOutcome::Measured(m) => println!(
+                    "    tantivy: recall@10 {} p50 {} p99 {}",
+                    m.recall_at_k
+                        .map(|v| format!("{v:.4}"))
+                        .unwrap_or_else(|| "—".into()),
+                    m.query_p50_ms
+                        .map(|v| format!("{v:.2} ms"))
+                        .unwrap_or_else(|| "—".into()),
+                    m.query_p99_ms
+                        .map(|v| format!("{v:.2} ms"))
+                        .unwrap_or_else(|| "—".into()),
+                ),
+                FtsOutcome::NotMeasured { reason } => {
+                    println!("    tantivy: not measured ({reason})")
+                }
+            }
+            fts_outcomes = Some((embedmind_fts, tantivy_fts));
         }
         results.push(result);
     }
 
     // --- render + persist ---
     let env = RunEnv::capture(run_date());
-    let markdown = report::render_markdown(&env, &results, &competitor_outcomes, compared_on);
+    let markdown = report::render_markdown_with_fts(
+        &env,
+        &results,
+        &competitor_outcomes,
+        compared_on,
+        fts_outcomes.as_ref().map(|(e, t)| (e, t)),
+    );
     let json = report::render_json(&env, &results, &competitor_outcomes, compared_on);
 
     // Read the baseline (if any) BEFORE persisting this run: the natural

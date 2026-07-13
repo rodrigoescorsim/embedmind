@@ -14,6 +14,34 @@ postmortem.
 Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
+### Added
+- **Full-text-only (BM25) external comparison: EmbedMind vs. tantivy** (founder
+  review 2026-07-13) — the measurement gap flagged in the same review that
+  produced BMW-3/BMW-4/BMW-5: every prior external comparison
+  (`compare-sqlite-vec`/`compare-zvec`/`compare-chroma`) only ever measured the
+  *vector* half against vector-only stores; the full-text (BM25) half had never
+  been measured against a dedicated full-text engine. New adapter
+  `benches/src/fts_compare.rs`, gated behind `--features compare-tantivy`
+  (pure Rust, no native toolchain — the simplest of the four `compare-*`
+  adapters), pinned to `tantivy = "0.26.1"`. Measures `Store::search_text`
+  (EmbedMind's keyword half in isolation, no RRF/vector fusion) against
+  tantivy's own BM25 query, on the same lexical ground-truth-by-construction
+  cases `benches/src/lexical.rs` already generates. Rendered as a new labeled
+  table in `benches/results/latest.md` and README ("Full-text only (BM25):
+  EmbedMind vs. tantivy"), separate from the two vector planes. Measured on
+  `agent-mem-10k`: both hit recall@10 = 1.0000 on the lexical ground truth;
+  tantivy is faster on query latency (p50 0.04 ms / p99 0.21 ms vs. EmbedMind's
+  0.11 ms / 0.74 ms) while EmbedMind ingests faster in this harness's
+  one-at-a-time protocol (1196 docs/s vs. 441 docs/s — see
+  `benches/src/fts_compare.rs` for why the two ingest numbers aren't directly
+  comparable). **This does not reopen [ADR 0011](docs/adr/0011-full-text-indice-invertido-proprio.md)**
+  (index invertido próprio, não tantivy): that decision was architectural
+  (single `.mind` file + single WAL — CLAUDE.md decision 4), not a speed bet,
+  and a mature engine with decades of optimization outscoring a young
+  purpose-built one on raw BM25 latency was the expected shape of this result,
+  not new evidence for or against the tradeoff. What to do with the number is
+  left to the founder — not decided in this change.
+
 ### Changed
 - **BMW-5 (post-BMW review): the suspected benchmark-methodology artifact was
   refuted — session locality + Zipf makes BlockMax-WAND skip *fewer* blocks,
