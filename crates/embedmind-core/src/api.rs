@@ -879,20 +879,26 @@ impl Store {
             &query.text,
             query.limit,
             |id| {
+                use index::fts::KeepOutcome;
                 if filter_error.borrow().is_some() {
-                    return false;
+                    return KeepOutcome::Tombstoned;
                 }
                 match load(id) {
-                    Ok(Some(rec)) if in_scope(&query, &rec) => {
-                        match query.record_passes_filters(&rec) {
-                            Ok(pass) => pass,
-                            Err(e) => {
-                                *filter_error.borrow_mut() = Some(e);
-                                false
+                    Ok(Some(rec)) if !rec.tombstone && !rec.superseded => {
+                        if !in_scope(&query, &rec) {
+                            KeepOutcome::OutOfScope
+                        } else {
+                            match query.record_passes_filters(&rec) {
+                                Ok(true) => KeepOutcome::Accepted,
+                                Ok(false) => KeepOutcome::FilteredOut,
+                                Err(e) => {
+                                    *filter_error.borrow_mut() = Some(e);
+                                    KeepOutcome::FilteredOut
+                                }
                             }
                         }
                     }
-                    _ => false,
+                    _ => KeepOutcome::Tombstoned,
                 }
             },
             |id| Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content))),

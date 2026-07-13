@@ -26,7 +26,7 @@ use embedmind_bench::dataset::DatasetSpec;
 use embedmind_bench::{default_data_dir, recall};
 use embedmind_core::api::{Query, Store, StoreOptions};
 use embedmind_core::embed::{Embedder, OnnxEmbedder};
-use embedmind_core::index::fts::SearchPhaseTimings;
+use embedmind_core::index::fts::{KeepOutcomeCounts, SearchPhaseTimings};
 use embedmind_core::storage::vfs::RealVfs;
 
 /// Same `k` the harness reports (`docs/BENCHMARKS.md` §3).
@@ -117,6 +117,7 @@ struct PhaseTotals {
     scoring_ns: u64,
     terms_matched: u64,
     postings_visited: u64,
+    keep_outcomes: KeepOutcomeCounts,
 }
 
 impl PhaseTotals {
@@ -127,6 +128,10 @@ impl PhaseTotals {
         self.scoring_ns += t.scoring_ns;
         self.terms_matched += u64::from(t.terms_matched);
         self.postings_visited += t.postings_visited;
+        self.keep_outcomes.accepted += t.keep_outcomes.accepted;
+        self.keep_outcomes.tombstoned += t.keep_outcomes.tombstoned;
+        self.keep_outcomes.out_of_scope += t.keep_outcomes.out_of_scope;
+        self.keep_outcomes.filtered_out += t.keep_outcomes.filtered_out;
     }
 
     fn report(&self, dataset: &str, queries: usize, wall_ns: &mut [u64]) {
@@ -180,6 +185,41 @@ impl PhaseTotals {
         println!(
             "avg postings visited per query: {:.1}",
             self.postings_visited as f64 / queries.max(1) as f64
+        );
+
+        let o = &self.keep_outcomes;
+        let total = o.total().max(1);
+        let outcome_pct = |n: u64| 100.0 * n as f64 / total as f64;
+        println!(
+            "\n## FTOPT-0: keep outcome breakdown ({} distinct candidates re-checked)\n",
+            o.total()
+        );
+        println!("| outcome | count | share |");
+        println!("|---|---:|---:|");
+        println!(
+            "| accepted (content load unavoidable) | {} | {:.1}% |",
+            o.accepted,
+            outcome_pct(o.accepted)
+        );
+        println!(
+            "| rejected: tombstoned/missing/superseded | {} | {:.1}% |",
+            o.tombstoned,
+            outcome_pct(o.tombstoned)
+        );
+        println!(
+            "| rejected: out of scope (project/agent) | {} | {:.1}% |",
+            o.out_of_scope,
+            outcome_pct(o.out_of_scope)
+        );
+        println!(
+            "| rejected: metadata filter | {} | {:.1}% |",
+            o.filtered_out,
+            outcome_pct(o.filtered_out)
+        );
+        println!(
+            "| **rejected (any reason)** | **{}** | **{:.1}%** |",
+            o.rejected(),
+            outcome_pct(o.rejected())
         );
     }
 }
