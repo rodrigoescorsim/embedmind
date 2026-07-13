@@ -15,6 +15,25 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Changed
+- **`fts::search` Pass 1 rewritten as BlockMax-WAND on `format_version` ≥ 6
+  files** (BMW-2, [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md)):
+  instead of decoding every posting of every matched term to accumulate
+  per-candidate bounds, the search now walks one cursor per term
+  document-at-a-time, skipping whole postings blocks — undecoded — whose
+  per-block impact bounds (the fv6 `last_id`/`max_term_freq` pair, ADR 0024)
+  cannot beat the current k-th exact score. **Result equivalence is verified,
+  not assumed:** ties break deterministically by `record_id` before the cut on
+  both paths, all bound comparisons carry an f64 anti-rounding slack, and a
+  triple-equivalence suite (deterministic large corpus, tie-boundary corpus of
+  identical documents, proptest over random corpora/queries/filters) asserts
+  the BMW top-N — ids, bit-identical scores, order — equals both the
+  exhaustive oracle and the linear scan, so hybrid `recall` is unchanged by
+  composition. v4/v5 files (no per-block bounds) keep the linear FT2 path,
+  which also remains as the equivalence oracle. Skip-work counters
+  (blocks skipped/decoded, documents evaluated) ship behind the same
+  hidden-bench surface as FT1's timings, for the BMW-3 measurement; the
+  official @ 100k run and the < 50 ms NFR verdict are BMW-3's, not this
+  change's.
 - **Full-text lift measured on lexical queries, @ 10k and @ 100k — the benefit
   side of the FT phase, not just the cost** (product review 2026-07-13,
   [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) §"O
