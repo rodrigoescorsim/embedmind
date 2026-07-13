@@ -14,6 +14,28 @@ postmortem.
 Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
+### Changed
+- **Full-text optimization phase (FT) closes its accounting — `recall p99 @
+  100k` NFR still misses target** (closing task, [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md)):
+  official `benches/run_all.sh --full` run, 2026-07-13, published in
+  [`benches/results/0.1.0-dev.json`](benches/results/0.1.0-dev.json). `recall`
+  p99 end-to-end dropped from the phase's original baseline of **1,224.62 ms
+  to 224.88 ms @ 100k (~5.4x)** through the accumulated effect of early
+  termination (ADR 0018) and delta+varint postings (ADR 0021) — the target
+  of **< 50 ms is not met**. @ 10k: ~115 ms → **30.15 ms**. recall@10
+  (tie-aware, ADR 0019) stays 1.0000 mean/p10/p50/min on both datasets — no
+  regression. Peak RSS stays within the 300 MiB ceiling (117–120 MiB @ 100k,
+  consistent with ADR 0020). This run does **not** exercise the FTS skip
+  index (ADR 0022, `format_version` 5): the benchmark `.mind` files are v4
+  (delta+varint only), and even on a v5 file the skip structure only cuts
+  work once `fts::search`'s bounds pass is rewritten as BlockMax-WAND — a
+  separate, equivalence-risky task the skip-list story deliberately left
+  undone. **Founder decision pending, not made in this commit**: pursue that
+  rewrite to close the remaining ~190 ms of full-text cost, or accept
+  224.88 ms as a documented scale limitation for the M1 launch. Both exit
+  criteria from ADR 0017 ("passes measured" or "founder consciously accepts
+  a documented limitation") remain open.
+
 ### Added
 - **Skip lists in large FTS postings — `format_version` 5** (story S26 part 2,
   [ADR 0022](docs/adr/0022-postings-fts-skip-lists.md)): a term whose postings

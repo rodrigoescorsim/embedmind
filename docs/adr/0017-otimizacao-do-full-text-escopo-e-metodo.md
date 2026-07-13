@@ -1,6 +1,8 @@
 # ADR 0017 — Otimização do full-text: escopo e método (profiling antes de estrutura)
 
-**Status:** Aceito (jul/2026). Abre a fase FT (`03-tasks.md`), motivada pelo NFR
+**Status:** Aceito (jul/2026); **fase FT fechada nos números em 2026-07-13, NFR de latência
+segue reprovado** (ver "Fechamento da fase FT" abaixo — decisão de prosseguir vs. aceitar a
+limitação é do founder, pendente). Abre a fase FT (`03-tasks.md`), motivada pelo NFR
 reprovado da story S16/BQ1 ([ADR 0015](0015-ef-search-default-escalado-pelo-indice.md)):
 `recall` p99 @ 100k medido em 1.224,62 ms contra o teto de 50 ms — 24x acima.
 
@@ -128,6 +130,78 @@ ficam descartadas por medição (1,2% e 5,5% respectivamente, não 4 — o `Hash
 Candidato natural para a próxima task de otimização (FT2): eliminar ou reduzir a recarga do
 registro inteiro dentro de `keep` por candidato — não decidido aqui, apenas anotado; esta task é
 somente medição, nenhuma otimização entra neste commit.
+
+## Fechamento da fase FT — números finais @ 10k e @ 100k
+
+Medição oficial `benches/run_all.sh --full` (1000 queries, ambos os datasets, `agent-mem-10k`
+regenerado e `agent-mem-100k` regenerado pelo founder em `format_version` 4 — header `MINDFMT1 04
+…` confirmado byte a byte), rodada de 2026-07-13, publicada em
+[`benches/results/0.1.0-dev.json`](../../benches/results/0.1.0-dev.json) (espelho legível em
+`latest.md`, mesma invocação). Compreende o efeito acumulado de FT2 (early termination, ADR 0018)
++ FT3 parte 1 (delta+varint, ADR 0021) sobre o baseline original desta ADR. **Não** inclui o efeito
+de FT3 parte 2 (skip lists, `format_version` 5, ADR 0022): a estrutura de skip foi implementada e
+testada, mas o `.mind` desta rodada é v4 (delta+varint sem skip) e, mesmo num arquivo v5, o hot path
+de `fts::search` ainda materializa a lista inteira de cada termo na passada de bounds — o skip index
+só corta trabalho de verdade com uma reescrita dessa passada em BlockMax-WAND, deliberadamente fora
+do escopo do ADR 0022 (ver esse ADR §5, "Honestidade sobre onde o ganho entra").
+
+### `recall` p99 — end-to-end (embed + engine híbrido)
+
+| dataset | antes (baseline desta ADR / FT5 confirm) | depois (FT2+FT3-parte-1, esta rodada) | razão |
+|---|---:|---:|---:|
+| agent-mem-10k | ~115 ms (§Contexto, pré-FT) | **30,15 ms** | ~3,8x |
+| agent-mem-100k | 1.224,62 ms (§Contexto) / 956,80 ms (confirmação oficial FT5, `docs/adr/0020`) | **224,88 ms** | ~5,5x vs. FT5, ~5,4x vs. baseline original |
+
+Decomposição @ 100k desta rodada (`query_embed_p99_ms` / `query_engine_p99_ms` / `query_vector_p99_ms`
+do JSON): embed 6,21 ms · engine (FTS+fusão+load, sem embed) 219,55 ms · vetor puro (HNSW só) 29,32
+ms. Os ~190 ms de diferença entre engine e vetor-only continuam sendo o meio full-text — o mesmo
+gargalo isolado na FT1, reduzido de ordem de grandeza mas não eliminado.
+
+@ 10k a mesma decomposição: embed 5,52 ms · engine 25,29 ms · vetor puro 8,26 ms.
+
+### recall@10 (tie-aware, ADR 0019) — média / p10 / p50 / mín
+
+| dataset | média | p10 | p50 | mín |
+|---|---:|---:|---:|---:|
+| agent-mem-10k | 1,0000 | 1,0000 | 1,0000 | 1,0000 |
+| agent-mem-100k | 1,0000 | 1,0000 | 1,0000 | 1,0000 |
+
+Sem regressão em nenhum dataset desde a S27 (tie-aware grading, ADR 0019) — os números eram já
+1,0000/1,0000 antes desta fase de otimização de scan; FT2/FT3 não tocam BM25/HNSW/RRF, então essa
+paridade era esperada, não uma surpresa desta rodada.
+
+### RSS de pico — ingest / query
+
+| dataset | ingest | query |
+|---|---:|---:|
+| agent-mem-10k | 96,60 MiB | 99,24 MiB |
+| agent-mem-100k | 117,01 MiB | 118,25 MiB |
+
+Consistente com o fechamento da FT5 (ADR 0020, ~120 MiB nessa mesma medição em 2026-07-12) — bem
+dentro do teto de 300 MiB, nenhuma regressão introduzida pela FT3.
+
+### Veredito dos NFRs desta fase
+
+| NFR | alvo | medido @ 100k | veredito |
+|---|---|---:|:---:|
+| `recall` p99 (end-to-end) | < 50 ms | 224,88 ms | ❌ **reprovado** |
+| pior query (recall@10, tie-aware) | ≥ 0,70 | 1,0000 (mín) | ✅ aprovado |
+| RSS de pico | < 300 MiB | 118,3 MiB (query) / 117,0 MiB (ingest) | ✅ aprovado |
+
+**O NFR de latência segue reprovado, registrado sem meias-palavras.** A fase FT reduziu o p99 do
+`recall` híbrido @ 100k em ~5,4x (1.224,62 ms → 224,88 ms) através de três mudanças que preservam
+byte-a-byte a equivalência de resultado (FT2 early termination, FT3 delta+varint, FT3 skip-index
+estrutural) — mas o teto de 50 ms definido no NFR original não foi alcançado. O caminho conhecido e
+já projetado para o próximo corte (ligar o skip index de fv5 ao hot path via BlockMax-WAND, ADR
+0022 §5) não foi executado nesta fase porque muda a ordem de avaliação dos candidatos e é
+equivalence-risky o bastante para exigir sua própria task, com o dado desta medição em mãos.
+
+**Decisão pendente do founder** (não tomada nesta sessão, apenas documentation-only): prosseguir com
+uma quinta task (BlockMax-WAND sobre o skip index fv5, mirando fechar os ~190 ms restantes do meio
+full-text) ou aceitar 224,88 ms como limitação de escala documentada para o lançamento do M1,
+revisitando pós-tração. As duas opções descritas no ADR original (§"Critério de saída da fase") —
+"passa medido" ou "founder decide conscientemente aceitar uma limitação documentada" — continuam
+ambas em aberto; esta sessão só fecha a contabilidade de números, não escolhe entre elas.
 
 ## Alternativas rejeitadas
 
