@@ -35,5 +35,6 @@ vive aqui. As questões em aberto do DESIGN §12 viram novos ADRs quando resolvi
 | [0023](0023-blockmax-wand-decisao-fase-bmw.md) | BlockMax-WAND para fechar o NFR de latência do full-text (decisão do founder) | Aceito |
 | [0024](0024-bound-de-impacto-por-bloco-fv6.md) | Bound de impacto por bloco no skip index FTS (`format_version` 6) | Aceito |
 | [0025](0025-blockmax-wand-na-busca-fts.md) | BlockMax-WAND na busca full-text (BMW-2) | Aceito |
+| [0026](0026-corpus-de-localidade-nao-reabilita-o-bmw.md) | Corpus com localidade de sessão + Zipf não reabilita o BMW (BMW-5) | Aceito |
 
 Template: `Status · Contexto · Decisão · Alternativas rejeitadas · Consequências`.

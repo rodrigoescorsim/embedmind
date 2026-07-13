@@ -45,6 +45,47 @@ impl Rng {
     fn pick<T: Copy>(&mut self, items: &[T]) -> T {
         items[self.below(items.len())]
     }
+
+    /// Picks an index in `[0, n)` following a Zipf(1) distribution over rank:
+    /// rank 0 (the head of the vocabulary) is drawn far more often than the
+    /// tail, weight ∝ 1/(rank+1). This is the shape a real agent vocabulary
+    /// takes — a handful of project/tech terms dominate, a long tail of rare
+    /// ones — as opposed to [`below`]'s flat uniform pick. Deterministic in the
+    /// RNG state, so a `generate_local` run stays byte-reproducible.
+    ///
+    /// The harmonic weights are recomputed per call. The banks here are tiny
+    /// (≤ a couple dozen entries), so this is a handful of adds per draw — not
+    /// worth caching, and caching would tie the result to call order in a way
+    /// that is easy to get subtly wrong.
+    fn zipf(&mut self, n: usize) -> usize {
+        if n <= 1 {
+            return 0;
+        }
+        // Harmonic number H_n = sum_{r=1..=n} 1/r — the normalizer.
+        let mut harmonic = 0.0f64;
+        for r in 1..=n {
+            harmonic += 1.0 / r as f64;
+        }
+        // Draw a uniform target in [0, H_n) with 53 bits of RNG mantissa, then
+        // walk the cumulative weights until it is covered. rank 0 owns the
+        // widest slice (1/1), the tail the thinnest (1/n).
+        let target = (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * harmonic;
+        let mut acc = 0.0f64;
+        for r in 1..=n {
+            acc += 1.0 / r as f64;
+            if target < acc {
+                return r - 1;
+            }
+        }
+        n - 1
+    }
+
+    /// Picks one element by value, Zipf-weighted by position (see [`zipf`]).
+    /// The bank's *order* becomes its frequency rank: earlier entries are the
+    /// "head" of the vocabulary.
+    fn pick_zipf<T: Copy>(&mut self, items: &[T]) -> T {
+        items[self.zipf(items.len())]
+    }
 }
 
 /// One generated memory: content plus the project it is scoped to. Provenance
@@ -177,6 +218,20 @@ impl Slots {
             v: rng.pick(VERBS),
         }
     }
+
+    /// Same four banks, but each slot Zipf-weighted by its position (see
+    /// [`Rng::zipf`]): the head of every bank (e.g. `Rust`, `storage`) shows up
+    /// far more often than the tail. This is the vocabulary skew a real agent
+    /// store has and the uniform [`draw`] deliberately does not — the "long
+    /// tail" half of the locality/Zipf corpus.
+    fn draw_zipf(rng: &mut Rng) -> Slots {
+        Slots {
+            a: rng.pick_zipf(NOUNS_A),
+            b: rng.pick_zipf(NOUNS_B),
+            c: rng.pick_zipf(CONTEXTS),
+            v: rng.pick_zipf(VERBS),
+        }
+    }
 }
 
 fn fill_with(template: &str, slots: &Slots) -> String {
@@ -211,6 +266,104 @@ pub fn generate(seed: u64, count: usize) -> Vec<GenMemory> {
         out.push(GenMemory { content, project });
     }
     out
+}
+
+/// Generates `count` synthetic memories from `seed` with **session locality**
+/// and a **Zipf vocabulary**, deterministically — the "realistic" counterpart
+/// to [`generate`]'s uniform "documented worst case" (`docs/adr/0026`).
+///
+/// Two ways this differs from [`generate`], both mimicking how an agent store
+/// actually fills up:
+///
+/// 1. **Session locality.** Memories are emitted in *bursts*: a work session
+///    picks one project and one "subject" ([`Slots`]) and writes a run of
+///    `SESSION_LEN` (± jitter) consecutive memories about it, each a light
+///    variation of that subject. Because the store assigns record ids (ULIDs)
+///    in ingest order, a burst lands in a **contiguous id window** — so a
+///    frequent term's postings cluster instead of spreading uniformly across
+///    the whole id space. That contiguity is exactly what gives BlockMax-WAND's
+///    block-max refinement a chance to prove a whole 128-posting block below
+///    threshold (`BmwCursor::advance_to`, `fts.rs`): uniform spread never lets
+///    a block's bound get homogeneous enough.
+/// 2. **Zipf vocabulary.** Slots are drawn Zipf-weighted ([`Slots::draw_zipf`])
+///    rather than uniformly, so a few head terms dominate (crossing the
+///    `SKIP_MIN_DOC_FREQ` = 512 threshold that turns a term's postings into a
+///    real skip index) while a long tail stays rare — the frequency shape a
+///    real vocabulary has.
+///
+/// The official regression corpus stays on [`generate`]; this is an additional
+/// mode measured side by side, never a replacement (see `docs/adr/0026`).
+pub fn generate_local(seed: u64, count: usize) -> Vec<GenMemory> {
+    let mut rng = Rng::new(seed);
+    let banks: &[&[&str]] = &[DECISIONS, FACTS, PREFERENCES, CODE_NOTES];
+    let mut out = Vec::with_capacity(count);
+    while out.len() < count {
+        // One work session: a fixed project and a Zipf-drawn subject reused
+        // across the whole burst, so the session's terms cluster in a
+        // contiguous id window.
+        let project = rng.pick_zipf(PROJECTS).to_owned();
+        let subject = Slots::draw_zipf(&mut rng);
+        // Burst length around SESSION_LEN, jittered so blocks are not all
+        // aligned to a single period (which would be its own artifact).
+        let burst = SESSION_LEN + rng.below(SESSION_JITTER);
+        for _ in 0..burst {
+            if out.len() >= count {
+                break;
+            }
+            let bank: &[&str] = rng.pick(banks);
+            // Most sentences restate the session subject (locality); a minority
+            // pull one fresh Zipf slot so a burst is variations-on-a-theme, not
+            // literal duplicates — the same term recurs, the sentence does not.
+            let sentences = 1 + rng.below(3);
+            let mut content = String::new();
+            for s in 0..sentences {
+                if s > 0 {
+                    content.push(' ');
+                }
+                let template: &str = rng.pick(bank);
+                let slots = session_slots(&subject, &mut rng);
+                content.push_str(&fill_with(template, &slots));
+            }
+            out.push(GenMemory {
+                content,
+                project: project.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Nominal number of memories in one work session burst — the locality window
+/// width. Chosen a few blocks wide (> `SKIP_BLOCK_SIZE` = 128) so a session's
+/// dominant term fills more than a single block's worth of contiguous
+/// postings, which is the precondition for a whole block to be skippable.
+const SESSION_LEN: usize = 400;
+/// Jitter added to each burst so block boundaries are not all phase-aligned.
+const SESSION_JITTER: usize = 200;
+
+/// Derives one memory's slots from its session `subject`: keeps the subject's
+/// terms most of the time (locality), occasionally swapping a single slot for a
+/// fresh Zipf draw so the burst is a theme with variations rather than repeated
+/// verbatim. Deterministic in `rng`.
+fn session_slots(subject: &Slots, rng: &mut Rng) -> Slots {
+    let mut s = Slots {
+        a: subject.a,
+        b: subject.b,
+        c: subject.c,
+        v: subject.v,
+    };
+    // ~1 in 4 sentences varies exactly one slot; the rest reuse the subject
+    // wholesale. This keeps the session's head term (slot a/c) dense enough to
+    // cross SKIP_MIN_DOC_FREQ within the burst's id window.
+    if rng.below(4) == 0 {
+        match rng.below(4) {
+            0 => s.a = rng.pick_zipf(NOUNS_A),
+            1 => s.b = rng.pick_zipf(NOUNS_B),
+            2 => s.c = rng.pick_zipf(CONTEXTS),
+            _ => s.v = rng.pick_zipf(VERBS),
+        }
+    }
+    s
 }
 
 /// How the second half of a [`duplicate_pairs`] pair restates the first —
@@ -332,6 +485,84 @@ mod tests {
             assert!(m.content.len() < 800, "unexpectedly long: {}", m.content);
             assert!(PROJECTS.contains(&m.project.as_str()));
         }
+    }
+
+    #[test]
+    fn locality_generation_is_deterministic_for_a_fixed_seed() {
+        let a = generate_local(0xBE7C_2026, 2000);
+        let b = generate_local(0xBE7C_2026, 2000);
+        assert_eq!(a, b, "same seed must reproduce the same locality corpus");
+    }
+
+    #[test]
+    fn locality_generation_honors_count_exactly() {
+        // Bursts overshoot internally, so the count truncation must be exact
+        // (not rounded up to a whole session).
+        for n in [1usize, 399, 400, 401, 1234] {
+            assert_eq!(generate_local(7, n).len(), n, "count {n} must be exact");
+        }
+    }
+
+    #[test]
+    fn locality_differs_from_uniform_for_the_same_seed() {
+        // The two modes are genuinely different distributions, not two names
+        // for one generator.
+        let uniform = generate(3, 1000);
+        let local = generate_local(3, 1000);
+        assert_ne!(uniform, local, "locality mode must not equal uniform mode");
+    }
+
+    #[test]
+    fn locality_produces_contiguous_project_bursts() {
+        // The defining property of the locality corpus: memories arrive in
+        // runs sharing a project, not shuffled per-memory like `generate`.
+        // Measure the average run length of the project field; it must be many
+        // memories long (a burst), not ~1 (uniform).
+        let local = generate_local(0xA11CE, 4000);
+        let mut runs = 1usize;
+        for w in local.windows(2) {
+            if w[0].project != w[1].project {
+                runs += 1;
+            }
+        }
+        let avg_run = local.len() as f64 / runs as f64;
+        assert!(
+            avg_run > 50.0,
+            "locality bursts should average well over 50 memories, got {avg_run:.1}"
+        );
+
+        // Sanity contrast: the uniform corpus switches project almost every
+        // memory, so its average run is short.
+        let uniform = generate(0xA11CE, 4000);
+        let mut u_runs = 1usize;
+        for w in uniform.windows(2) {
+            if w[0].project != w[1].project {
+                u_runs += 1;
+            }
+        }
+        let u_avg = uniform.len() as f64 / u_runs as f64;
+        assert!(
+            u_avg < 5.0,
+            "uniform corpus should switch project constantly, got avg run {u_avg:.1}"
+        );
+    }
+
+    #[test]
+    fn zipf_head_dominates_the_tail() {
+        // Over many draws the rank-0 element must be picked far more often than
+        // the last — the defining Zipf skew. Uniform would give ~equal counts.
+        let mut rng = Rng::new(0xF00D);
+        let n = 12;
+        let mut counts = vec![0usize; n];
+        for _ in 0..20_000 {
+            counts[rng.zipf(n)] += 1;
+        }
+        assert!(
+            counts[0] > counts[n - 1] * 4,
+            "head {} should dominate tail {}",
+            counts[0],
+            counts[n - 1]
+        );
     }
 
     #[test]

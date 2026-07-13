@@ -15,6 +15,30 @@ Pre-v0.1 — under active development, repo private until M1 completes
 (see [ROADMAP.md](ROADMAP.md)).
 
 ### Changed
+- **BMW-5 (post-BMW review): the suspected benchmark-methodology artifact was
+  refuted — session locality + Zipf makes BlockMax-WAND skip *fewer* blocks,
+  not more** ([ADR 0026](docs/adr/0026-corpus-de-localidade-nao-reabilita-o-bmw.md),
+  updates [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md)
+  §"Correção da BMW-5"). BMW-3 left open a suspicion that the uniform synthetic
+  corpus under-sold BMW by not modelling real agent-memory distribution. BMW-5
+  built exactly that corpus — a new `corpus::generate_local` mode
+  (`benches/src/corpus.rs`, dataset `agent-mem-locality-10k`) with session
+  bursts (memories about one project in contiguous ULID windows) and a Zipf
+  vocabulary — and measured it side by side against the uniform worst case @10k.
+  Result is the **opposite** of the hypothesis: `blocks_skipped` 0.0%
+  (18/197,144) on the locality corpus vs 0.3% (901/296,635) uniform; queries
+  with real BMW reach fall from 45.9% to 1.8%. Mechanism: locality concentrates
+  a hot term's postings and leaves the per-block impact bound high and uniform
+  across nearly every block, whereas block-max refinement needs low-impact
+  blocks interleaved to prove a skip. The `query engine` p99 does drop on the
+  locality corpus (83.86 vs 133.21 ms @10k) but from less aggregate work (Zipf →
+  shallower postings), not from more skipped blocks — BMW contributes 0.0%.
+  **Conclusion: the BMW efficacy limitation is the algorithm/format on this data
+  shape, not a benchmark-methodology artifact — the open doubt is closed, with
+  no promise the NFR closes.** @10k decided it; the @100k long run was not
+  needed. Uniform corpus stays the official regression baseline; the locality
+  mode is an additional benchmark tool. Deterministic per seed (tested). No
+  production-code or file-format change — only the corpus generator and docs.
 - **BMW-3/BMW-4 (fase BMW, fechamento): `recall p99 @ 100k < 50 ms` NFR
   measured with BlockMax-WAND active — still ❌ missed, 224.00 ms**
   ([ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md)

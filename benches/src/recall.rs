@@ -60,10 +60,16 @@ pub struct RecallReport {
 pub fn query_texts(spec: &DatasetSpec, n: usize) -> Vec<String> {
     // XOR the corpus seed into a distinct query-seed namespace.
     let query_seed = spec.seed ^ 0x5171_5945_5259_5551;
-    corpus::generate(query_seed, n)
-        .into_iter()
-        .map(|m| m.content)
-        .collect()
+    // Queries follow the *same* distribution as the dataset they probe: a
+    // locality/Zipf dataset is queried with locality/Zipf-shaped texts (heavy
+    // on the head vocabulary), which is exactly where a frequent term's skip
+    // index — and therefore BlockMax-WAND — is exercised. Querying it with
+    // uniform texts would under-hit the very terms BMW-5 measures.
+    let corpus = match spec.mode {
+        crate::dataset::CorpusMode::Uniform => corpus::generate(query_seed, n),
+        crate::dataset::CorpusMode::Locality => corpus::generate_local(query_seed, n),
+    };
+    corpus.into_iter().map(|m| m.content).collect()
 }
 
 /// Measures recall@k of `store`'s HNSW against the brute-force `baseline` over

@@ -349,11 +349,27 @@ sintético não tem.
 **Isto não é "o BMW falhou" — é "o corpus de benchmark não tem a distribuição de postings que o
 BMW foi desenhado para explorar".** O algoritmo (ADR 0025) está correto e a suite de equivalência
 prova que o resultado é idêntico ao oráculo; o que não se confirmou foi o ganho de latência *neste
-workload de medição*. Registrado como limitação de metodologia de benchmark, não como bug de
-produção: um corpus real de memórias de agente pode ter termos verdadeiramente raros e
-concentrados (nomes próprios, identificadores específicos de um projeto) onde o BMW cortaria mais
-— mas o harness sintético atual (`benches/src/corpus.rs`) não modela essa concentração, e ajustar o
-gerador de corpus para medir isso corretamente é um trabalho de escopo próprio, fora desta task.
+workload de medição*. A BMW-3 registrou isto como **suspeita** de limitação de metodologia de
+benchmark (a hipótese de que um corpus com termos concentrados/localizados cortaria mais) — mas
+deixou explícito que era hipótese não confirmada, e a BMW-5 abaixo a testou.
+
+#### Correção da BMW-5 (2026-07-13): a suspeita de metodologia foi refutada — ver [ADR 0026](0026-corpus-de-localidade-nao-reabilita-o-bmw.md)
+
+A BMW-5 construiu o corpus que esta seção especulava faltar: `corpus::generate_local`
+(`benches/src/corpus.rs`), com **localidade de sessão** (rajadas de memórias sobre o mesmo
+projeto/termo em ULIDs contíguos) e **vocabulário Zipf** (poucos termos dominam, cauda longa) — a
+distribuição de memória real de agente. Rodou a suite lado a lado @10k (uniforme vs. localidade).
+Resultado **oposto à hipótese**: o corpus de localidade pula **menos** blocos, não mais —
+`blocks_skipped` 0,0% (18/197 144) contra 0,3% (901/296 635) do uniforme; queries com alcance real
+do BMW caem de 45,9% para 1,8%. Mecanicamente: a localidade concentra as ocorrências do termo
+quente e deixa o `max_term_freq` (bound de impacto) **alto e uniforme em quase todos os blocos**, e
+o refinamento block-max precisa justamente do contrário — blocos com impacto baixo intercalados
+para provar exclusão. **A limitação de eficácia do BMW é do algoritmo/formato sobre este padrão de
+dado, não um artefato da metodologia de benchmark.** O `query engine` p99 até cai no corpus de
+localidade (83,86 vs 133,21 ms @10k), mas por menos trabalho agregado (Zipf → postings mais rasas),
+não por mais blocos pulados — o BMW contribui com 0,0%. A dúvida aberta desta seção fica **fechada**
+e sem promessa sobre o NFR: o dado sintético que temos, se algo, é *pior* para o BMW, não melhor.
+Detalhes e números completos no ADR 0026.
 
 ### Full-text lift (FT6) revalidado nesta rodada
 
@@ -376,10 +392,12 @@ do ADR 0023 ("se o BMW não fechar o NFR, vector-only default volta à mesa") es
 decisão do founder, não tomada nesta sessão. As opções conhecidas com dado em mãos: aceitar a
 limitação de latência como documentada (o full-text lift medido, FT6, +0,18 recall@10 @100k,
 continua sendo valor de produto real), ou reverter full-text para opt-in, ou investir em uma
-próxima otimização (ajustar o gerador de corpus de benchmark para medir com distribuições de
-postings mais realistas, e/ou revisitar o refinamento block-max para pular parcialmente dentro de
-um bloco). Nenhuma dessas opções foi escolhida aqui; o número e a causa raiz estão reportados sem
-meias-palavras no README/CHANGELOG, e a escolha entre elas fica pendente.
+próxima otimização (revisitar o refinamento block-max para pular parcialmente dentro de um bloco).
+A opção "medir com distribuições de postings mais realistas" foi **executada pela BMW-5**
+([ADR 0026](0026-corpus-de-localidade-nao-reabilita-o-bmw.md)) e não muda o veredito — a
+distribuição realista é, se algo, pior para o BMW. Nenhuma das opções restantes foi escolhida aqui;
+o número e a causa raiz estão reportados sem meias-palavras no README/CHANGELOG, e a escolha entre
+elas fica pendente.
 
 ## Alternativas rejeitadas
 
