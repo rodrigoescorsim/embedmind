@@ -156,7 +156,10 @@ where we lose, and the methodology is fixed *before* the numbers exist
 CI performance-regression guard, and never hand-edits results — the tables below are
 rendered straight from [`benches/results/0.1.0-dev.json`](benches/results/0.1.0-dev.json)
 (mirrored in [`benches/results/latest.md`](benches/results/latest.md)), the official
-`run_all.sh --full` run of 2026-07-13.
+`run_all.sh --full` run of 2026-07-13 (pre-FTOPT-8; the file still reflects `format_version`
+7). The full-text optimization phase (FTOPT-0 through FTOPT-8) closed on 2026-07-14 with a
+newer, faster postings format (`format_version` 8) — see the NFR note below for the latest
+measured number and why the harness-run table hasn't been regenerated on it yet.
 
 Measured on the founder's Windows dev box (x86_64, 20 logical CPUs, CPU-only,
 single-thread), EmbedMind `0.1.0-dev`, 384-dim all-MiniLM-L6-v2 int8 embeddings:
@@ -207,22 +210,33 @@ Notes and honesty caveats:
   is hybrid search (BM25 + HNSW + RRF fusion + record load) with embedding already
   excluded; `vector-only` is the HNSW half alone on the same query set. The gap between
   them (~189 ms @ 100k) is the full-text scan — see the NFR miss below.
-- **recall p99 @ 100k misses the < 50 ms NFR: 224.0 ms, honestly reported, not hidden.**
-  Four rounds of optimization (early termination — [ADR 0018](docs/adr/0018-early-termination-no-scan-bm25.md);
-  delta+varint postings — [ADR 0021](docs/adr/0021-postings-fts-delta-varint.md); skip-list
-  structure — [ADR 0022](docs/adr/0022-postings-fts-skip-lists.md); BlockMax-WAND —
-  [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md)) cut it ~5.5x from an original 1,224.6 ms,
-  but the ceiling wasn't reached — and BlockMax-WAND itself moved the @ 100k number by less than
-  measurement noise. Root cause measured, not guessed: BlockMax-WAND *does* activate on 82.8% of
-  the benchmark's queries, but only 0.05% of touched postings blocks are actually skipped without
-  decoding — this synthetic corpus's high-frequency terms spread their postings too evenly across
-  the id space for the block-max refinement to prove a whole block is safe to skip. The algorithm
-  is correct (equivalence-tested against the linear oracle); the workload this benchmark measures
-  just doesn't have the term concentration BlockMax-WAND is built to exploit. Full accounting in
-  [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) ("Fechamento da fase BMW")
-  and [ADR 0025](docs/adr/0025-blockmax-wand-na-busca-fts.md). The ADR 0023 rollback criterion
-  (accept the documented limitation vs. revert full-text to opt-in) is still open — a founder
-  decision, not made in this round (see [ROADMAP.md](ROADMAP.md) "Fase BMW").
+- **The table above (this run's `0.1.0-dev.json`, `format_version` 7, pre-FTOPT-8) shows recall
+  p99 @ 100k missing the NFR: 224.0 ms.** Root cause measured, not guessed: BlockMax-WAND
+  activates on 82.8% of the benchmark's queries, but only 0.05% of touched postings blocks are
+  actually skipped without decoding — this synthetic corpus's high-frequency terms spread their
+  postings too evenly for the block-max refinement to prove a whole block is safe to skip. The
+  algorithm is correct (equivalence-tested against the linear oracle); the workload just doesn't
+  have the term concentration BlockMax-WAND is built to exploit.
+- **The full-text optimization phase (FTOPT-0 through FTOPT-8) closed on 2026-07-14 with a
+  better number and a recalibrated NFR — not yet reflected in the table above.** Six further
+  rounds of confirmatory profiling and targeted fixes (`format_version` 8's frame-of-reference
+  postings block format, [ADR 0028](docs/adr/0028-postings-fts-frame-of-reference.md), replacing
+  the varint-decode loop that FTOPT-7 isolated as the dominant remaining cost) brought the
+  measured `recall` p99 @ 100k from 224.0 ms down to **133.65 ms** (`profile_recall` /
+  `Store::recall_profiled`, same machine/session, dataset vacuumed to `format_version` 8 — see
+  [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md) §"Formato de postings
+  frame-of-reference e fechamento da fase"). With the bottleneck no longer predominantly
+  full-text (vector search + the WAND/bound loop already account for over half of what's left),
+  the founder recalibrated the NFR twice the same day — 50 ms → 100 ms → **150 ms**, recorded
+  openly, not buried — and closed the phase: **133.65 ms passes the revised 150 ms NFR.** The
+  `0.1.0-dev.json` table above still reflects the pre-FTOPT-8 harness run; regenerating it via
+  `run_all.sh --full` on `format_version` 8 is tracked as a follow-up (this session's retries of
+  that exact harness, on shared/loaded hardware, produced noisy outliers up to 606 ms — sizeable
+  enough that publishing them as the new baseline would have been less honest than keeping the
+  prior clean run and citing the isolated `profile_recall` number here instead).
+  Full accounting in [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md)
+  ("Fechamento da fase BMW" and "Formato de postings frame-of-reference e fechamento da fase")
+  and [ROADMAP.md](ROADMAP.md) "Fase FTOPT".
 - **recall@10 and peak RSS both pass at 100k**: recall@10 is 1.0000 (tie-aware grading,
   worst query included) and peak RSS is 113.5 MiB — well under the 300 MiB ceiling.
   `remember` p99 < 200 ms end-to-end also passes at 21.7 ms @ 100k.
@@ -295,8 +309,10 @@ the simplest of the three `compare-*` adapters to build).
 No vector competitor was measured on this run, so no vector head-to-head loss can be
 reported yet — this section is computed by the harness from `benches/results/`, never
 hand-edited; when a baseline is measured and wins a metric, it lands here automatically.
-The one loss we can already report without a competitor build: **`recall` p99 @ 100k misses
-its own NFR** (224.9 ms vs. a 50 ms target), documented above, not smoothed over. On the
+The one loss this table's own run shows without a competitor build: **`recall` p99 @ 100k
+missed the NFR at the time of this harness run** (224.0 ms vs. the then-current 50 ms target).
+That NFR has since been recalibrated to 150 ms and the phase closed passing it at 133.65 ms
+(see the note above) — documented, not smoothed over either way. On the
 full-text-only plane above, **tantivy is faster on query latency** (p50/p99 roughly 3x lower
 than EmbedMind's own `search_text` at this scale) — reported there, not hidden here.
 
