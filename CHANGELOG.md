@@ -28,9 +28,12 @@ the full 90-day plan this closes out.
   benchmark corpus's postings shape (BMW-3/BMW-5): the algorithm is correct
   and equivalence-tested, but contributes ~0% measured skip rate on both the
   uniform and session-locality synthetic corpora.
-- Full-text-only (BM25) latency trails tantivy on this harness (p50 0.04 ms
-  vs. 0.11 ms @ 10k) — expected for a young purpose-built inverted index
-  against a mature dedicated engine, not a regression to chase inside M1.
+- Full-text-only (BM25) latency trails tantivy on this harness, but both are
+  sub-millisecond and FTOPT closed most of the gap: EmbedMind `search_text`
+  @ 10k is p50 0.04 ms / p99 0.23 ms vs. tantivy's 0.01 ms / 0.11 ms (~2× on
+  p99, down from ~3× pre-FTOPT-8), both at recall@10 = 1.0000; EmbedMind
+  ingests ~4× faster (3510 vs. 882 docs/s). Expected for a young purpose-built
+  inverted index against a mature dedicated engine, not a regression to chase.
 - `benches/results/0.1.0-dev.json` still reflects a pre-FTOPT-8
   (`format_version` 7) harness run; regenerating it in `format_version` 8 on
   a clean/idle machine is a founder follow-up, not blocking this release (the
