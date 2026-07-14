@@ -27,7 +27,7 @@ EmbedMind is an **embedded memory engine for AI agents**, packaged as an **MCP s
 - 🕸️ **Graph layer** — explicit entities and typed relations between memories, `related` navigation, and 1-hop expansion in `recall`.
 - 🔁 **Versioned knowledge** — `supersedes` retires a corrected memory from recall while keeping it navigable as history. No embedded competitor models "this fact was corrected."
 - 🗂️ **Automatic project scoping** — memories are stamped with the project (git root or `.embedmind.toml`) and `recall` scopes to it by default.
-- 🧾 **Provenance + observability** — every memory records which agent/session wrote it; an optional structured op-log + `embedmind report` show you what the memory is actually doing.
+- 🧾 **Provenance + audit trail** — every memory records which agent/session wrote it; an opt-in JSONL op-log + `embedmind report` (human or `--json`) give you a full, streamable audit of every recall and write.
 - 💾 **One crash-safe file** — WAL-backed, single binary, embedding model linked in. No server, no Docker, no ports, no API key. Nothing ever leaves your machine.
 
 ```text
@@ -120,14 +120,17 @@ embedmind related --entity auth              # everything tagged `auth`
 embedmind recall "login" --expand-related    # hits + their connected context
 ```
 
-**Observability — see the memory working:**
+**Observability & auditing — see exactly what the memory is doing:**
 
 ```bash
 embedmind serve  --file ~/.embedmind/memory.mind --op-log ~/.embedmind/ops.jsonl
-embedmind report --op-log ~/.embedmind/ops.jsonl --since 7   # window in days
+embedmind report --op-log ~/.embedmind/ops.jsonl --since 7           # human summary
+embedmind report --op-log ~/.embedmind/ops.jsonl --since 7 --json    # for dashboards / CI
 ```
 
-`report` shows sessions, recalls served (with latency percentiles), top recalled memories, and memories never recalled in the window (dead weight). Without `--op-log` it still works from the store alone (totals, no per-call history).
+The **op-log** is an append-only **JSONL audit trail** — one self-contained JSON line per tool call (the tool, its args, result ids/scores, and latency). It's **opt-in and zero-cost when off**: no `--op-log`, no file, the hot path pays nothing. And because it's a separate file — it never takes the `.mind`'s exclusive lock — you can `tail -f` it or stream it **live, while the agent is running**.
+
+`embedmind report` turns that trail into the trust answer — *is the memory actually being used?* — showing sessions, recalls served (with p50/p99 latency), top recalled memories, and memories **never** recalled in the window (dead weight worth pruning). `--json` emits the same aggregation machine-readably for dashboards, CI checks, or your own tooling. Without `--op-log`, `report` still works from the store alone (totals, no per-call history).
 
 ## Bindings
 
