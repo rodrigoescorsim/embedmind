@@ -44,6 +44,7 @@
 //! the HNSW graph). Postings are therefore append-/update-only.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use ulid::Ulid;
 
@@ -1574,6 +1575,253 @@ pub fn search_bmw_counted(
         }
     }
     Ok((hits, counters))
+}
+
+/// Per-phase timings for one [`search_bmw_profiled`] call, in nanoseconds —
+/// measurement-only surface for story FTOPT-5 (`docs/adr/0017` §"Resultado do
+/// profiling confirmatório pós-sidecar"). FTOPT-0 profiled the pre-FTOPT-1,
+/// pre-BMW linear scan ([`search_profiled`]); that scan is no longer what
+/// production `Store::recall`/`Store::search_text` run on a `format_version`
+/// ≥ 6 file (`search` dispatches to [`search_bmw_counted`] instead), so its
+/// 88.8%-in-`keep` finding no longer describes the live path after FTOPT-1
+/// moved `keep`/`doc_len` onto the filter-meta sidecar. This struct
+/// instruments the *actual* hot path so FTOPT-5 measures, rather than
+/// assumes, where the post-sidecar time goes.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BmwPhaseTimings {
+    /// Opening every matched term's cursor: `dict::get` (page I/O) plus, for
+    /// small skip-less lists, a full decode ([`BmwCursor::open`]).
+    pub cursor_open_ns: u64,
+    /// The WAND pivot/block-max bound loop: summing term/block upper bounds,
+    /// selecting the pivot, and the block-max refinement check that decides
+    /// skip vs. evaluate — pure bound arithmetic, no block decode.
+    pub bound_ns: u64,
+    /// Block decodes triggered by cursor advances (`advance_to`/`advance_past`
+    /// landing inside a block) or the aligned pivot's `current_tf` — the
+    /// postings bytes BMW actually had to materialize, as opposed to bounds
+    /// it could reason about from the skip index alone.
+    pub decode_ns: u64,
+    /// The `keep` closure — now sidecar-backed (`docs/adr/0027`) for aligned
+    /// pivots that made it past the block-max check.
+    pub keep_ns: u64,
+    /// The `doc_len` closure — sidecar-backed for ids the sidecar has seen.
+    pub doc_len_ns: u64,
+    /// Exact BM25 scoring of the aligned pivot plus top-k insert.
+    pub scoring_ns: u64,
+    /// Documents evaluated exactly (mirrors [`BmwCounters::docs_evaluated`]).
+    pub docs_evaluated: u64,
+    /// Pivot candidates the block-max check skipped without evaluation
+    /// (mirrors [`BmwCounters::pivot_skips`]).
+    pub pivot_skips: u64,
+    /// Blocks decoded across every cursor (mirrors [`BmwCounters::blocks_decoded`]).
+    pub blocks_decoded: u64,
+    /// Blocks whose bounds were consulted but never decoded (mirrors
+    /// [`BmwCounters::blocks_total`] minus `blocks_decoded`).
+    pub blocks_skipped: u64,
+}
+
+/// [`search_bmw_counted`] — the production BlockMax-WAND path a
+/// `format_version` ≥ 6 file actually runs — instrumented phase-by-phase with
+/// [`std::time::Instant`], same method and rationale as [`search_profiled`]
+/// (`docs/adr/0017` §1): a separate function so production `search` never
+/// pays a single extra `Instant::now()`, `#[doc(hidden)]` like
+/// [`fuzz_decode_page`]. Exists for FTOPT-5, which needs the *current* hot
+/// path's phase breakdown, not the pre-BMW, pre-sidecar scan FTOPT-0 measured.
+///
+/// Mirrors [`search_bmw_counted`]'s algorithm exactly (bit-identical
+/// results — this is the same code with `Instant` calls interleaved, not a
+/// reimplementation) so its timings describe production behavior, not an
+/// approximation of it.
+#[doc(hidden)]
+pub fn search_bmw_profiled(
+    src: &dyn PageSource,
+    fts_root_page: u64,
+    query: &str,
+    k: usize,
+    mut keep: impl FnMut(Ulid) -> bool,
+    mut doc_len: impl FnMut(Ulid) -> Result<Option<u32>>,
+) -> Result<(Vec<Hit>, BmwPhaseTimings)> {
+    let mut timings = BmwPhaseTimings::default();
+    let mut counters = BmwCounters::default();
+    if k == 0 {
+        return Ok((Vec::new(), timings));
+    }
+    let Some(meta) = load_meta(src, fts_root_page)? else {
+        return Ok((Vec::new(), timings));
+    };
+    if meta.doc_count == 0 || meta.dict_root == 0 {
+        return Ok((Vec::new(), timings));
+    }
+
+    let mut query_terms: Vec<String> = tokenize(query)
+        .into_iter()
+        .map(|t| clip_term(&t).to_owned())
+        .filter(|t| !t.is_empty())
+        .collect();
+    query_terms.sort();
+    query_terms.dedup();
+    if query_terms.is_empty() {
+        return Ok((Vec::new(), timings));
+    }
+
+    let n = meta.doc_count as f32;
+    let avgdl = if meta.doc_count == 0 {
+        0.0
+    } else {
+        meta.total_tokens as f32 / meta.doc_count as f32
+    };
+
+    let cursor_open_started = Instant::now();
+    let mut cursors: Vec<BmwCursor> = Vec::with_capacity(query_terms.len());
+    for term in &query_terms {
+        let Some((body, page_no)) = dict::get(src, FTS_DICT, meta.dict_root, term.as_bytes())?
+        else {
+            continue;
+        };
+        let df = dict::read_u32(&body, 0, page_no)? as usize;
+        if df == 0 {
+            continue;
+        }
+        let idf = (1.0 + (n - df as f32 + 0.5) / (df as f32 + 0.5)).ln();
+        if let Some(cursor) = BmwCursor::open(idf, body, page_no, &mut counters)? {
+            cursors.push(cursor);
+        }
+    }
+    timings.cursor_open_ns += cursor_open_started.elapsed().as_nanos() as u64;
+    if cursors.is_empty() {
+        return Ok((Vec::new(), timings));
+    }
+    let slack = bound_slack(cursors.len());
+
+    let mut hits: Vec<Hit> = Vec::new();
+    let mut order: Vec<usize> = (0..cursors.len()).collect();
+    loop {
+        let bound_started = Instant::now();
+        order.retain(|&i| !cursors[i].exhausted);
+        if order.is_empty() {
+            timings.bound_ns += bound_started.elapsed().as_nanos() as u64;
+            break;
+        }
+        order.sort_by(|&a, &b| {
+            cursors[a]
+                .cur_id
+                .cmp(&cursors[b].cur_id)
+                .then_with(|| a.cmp(&b))
+        });
+        let theta: Option<f32> = (hits.len() == k).then(|| hits[k - 1].score);
+
+        let mut acc = 0.0f64;
+        let mut pivot: Option<usize> = None;
+        for (oi, &ci) in order.iter().enumerate() {
+            acc += f64::from(cursors[ci].term_ub);
+            if theta.is_none_or(|t| acc * slack > f64::from(t)) {
+                pivot = Some(oi);
+                break;
+            }
+        }
+        let Some(p) = pivot else {
+            timings.bound_ns += bound_started.elapsed().as_nanos() as u64;
+            break;
+        };
+        let pivot_id = cursors[order[p]].cur_id;
+        let prefix_end = p + order[p + 1..]
+            .iter()
+            .take_while(|&&ci| cursors[ci].cur_id == pivot_id)
+            .count();
+
+        let mut block_acc = 0.0f64;
+        let mut min_block_last = u128::MAX;
+        for &ci in &order[..=prefix_end] {
+            if let Some(block) = cursors[ci].covering_block(pivot_id) {
+                block_acc += f64::from(block.ub);
+                min_block_last = min_block_last.min(block.last_id);
+            }
+        }
+        let skip = theta.is_some_and(|t| block_acc * slack <= f64::from(t));
+        timings.bound_ns += bound_started.elapsed().as_nanos() as u64;
+        if skip {
+            counters.pivot_skips += 1;
+            let next = match (min_block_last.checked_add(1), order.get(prefix_end + 1)) {
+                (Some(n), Some(&after)) => Some(n.min(cursors[after].cur_id)),
+                (None, Some(&after)) => Some(cursors[after].cur_id),
+                (n, None) => n,
+            };
+            let decode_started = Instant::now();
+            match next {
+                Some(n) => {
+                    for &ci in &order[..=prefix_end] {
+                        cursors[ci].advance_to(n, &mut counters)?;
+                    }
+                }
+                None => {
+                    for &ci in &order[..=prefix_end] {
+                        cursors[ci].exhausted = true;
+                    }
+                }
+            }
+            timings.decode_ns += decode_started.elapsed().as_nanos() as u64;
+            continue;
+        }
+        if cursors[order[0]].cur_id != pivot_id {
+            let decode_started = Instant::now();
+            for &ci in &order[..p] {
+                cursors[ci].advance_to(pivot_id, &mut counters)?;
+            }
+            timings.decode_ns += decode_started.elapsed().as_nanos() as u64;
+            continue;
+        }
+        counters.docs_evaluated += 1;
+        let id = Ulid::from(pivot_id);
+        let keep_started = Instant::now();
+        let kept = keep(id);
+        timings.keep_ns += keep_started.elapsed().as_nanos() as u64;
+        if kept {
+            let doc_len_started = Instant::now();
+            let dl = doc_len(id)?;
+            timings.doc_len_ns += doc_len_started.elapsed().as_nanos() as u64;
+            if let Some(dl) = dl {
+                let scoring_started = Instant::now();
+                let mut score = 0.0f32;
+                for c in cursors.iter_mut() {
+                    if c.exhausted || c.cur_id != pivot_id {
+                        continue;
+                    }
+                    let decode_started = Instant::now();
+                    let tf = c.current_tf(&mut counters)? as f32;
+                    timings.decode_ns += decode_started.elapsed().as_nanos() as u64;
+                    let norm = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl as f32 / avgdl.max(1.0));
+                    score += c.idf * (tf * (BM25_K1 + 1.0)) / norm.max(f32::MIN_POSITIVE);
+                }
+                if score > 0.0 {
+                    let pos = hits.partition_point(|h| {
+                        h.score > score || (h.score == score && h.record_id < id)
+                    });
+                    if pos < k {
+                        hits.insert(
+                            pos,
+                            Hit {
+                                record_id: id,
+                                score,
+                            },
+                        );
+                        hits.truncate(k);
+                    }
+                }
+                timings.scoring_ns += scoring_started.elapsed().as_nanos() as u64;
+            }
+        }
+        let decode_started = Instant::now();
+        for &ci in &order[..=prefix_end] {
+            cursors[ci].advance_past(pivot_id, &mut counters)?;
+        }
+        timings.decode_ns += decode_started.elapsed().as_nanos() as u64;
+    }
+    timings.docs_evaluated = counters.docs_evaluated;
+    timings.pivot_skips = counters.pivot_skips;
+    timings.blocks_decoded = counters.blocks_decoded;
+    timings.blocks_skipped = counters.blocks_skipped();
+    Ok((hits, timings))
 }
 
 /// Number of documents recorded in the full-text index (`embedmind stats`).
