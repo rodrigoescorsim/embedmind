@@ -176,10 +176,18 @@ a recarga do registro completo por candidato na closure `keep` (88,8% do tempo @
 | FTOPT-0 | Profiling confirmatório do `keep` (breakdown aceito × rejeitado, `KeepOutcome`) @10k e @100k | ✅ ENTREGUE — 97,9% aceitos @10k, **99,9% @100k**: "pular I/O nos rejeitados" tem teto ~0,1% (ADR 0017 §FTOPT-0) |
 | FTOPT-1 | Filter-meta sidecar (`format_version` 7, [ADR 0027](docs/adr/0027-filter-meta-sidecar-fv7.md)): `record_id → (flags, project, agent, doc_len)` fora do registro, escrito na mesma transação; `keep`/`doc_len` decidem sem tocar o B-tree para aceitos E rejeitados; registro completo só para top-k e filtros custom. Redesenho imposto pelo dado da FTOPT-0 | ✅ ENTREGUE (equivalência vs. oráculo fv6, crash sweep, fuzz; ganho @100k **não medido** — fica para a task de fechamento) |
 | FTOPT-2 | `doc_len` pré-computado (elimina a 2ª recarga da normalização BM25, 4,5% no FT1). Reabre o trade-off do [ADR 0011](docs/adr/0011-fulltext-index.md) (que rejeitou persistir `doc_len`): o sidecar da FTOPT-1 já acomoda o campo sem custo estrutural | ✅ ENTREGUE — absorvida pela FTOPT-1: o campo `doc_len` já entrou no sidecar fv7 e as closures BM25 já leem dele. Esta task fechou as pontas do critério de pronto: teste **positivo** (score muda com `doc_len` do sidecar corrompido ⇒ leitura vem do sidecar, não do conteúdo) + teste **negativo** de invariante (divergência é erro tipado). Sem benchmark @100k (FTOPT-4) |
-| FTOPT-4 | Medição @100k pelo harness oficial e veredito do NFR `recall p99 < 50 ms` — decisão de produto do founder sobre o resultado | ⬜ |
+| FTOPT-4 | Medição @100k pelo harness oficial (`profile_recall`) e veredito do NFR `recall p99` — decisão de produto do founder sobre o resultado | ✅ ENTREGUE — 224,00 ms pós-sidecar fv7 (baseline da fase, ADR 0017 §FTOPT-4) |
 | FTOPT-5 | Profiling confirmatório pós-sidecar do caminho BMW real (`search_bmw_profiled`) | ✅ ENTREGUE — novo gargalo: decode de blocos de postings 32,7% + vetor/HNSW 36,0%; bound WAND/block-max só 11,4% (ADR 0017 §FTOPT-5) |
 | FTOPT-6 | Testar a hipótese de alocação por bloco em `decode_block` (reuso de `Vec` entre blocos) | ✅ ENTREGUE — mudança aplicada (estritamente não-pior), mas ganho não mensurável (25,7%→32,8%, dentro do ruído); alocação não era o custo dominante (ADR 0017 §FTOPT-6) |
 | FTOPT-7 | Profiling granular do interior de `decode_block`: laço varint vs. revalidações | ✅ ENTREGUE — confirmado: o laço `decode_delta_run` domina (59,9% da fase de decode), revalidação irrelevante (0,6%); gargalo é o formato de postings em si, sem mudança local acionável (ADR 0017 §FTOPT-7) |
+| FTOPT-8 | Novo formato de postings frame-of-reference (`format_version` 8, [ADR 0028](docs/adr/0028-postings-fts-frame-of-reference.md)) para eliminar o laço varint identificado pela FTOPT-7 | ✅ ENTREGUE — laço varint -70,5%, `recall` p99 @100k 266,03 ms → **133,65 ms** (ADR 0017 §FTOPT-8) |
+
+**Fase FTOPT fechada em 14/jul/2026** (founder, ADR 0017 §"Recalibração final do NFR e fechamento
+da fase"): trajetória completa 224,00 ms → 133,65 ms p99 @100k (**-40%**). O NFR de latência foi
+recalibrado duas vezes no mesmo dia (50 ms → 100 ms → 150 ms, honestamente registrado, não
+enterrado — decisões PR #40 e #41) porque o gargalo deixou de ser predominantemente full-text
+(vetor + WAND/bound já somam mais da metade do tempo pós-FTOPT-8); o patamar final de 133,65 ms
+**passa** no NFR revisado de 150 ms — a fase encerra com o NFR atendido, não reprovado.
 
 ---
 

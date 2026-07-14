@@ -81,6 +81,47 @@ Pre-v0.1 — under active development, repo private until M1 completes
   purpose-built one on raw BM25 latency was the expected shape of this result,
   not new evidence for or against the tradeoff. What to do with the number is
   left to the founder — not decided in this change.
+- **FTOPT phase closed (2026-07-14)** — full trajectory 224.00 ms → 133.65 ms
+  `recall` p99 @100k (**-40%**), [ADR 0017](docs/adr/0017-otimizacao-do-full-text-escopo-e-metodo.md):
+  - FTOPT-4: official harness measurement (`profile_recall`) of the FTOPT-1/2
+    sidecar's real @100k effect — 224.00 ms, the baseline the rest of the phase
+    optimized from.
+  - FTOPT-5: confirmatory profiling of the real BMW production path
+    (`search_bmw_profiled` / `Store::recall_profiled`) — new dominant cost
+    revealed: postings block decode 32.7% + vector/HNSW search 36.0%; the
+    WAND/block-max bound loop itself only 11.4%.
+  - FTOPT-6: tested the block-allocation hypothesis in `decode_block` (reusing
+    the entry `Vec` across blocks instead of allocating fresh each time) —
+    change applied (strictly not worse) but the gain was not measurable
+    (25.7%→32.8%, within noise); allocation was never the dominant cost.
+  - FTOPT-7: granular profiling of `decode_block`'s interior isolated the real
+    cost — the `decode_delta_run` varint-parsing loop dominates decode time
+    (59.9%), row revalidation is negligible (0.6%). Confirms the bottleneck is
+    the postings format itself, not a local inefficiency FTOPT-6-style changes
+    could fix.
+  - FTOPT-8: new frame-of-reference postings block body format (`format_version`
+    8, [ADR 0028](docs/adr/0028-postings-fts-frame-of-reference.md)) — two
+    fixed-width streams per block replacing delta+varint interleaving, the
+    route FTOPT-7 identified as the only one left that attacks the varint loop
+    directly. Measured @100k: varint loop time -70.5%, `recall` p99 266.03 ms
+    (fv7 baseline for this step) → **133.65 ms**. Bit-identical results
+    (block-decode count unchanged); only wall time moves. New bottleneck
+    revealed and left open: postings-cursor bookkeeping (`advance_to`/
+    `advance_past`/`current_tf`) now dominates remaining block-decode time
+    (78.6%).
+  - **NFR recalibrated twice the same day, honestly recorded, not buried**:
+    50 ms → 100 ms (mid-phase, the measured trajectory made 50 ms
+    unreachable without a scope change) → **150 ms** (final, once FTOPT-8 landed
+    at 133.65 ms — chosen because the measured number now passes it, not the
+    other way around). Founder's stated reasons for closing here rather than
+    chasing the next bottleneck: diminishing returns per unit of implementation
+    risk (FTOPT-8 was the phase's largest single change — new file format,
+    on-disk layout, full equivalence/crash/fuzz suite), and the remaining cost
+    is no longer predominantly full-text (vector search 39.3% + WAND/bound
+    15.1% already exceed half of the post-FTOPT-8 time; zeroing block decode
+    entirely would still land near ~102 ms, requiring a different scope —
+    hybrid fusion as a whole — to go materially lower). **The phase closes with
+    the revised NFR met (133.65 ms < 150 ms), not missed.**
 
 ### Changed
 - **BMW-5 (post-BMW review): the suspected benchmark-methodology artifact was
