@@ -2310,6 +2310,102 @@ mod tests {
         assert!(all.iter().any(|m| m.tombstone));
     }
 
+    /// FTOPT-2: the sidecar's `doc_len` is what the BM25 length-normalization
+    /// reads instead of reloading and re-tokenizing the record. The one thing
+    /// that could silently break correctness is the stored count drifting from
+    /// the content. Every production write path derives `doc_len` from the very
+    /// bytes it stores in the same transaction, so it cannot drift there — but
+    /// a stray write bypassing that derivation is an invariant bug, and this
+    /// proves the guard actually fires on such a divergence (a negative
+    /// counterpart to the always-valid states exercised in `tests/filter_meta`).
+    #[test]
+    fn a_diverging_doc_len_is_caught_by_the_invariant() {
+        let (_, mut store) = store();
+        let m = store
+            .remember(MemoryDraft::new("rust rust rust content").agent("cli"))
+            .unwrap();
+        // Sanity: the honestly-written sidecar agrees with the record.
+        store.verify_filter_meta_invariant().unwrap();
+        let real = index::fts::doc_len("rust rust rust content");
+
+        // Append a fresh entry for the same id with a doc_len the content
+        // could never produce. The chain is last-writer-wins, so this shadows
+        // the correct entry — exactly the state a buggy write path would leave.
+        let mut txn = store.pager.begin().unwrap();
+        index::filter_meta::record_updates(
+            &mut txn,
+            &[index::filter_meta::Update {
+                id: m.id,
+                tombstone: false,
+                superseded: false,
+                has_metadata: false,
+                project: None,
+                agent: "cli",
+                doc_len: real + 1,
+            }],
+        )
+        .unwrap();
+        txn.commit().unwrap();
+
+        match store.verify_filter_meta_invariant() {
+            Err(Error::Internal(msg)) if msg.contains("doc_len") => {}
+            other => panic!("a diverging doc_len must be an invariant error, got {other:?}"),
+        }
+    }
+
+    /// FTOPT-2, the positive half: proves the BM25 length normalization reads
+    /// `doc_len` from the sidecar rather than re-tokenizing the record. We
+    /// overwrite the sidecar entry with a `doc_len` the content never produced;
+    /// if scoring still consulted the content the score would be unchanged, so
+    /// a shifted score is proof the stored count is the one that is read. (The
+    /// invariant this deliberately violates is what the test above guards.)
+    #[test]
+    fn bm25_length_normalization_reads_doc_len_from_the_sidecar() {
+        let (_, mut store) = store();
+        let m = store
+            .remember(MemoryDraft::new("rust ownership note"))
+            .unwrap();
+
+        let baseline = store.search_text(Query::new("rust")).unwrap();
+        let baseline_score = baseline
+            .iter()
+            .find(|h| h.id == m.id)
+            .expect("the doc contains the term")
+            .score;
+
+        // Shadow the entry with a much larger doc_len. BM25 penalizes longer
+        // documents, so reading this stored value must lower the score below
+        // the honest baseline; re-tokenizing the (unchanged) content would not.
+        let real = index::fts::doc_len("rust ownership note");
+        let mut txn = store.pager.begin().unwrap();
+        index::filter_meta::record_updates(
+            &mut txn,
+            &[index::filter_meta::Update {
+                id: m.id,
+                tombstone: false,
+                superseded: false,
+                has_metadata: false,
+                project: None,
+                agent: "",
+                doc_len: real * 100,
+            }],
+        )
+        .unwrap();
+        txn.commit().unwrap();
+
+        let after = store.search_text(Query::new("rust")).unwrap();
+        let after_score = after
+            .iter()
+            .find(|h| h.id == m.id)
+            .expect("the doc still matches")
+            .score;
+        assert!(
+            after_score < baseline_score,
+            "a longer sidecar doc_len must lower the BM25 score \
+             ({after_score} !< {baseline_score}) — proof the stored count is read"
+        );
+    }
+
     #[test]
     fn iteration_is_in_id_order_and_persists_across_reopen() {
         let (vfs, mut store) = store();
