@@ -728,6 +728,145 @@ impl Store {
         })
     }
 
+    /// [`Store::recall_detailed`], instrumented phase-by-phase — measurement-
+    /// only surface for story FTOPT-5 (`docs/adr/0017` §"Resultado do
+    /// profiling confirmatório pós-sidecar"). FTOPT-0 profiled the full-text
+    /// half in isolation, on the pre-FTOPT-1/pre-BMW linear scan; that no
+    /// longer describes either (a) the sidecar-backed `keep`/`doc_len` or (b)
+    /// the BlockMax-WAND path production `recall` actually runs on a
+    /// `format_version` ≥ 6 file. This surface times the *whole* hybrid
+    /// pipeline a general (non-lexical-only) query sample exercises: HNSW
+    /// vector search, the BM25 half via [`index::fts::search_bmw_profiled`],
+    /// RRF fusion, and the final hit-loading pass — so FTOPT-5 can see which
+    /// of those, not just which BM25 sub-phase, now dominates. Mirrors
+    /// [`Store::recall_detailed`]'s algorithm exactly (no recency list, no
+    /// graph expansion — neither is in scope for this profiling pass) so its
+    /// timings describe production behavior. `#[doc(hidden)]`, never called
+    /// by production `recall`, same pattern as [`Store::search_text_profiled`].
+    #[doc(hidden)]
+    pub fn recall_profiled(&self, query: Query) -> Result<(Vec<Recalled>, RecallPhaseTimings)> {
+        let Some(embedder) = &self.embedder else {
+            return Err(Error::InvalidArgument(
+                "this store has no embedder; recall requires one (see StoreOptions::embedder)",
+            ));
+        };
+        let mut timings = RecallPhaseTimings::default();
+        let root = self.pager.header().root_btree_page;
+        let pager = &self.pager;
+
+        let cache: std::cell::RefCell<BTreeMap<Ulid, Option<MemoryRecord>>> =
+            std::cell::RefCell::new(BTreeMap::new());
+        let load = |id: Ulid| -> Result<Option<MemoryRecord>> {
+            if let Some(rec) = cache.borrow().get(&id) {
+                return Ok(rec.clone());
+            }
+            let rec = match btree::get(pager, root, &id.to_bytes())? {
+                Some(bytes) => Some(MemoryRecord::decode(&bytes)?),
+                None => None,
+            };
+            cache.borrow_mut().insert(id, rec.clone());
+            Ok(rec)
+        };
+
+        let meta = self.filter_meta()?;
+        let meta = meta.as_ref().map(|t| (t, meta_needs(t, &query)));
+        let filter_error: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
+        let keep = |id: Ulid| -> bool {
+            if filter_error.borrow().is_some() {
+                return false;
+            }
+            if let Some((table, needs)) = &meta {
+                match table.decide(id, needs) {
+                    index::filter_meta::Decision::Accept => return true,
+                    index::filter_meta::Decision::Reject(_) => return false,
+                    index::filter_meta::Decision::NeedRecord => {}
+                }
+            }
+            match load(id) {
+                Ok(Some(rec)) if in_scope(&query, &rec) => {
+                    match query.record_passes_filters(&rec) {
+                        Ok(pass) => pass,
+                        Err(e) => {
+                            *filter_error.borrow_mut() = Some(e);
+                            false
+                        }
+                    }
+                }
+                _ => false,
+            }
+        };
+
+        // --- Vector half (HNSW) ------------------------------------------
+        let vector_started = std::time::Instant::now();
+        let mut vector = embedder.embed(&query.text)?;
+        index::normalize(&mut vector);
+        let hnsw_meta_page = self.pager.header().hnsw_meta_page;
+        let node_count = index::node_count(&self.pager, hnsw_meta_page)?;
+        let vec_hits = index::search(
+            &self.pager,
+            hnsw_meta_page,
+            embedder.dims(),
+            &vector,
+            query.limit,
+            SearchParams {
+                ef_search: query.effective_ef_search(node_count),
+            },
+            &keep,
+        )?;
+        timings.vector_ns += vector_started.elapsed().as_nanos() as u64;
+        if let Some(e) = filter_error.borrow_mut().take() {
+            return Err(e);
+        }
+        let vec_ids: Vec<Ulid> = vec_hits.iter().map(|h| h.record_id).collect();
+
+        // --- Full-text half (BMW) -----------------------------------------
+        let fts_root = self.pager.header().fts_root_page;
+        let degraded_to_vector_only = fts_root == 0;
+        let text_ids: Vec<Ulid> = if degraded_to_vector_only {
+            Vec::new()
+        } else {
+            let (text_hits, bmw_timings) = index::fts::search_bmw_profiled(
+                &self.pager,
+                fts_root,
+                &query.text,
+                query.limit,
+                &keep,
+                |id| {
+                    if let Some((table, _)) = &meta
+                        && let Some(entry) = table.get(id)
+                    {
+                        return Ok(Some(entry.doc_len));
+                    }
+                    Ok(load(id)?.map(|rec| index::fts::doc_len(&rec.content)))
+                },
+            )?;
+            timings.fts = bmw_timings;
+            if let Some(e) = filter_error.borrow_mut().take() {
+                return Err(e);
+            }
+            text_hits.iter().map(|h| h.record_id).collect()
+        };
+
+        // --- Fuse (RRF k=60, union) --------------------------------------
+        let fuse_started = std::time::Instant::now();
+        let fused = crate::recall::fuse_lists(&[&vec_ids, &text_ids, &[]], query.limit);
+        timings.fuse_ns += fuse_started.elapsed().as_nanos() as u64;
+
+        let load_started = std::time::Instant::now();
+        let mut hits = Vec::with_capacity(fused.len());
+        for f in fused {
+            if let Some(rec) = load(f.record_id)? {
+                hits.push(Recalled {
+                    memory: Memory::from_record(rec),
+                    score: f.score,
+                });
+            }
+        }
+        timings.hit_load_ns += load_started.elapsed().as_nanos() as u64;
+
+        Ok((hits, timings))
+    }
+
     /// Vector-only recall: the HNSW half of [`Store::recall`] with **no**
     /// full-text fusion — the pure nearest-neighbor list, live + in-scope,
     /// best first. This is the operation the benchmark harness grades against
@@ -2050,6 +2189,24 @@ pub struct RecallOutcome {
     /// old files still recall, just without keyword matching. Shells surface
     /// this as a warning.
     pub degraded_to_vector_only: bool,
+}
+
+/// Per-phase timings for one [`Store::recall_profiled`] call, in nanoseconds —
+/// measurement-only surface for story FTOPT-5 (`docs/adr/0017`).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecallPhaseTimings {
+    /// Embedding the query text plus the HNSW graph search (`index::search`).
+    pub vector_ns: u64,
+    /// The BM25/BlockMax-WAND half — see [`index::fts::BmwPhaseTimings`] for
+    /// its own sub-phase breakdown (cursor open, bound loop, block decode,
+    /// `keep`, `doc_len`, scoring).
+    pub fts: index::fts::BmwPhaseTimings,
+    /// RRF fusion of the vector and text id lists (`crate::recall::fuse_lists`).
+    pub fuse_ns: u64,
+    /// Loading the fused hits' records to build the returned `Recalled`s
+    /// (cache hits for every id the vector/text halves already touched).
+    pub hit_load_ns: u64,
 }
 
 /// The full result of [`Store::remember_detailed`]: the stored memory plus
