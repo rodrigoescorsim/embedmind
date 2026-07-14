@@ -587,6 +587,81 @@ por `cargo run -p embedmind-bench --release --bin profile_recall -- agent-mem-10
 já vacuum'ado; nenhum benchmark oficial (`run_all.sh`/`benches/results/0.1.0-dev.json`) foi
 re-rodado por esta task.
 
+## Resultado da otimização de decode de blocos (FTOPT-6, 2026-07-14)
+
+A FTOPT-5 mediu decodificação de bloco de postings (`BmwCursor::decode_block`, `fts.rs`) em
+32,7% do tempo pós-sidecar — o novo gargalo dominante, com taxa de skip do BMW travada em 0,07%
+(BMW-3/BMW-5: causa raiz fechada, não reabrir essa frente). Esta task investigou, sem tocar o
+algoritmo de skip, três hipóteses de custo dentro do decode em si.
+
+**Instrumentação e método**: mesmo binário `profile_recall` da FTOPT-5, mesma amostra de 1000
+queries, mesmo dataset `agent-mem-100k.mind` (`format_version` 7). Medição em duas rodadas
+sequenciais no mesmo processo/máquina — baseline (`git stash` da mudança) e depois (mudança
+aplicada) — para isolar o efeito da mudança de código do ruído de máquina compartilhada entre
+rodadas distintas.
+
+**Hipótese investigada (achado de código, não suposição)**: `BmwCursor::decode_block` alocava um
+`Vec<Posting>` novo (`Vec::with_capacity(len)`) a cada bloco decodificado, mesmo quando o cursor
+já tinha decodificado um bloco antes — 2.872.240 blocos decodificados na rodada FTOPT-5 implicam
+2.872.240 pares malloc/free de ~2,5 KiB (128 entradas × 20 bytes de `Posting`) cada, quando quase
+todo bloco tem exatamente `SKIP_BLOCK_SIZE` (128) entradas e o buffer do cursor anterior já serve.
+As hipóteses 2 (custo do próprio loop varint) e 3 (decode parcial/lazy) do enunciado da task **não
+foram implementadas** — ver "Não fechado" abaixo.
+
+**Mudança aplicada**: `decode_block` agora reusa `self.entries` entre blocos (`clear()` +
+`reserve(len)`) em vez de recriar o `Vec` a cada chamada — puramente em memória/algoritmo dentro
+de uma única sessão de busca (o `BmwCursor` já vive só durante uma chamada a `search_bmw_counted`,
+nunca é persistido nem cruza queries), sem tocar layout on-disk, então **sem bump de
+`format_version`**. Resultado bit-idêntico garantido pela suite de equivalência existente
+(`bmw_equals_oracle_on_random_corpora`, `bmw_skips_blocks_and_still_matches_the_oracle`,
+`bmw_breaks_boundary_ties_exactly_like_the_oracle`) — nenhum teste novo foi necessário porque a
+mudança não altera o que é escrito em `self.entries`/`self.cur_id`, só a estratégia de alocação do
+buffer.
+
+### `agent-mem-100k` (1000 queries, `format_version` 7, mesma máquina, rodadas sequenciais)
+
+| fase | antes (ms) | antes (%) | depois (ms) | depois (%) |
+|---|---:|---:|---:|---:|
+| vetor (embed + HNSW) | 199.984,6 | 48,6% | 115.962,5 | 35,1% |
+| fts: abertura de cursor | 32.587,2 | 7,9% | 28.664,6 | 8,7% |
+| fts: laço de bound WAND/block-max | 36.869,0 | 9,0% | 37.957,0 | 11,5% |
+| **fts: decodificação de bloco** | **105.714,2** | **25,7%** | **108.506,9** | **32,8%** |
+| fts: `keep` | 3.984,7 | 1,0% | 3.698,4 | 1,1% |
+| fts: `doc_len` | 951,6 | 0,2% | 982,4 | 0,3% |
+| fts: scoring | 29.275,2 | 7,1% | 30.339,4 | 9,2% |
+| carga final dos hits | 2.152,3 | 0,5% | 4.419,3 | 1,3% |
+| `recall` p50 / p99 | 329,7 / 2088,8 ms | — | 305,6 / 615,1 ms | — |
+
+Contadores do BlockMax-WAND idênticos nas duas rodadas (6.816.080 docs avaliados, 2.872.240 blocos
+decodificados, taxa de skip 0,07%) — confirma resultado bit-idêntico, só o tempo de parede muda.
+
+### Leitura do achado: ganho não mensurável nesta rodada
+
+O tempo absoluto da fase de decode **não caiu** (105.714 ms → 108.506 ms, dentro do ruído — a fase
+"vetor", que nenhuma mudança desta task tocou, variou quase 2x entre as rodadas por ruído de
+máquina compartilhada, então uma diferença de ~3% na fase de decode não é distinguível de ruído). A
+eliminação da realocação por bloco é uma redução real de trabalho (menos chamadas a malloc/free),
+mas o alocador não era, pelos dados desta medição, o componente dominante do custo de
+`decode_block` — o tempo está concentrado em outro lugar dentro da função (mais provável: o próprio
+loop de `read_varint`/`decode_delta_run`, que opera em `u128` com até `MAX_VARINT_LEN` = 19
+iterações por campo e uma checagem de overflow por bit-shift a cada byte, mesmo para o caso comum
+de delta pequeno — hipótese 2 do enunciado, não confirmada por profiling granular nesta sessão por
+falta de orçamento de tempo).
+
+### Não fechado (falta de orçamento de tempo da sessão, não decisão técnica)
+
+Esta task não conseguiu, dentro do teto de ~30 min, profilar o *interior* de `decode_block` em
+granularidade menor que a fase inteira (ex.: tempo isolado do loop varint vs. alocação vs.
+revalidação first/last/max_tf) nem implementar as hipóteses 2 (formato mais barato de decodificar)
+e 3 (decode parcial/lazy parando no id procurado) do enunciado — ambas exigiriam mudança de
+algoritmo com risco de equivalência maior que a mudança aplicada aqui, e portanto medição antes/
+depois própria que não coube nesta sessão. A mudança aplicada (reuso de buffer) fica commitada por
+ser estritamente não-pior (menos alocação, mesmo resultado, sem risco de regressão) mesmo sem ganho
+demonstrado — mas **o gargalo de 32,7%/32,8% de decode continua de pé, não reduzido**. Próxima
+sessão da fase FT: profiling granular dentro de `decode_block` (ex.: `Instant` ao redor só do laço
+`decode_delta_run` vs. só das 3 revalidações) antes de tentar a hipótese 2 ou 3 às cegas — a mesma
+disciplina de medir-antes-de-mudar desta e das tasks anteriores.
+
 ## Alternativas rejeitadas
 
 - **Modo `vector_only` opcional exposto ao usuário, sem otimizar o FTS**:

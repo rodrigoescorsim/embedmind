@@ -1261,6 +1261,13 @@ impl BmwCursor {
     /// Decodes block `b` into `entries` and re-verifies its skip entry against
     /// the decoded bytes — the same `first_id`/`last_id`/`max_term_freq`
     /// checks the full decoder performs.
+    ///
+    /// Reuses `self.entries`' heap allocation across blocks (`clear` instead
+    /// of a fresh `Vec::with_capacity`) — profiling (FTOPT-6, `docs/adr/0017`)
+    /// found decode dominating post-sidecar time, and almost every block is
+    /// exactly [`SKIP_BLOCK_SIZE`] entries, so after the cursor's first block
+    /// the buffer's capacity already fits every later one, turning what was a
+    /// malloc/free pair per block into a `truncate(0)`.
     fn decode_block(&mut self, b: usize, counters: &mut BmwCounters) -> Result<()> {
         let (offset, len, first_id, last_id, max_tf) = {
             let m = &self.blocks[b];
@@ -1270,18 +1277,18 @@ impl BmwCursor {
             .blocks_start
             .checked_add(offset)
             .ok_or_else(|| malformed(self.page_no, "fts skip byte_offset overflow"))?;
-        let mut entries = Vec::with_capacity(len);
-        decode_delta_run(&self.body, &mut off, len, self.page_no, &mut entries)?;
-        if entries.first().map(|p| u128::from(p.record_id)) != Some(first_id) {
+        self.entries.clear();
+        self.entries.reserve(len);
+        decode_delta_run(&self.body, &mut off, len, self.page_no, &mut self.entries)?;
+        if self.entries.first().map(|p| u128::from(p.record_id)) != Some(first_id) {
             return Err(malformed(self.page_no, "fts skip first_id mismatch"));
         }
-        if entries.last().map(|p| u128::from(p.record_id)) != Some(last_id) {
+        if self.entries.last().map(|p| u128::from(p.record_id)) != Some(last_id) {
             return Err(malformed(self.page_no, "fts skip last_id mismatch"));
         }
-        if entries.iter().map(|p| p.term_freq).max() != Some(max_tf) {
+        if self.entries.iter().map(|p| p.term_freq).max() != Some(max_tf) {
             return Err(malformed(self.page_no, "fts skip max_term_freq mismatch"));
         }
-        self.entries = entries;
         self.cur_block = b;
         counters.blocks_decoded += 1;
         Ok(())
