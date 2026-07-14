@@ -1,0 +1,28 @@
+   Compiling embedmind-bench v0.1.0-dev (C:\workspace\Rodrigo\embedmind\benches)
+   Compiling embedmind-core v0.1.0-dev (C:\workspace\Rodrigo\embedmind\crates\embedmind-core)
+    Finished `release` profile [optimized] target(s) in 2m 26s
+     Running `target\release\profile_recall.exe agent-mem-100k`
+[agent-mem-100k] warming up (50 queries)...
+[agent-mem-100k] timing 1000 queries...
+  250/1000
+  500/1000
+  750/1000
+  1000/1000
+# FTOPT-5 post-sidecar hybrid recall phase profile — agent-mem-100k, 1000 queries (ADR 0017)
+
+`Store::recall_profiled` wall time — p50 329.667 ms, p99 2088.834 ms
+
+| phase | total ms | share of measured phases |
+|---|---:|---:|
+| vector (embed query + HNSW search) | 199984.559 | 48.6% |
+| fts: cursor open (dict lookup + small-list decode) | 32587.218 | 7.9% |
+| fts: WAND/block-max bound loop (skip vs. evaluate) | 36868.968 | 9.0% |
+| fts: block decode (postings materialized) | 105714.216 | 25.7% |
+| fts: keep (sidecar/record re-check) | 3984.723 | 1.0% |
+| fts: doc_len (sidecar/record lookup) | 951.628 | 0.2% |
+| fts: scoring (BM25 + top-k insert) | 29275.161 | 7.1% |
+| RRF fusion (vector + text lists) | 7.617 | 0.0% |
+| hit load (final record fetch for returned hits) | 2152.265 | 0.5% |
+| **sum of phases** | 411526.355 | 100.0% |
+
+BlockMax-WAND work: 6816080 docs evaluated exactly, 1664556 pivot candidates skipped by the block-max check, 2872240 blocks decoded, 1955 blocks skipped (skip rate 0.07%).
