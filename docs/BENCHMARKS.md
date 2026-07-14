@@ -128,10 +128,21 @@ latency includes the near-duplicate scan.
 ## 5. CI regression guard
 
 Every PR runs the 10k suite on the pinned runner and fails if, vs. the last release
-baseline: `recall@10` drops > 1 pt · p99 query latency regresses > 15% · file size grows
-> 10% · peak RSS grows > 15%. Nightly runs the 100k suite and plots trends. Thresholds
-are deliberately loose (shared-runner noise); the reference machine confirms before a
-release is cut.
+baseline: `recall@10` drops > 1 pt · p99 query latency regresses > 15% **and > 8ms** ·
+file size grows > 10% · peak RSS grows > 15%. Nightly runs the 100k suite and plots
+trends. Thresholds are deliberately loose (shared-runner noise); the reference machine
+confirms before a release is cut.
+
+The two latency checks (query p99, remember p99) carry an **absolute noise floor of 8ms**
+on top of the percentage: a metric that clears 15% but grew by less than 8ms is reported
+as a warning, not a failure. At 10k the p99s are small (query ~22ms, remember ~12ms),
+where 15% is under 2ms — smaller than the runner's own I/O jitter, so a slightly slow
+sample "regresses" on identical code (observed on `main` 2026-07-14: an 11.87ms remember
+p99 baseline vs. a healthy 15-19ms steady state, plus one 169ms fsync spike, all same
+code, failing the guard on every push). The floor keeps small-p99 jitter from failing the
+job while a real regression — which clears 8ms — still fails; on the 100k p99s (~130ms,
+where 15% is ~20ms) the floor is comfortably below the percentage and changes nothing.
+recall@10 and file size are deterministic and stay pure-percentage.
 
 A guard failure re-runs the full harness once before failing the job: a shared runner
 can stall on fsync (I/O contention on a noisy neighbor) and spike a single p99 sample
