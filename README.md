@@ -31,16 +31,26 @@ EmbedMind is an **embedded memory engine for AI agents**, packaged as an **MCP s
 - 💾 **One crash-safe file** — WAL-backed, single binary, embedding model linked in. No server, no Docker, no ports, no API key. Nothing ever leaves your machine.
 
 ```text
-┌──────────────────────────────────────────────────────┐
-│  Your agent  (Claude Code · Cursor · custom · …)      │
-│      │  MCP:  remember · recall · related · forget    │
-│  ┌───▼──────────────────────────────────────────────┐ │
-│  │  EmbedMind engine  (Rust, in-process)            │ │
-│  │  vector (HNSW)  +  full-text (BM25 · RRF fusion) │ │
-│  │  +  graph (entities / relations / supersedes)    │ │
-│  │                 →  one file:  project.mind        │ │
-│  └──────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────┘
+   Your agent  —  Claude Code · Cursor · Windsurf · custom
+        │
+        │   MCP:  remember · recall · related · forget
+        ▼
+╔═══════════════════════════════════════════════════════════╗
+║ EmbedMind engine   ·   Rust, in-process, one binary       ║
+╠═══════════════════════════════════════════════════════════╣
+║                                                           ║
+║   ┌── vector ──┐   ┌─ full-text ─┐   ┌─── graph ───┐      ║
+║   │    HNSW    │   │    BM25     │   │  entities   │      ║
+║   │  semantic  │   │   lexical   │   │  relations  │      ║
+║   └──────┬─────┘   └──────┬──────┘   └──────┬──────┘      ║
+║          └────────────────┼─────────────────┘             ║
+║                      RRF fusion                           ║
+║               + recency   + supersedes                    ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝
+        │
+        ▼
+   one portable, crash-safe file:  project.mind  (WAL-backed)
 ```
 
 ## Why it exists
