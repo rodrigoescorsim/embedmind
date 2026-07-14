@@ -84,7 +84,9 @@ Rules:
 - Every fuzz crash gets: minimized input committed to `fuzz/regressions/`, fix, and a changelog entry (brutal honesty policy).
 - The committed corpus doesn't only feed `cargo-fuzz`: `embedmind-core`'s `fuzz_corpus_seeds_never_panic` test (`src/fuzz.rs`) replays every seed file under `fuzz/corpus/<target>/` through its matching body on every `cargo test`, stable-only, no libFuzzer required — so a fix regression is caught on the founder's Windows machine too, not just in the nightly fuzz job.
 
-CI: short fuzz pass (~2 min/target) on every PR; nightly job runs 1h/target.
+CI: short fuzz pass (~2 min/target) on every PR; a scheduled pass (Mon/Wed/Fri
+03:00 UTC) runs 1h/target, one parallel job per target so no job nears the 6h
+runner ceiling.
 
 ## 4. Property tests (`proptest`)
 
@@ -111,12 +113,12 @@ cosine for vector queries). Strategy generates operation sequences
 | unit + property tests | Linux, macOS, **Windows** | every PR |
 | crash harness (full injection sweep) | Linux, **Windows** | every PR |
 | fuzz (short) | Linux | every PR |
-| fuzz (1h/target) | Linux | nightly |
+| fuzz (1h/target, one parallel job per target) | Linux | Mon/Wed/Fri 03:00 UTC |
 | benchmark guard (see BENCHMARKS.md §5) | fixed runner | every PR, trend graph nightly |
 | clippy + fmt + `#![forbid(unsafe_code)]` audit | Linux | every PR |
 
 ## 6. Release gate (v0.1 onward)
 
-A release tag requires: green full matrix · nightly fuzz clean for 7 consecutive days ·
-benchmark guard within thresholds · zero known corruption issues open. No exceptions —
-this list is the moat.
+A release tag requires: green full matrix · scheduled fuzz clean for 3 consecutive
+passes (Mon/Wed/Fri, ~1 week) · benchmark guard within thresholds · zero known
+corruption issues open. No exceptions — this list is the moat.

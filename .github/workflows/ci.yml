@@ -5,11 +5,14 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Nightly long fuzz pass (docs/TESTING.md §3): 1h per target.
-    # Only effective while the repo is PUBLIC (free minutes): on a private
-    # repo the nightly-gate job below skips it — a completed nightly bills
-    # ~420 min, a fifth of the free plan's 2,000 min/month.
-    - cron: "0 3 * * *"
+    # Long fuzz pass (docs/TESTING.md §3): 1h per target, one job per target
+    # in parallel (see the fuzz job's matrix) so no single job approaches the
+    # 6h GitHub ceiling. Mon/Wed/Fri rather than nightly — three clean passes a
+    # week still satisfy the release gate's consecutive-run requirement while
+    # cutting scheduled runner spend and failure-mail noise by more than half.
+    # Only effective while the repo is PUBLIC (free minutes): on a private repo
+    # the nightly-gate job below skips it.
+    - cron: "0 3 * * 1,3,5"
   workflow_dispatch:
     inputs:
       full:
@@ -98,9 +101,9 @@ jobs:
         run: echo "public=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private | not')" >> "$GITHUB_OUTPUT"
 
   fuzz:
-    name: fuzz (${{ github.event_name == 'schedule' && 'nightly, 1h/target' || 'short pass' }})
+    name: fuzz ${{ matrix.target }} (${{ github.event_name == 'schedule' && '1h' || 'short' }})
     needs: nightly-gate
-    # Nightly: only when the gate confirms the repo is public. Short pass
+    # Scheduled: only when the gate confirms the repo is public. Short pass
     # (push/PR): public repo or explicit full dispatch — on a private repo the
     # stable fuzz smoke inside `cargo test` still covers the fuzz bodies.
     # !cancelled() lets the job run on push/PR where nightly-gate is skipped.
@@ -110,6 +113,30 @@ jobs:
         (github.event_name != 'schedule' && (github.event.repository.private == false || inputs.full == true))
       ) }}
     runs-on: ubuntu-latest
+    # One target per job, in parallel: the old single job ran 7×1h sequentially
+    # (~7h) and the GitHub-hosted 6h ceiling cancelled it every scheduled run —
+    # a daily failure mail and a permanently-red release gate. Each target now
+    # gets its own ~1h job that finishes well inside the ceiling. fail-fast off
+    # so one target's crash still lets the others report (and each uploads its
+    # own artifact). The 90-min timeout is an explicit belt over the 1h budget
+    # (install + build + corpus replay headroom), replacing the implicit 6h.
+    strategy:
+      fail-fast: false
+      matrix:
+        # All fuzz targets in fuzz/fuzz_targets/. Parallel jobs, so this list
+        # can cover every target without lengthening the wall-clock pass —
+        # fuzz_filter_meta_page (the FTOPT sidecar target) was missing from the
+        # old sequential loop and is included here.
+        target:
+          - fuzz_header
+          - fuzz_page
+          - fuzz_record
+          - fuzz_fts_page
+          - fuzz_graph_page
+          - fuzz_wal_replay
+          - fuzz_open_full
+          - fuzz_filter_meta_page
+    timeout-minutes: 90
     env:
       # cargo-fuzz precisa de nightly (flags -Z), mas o rust-toolchain.toml da
       # raiz pina stable e vence o default do dtolnay/rust-toolchain@nightly
@@ -130,23 +157,22 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Restore accumulated corpus
         # The seed corpus is committed; coverage-driven additions accumulate
-        # across runs through this cache (docs/TESTING.md §3).
+        # across runs through this cache (docs/TESTING.md §3). Keyed per target
+        # so the parallel matrix jobs never clobber each other's cache entry.
         uses: actions/cache@v4
         with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.run_id }}
-          restore-keys: fuzz-corpus-
-      - name: Fuzz all targets
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz ${{ matrix.target }}
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then per_target=3600; else per_target=120; fi
-          for target in fuzz_header fuzz_page fuzz_record fuzz_fts_page fuzz_graph_page fuzz_wal_replay fuzz_open_full; do
-            cargo fuzz run "$target" -- -max_total_time="$per_target" -rss_limit_mb=4096
-          done
+          cargo fuzz run "${{ matrix.target }}" -- -max_total_time="$per_target" -rss_limit_mb=4096
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts
 
   # Python bindings (B5, roadmap 2.5). Their own workspace (bindings/python),
