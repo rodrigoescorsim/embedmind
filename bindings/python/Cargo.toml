@@ -5,7 +5,7 @@
 # `embedmind_core::api`, exactly like the CLI/MCP (CLAUDE.md decision 2).
 [package]
 name = "embedmind-python"
-version = "0.1.0-dev"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Rodrigo Escorsim <rodrigo.escorsim@gmail.com>"]

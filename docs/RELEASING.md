@@ -232,9 +232,10 @@ residual só apareceria após um crash e seria reincorporado na próxima abertur
 
 ## Passos de publicação (dia do launch — `[MANUAL — founder]`)
 
-Pré-requisitos: `cargo login` feito; versão final definida (hoje `0.1.0-dev` em
-`[workspace.package]` — trocar para a versão de release, ex. `0.1.0`, antes de
-publicar). O limite de 10 MiB do crates.io **não** é mais bloqueio: o
+Pré-requisitos: `cargo login` feito; versão de release já definida em
+`[workspace.package]` (`0.1.0` — os 3 crates Rust, `bindings/python/Cargo.toml`
+e `bindings/python/pyproject.toml` já foram bumped em conjunto, ver
+CHANGELOG.md `[0.1.0]`). O limite de 10 MiB do crates.io **não** é bloqueio: o
 `embedmind-core` empacota em ~452 KiB (o modelo ONNX é baixado+verificado por
 `build.rs`, não vai no pacote — ver seção acima). O upload do core precisa de
 rede na máquina do publicador *e* de rede em quem for buildar a partir do crate
@@ -249,3 +250,40 @@ cargo publish -p embedmind          # 3 (crate publica como "embedmind")
 Entre passos, aguardar o crate anterior ficar disponível no índice (segundos a
 poucos minutos). Cada versão publicada é **imutável** — não dá para republicar a
 mesma versão; só é possível `yank`.
+
+### Tag + GitHub Release (`[MANUAL — founder]`)
+
+Depois dos 3 `cargo publish` (ou em paralelo, são independentes — a tag não
+depende do índice do crates.io):
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0        # dispara release.yml (build dos binários + wheels)
+```
+
+`release.yml` builda os binários pré-compilados (ADR 0010, teto de 40 MB
+comprimido) para as plataformas de primeira classe e sobe como assets da
+GitHub Release da tag `v0.1.0`. Conferir manualmente antes de publicar a
+Release como pública:
+
+- Assets presentes para todas as plataformas de primeira classe (Windows/
+  Linux/macOS conforme `release.yml`), cada um dentro do teto de 40 MB.
+- `scripts/smoke_install.sh` (ver seção acima) já rodado contra pelo menos um
+  binário baixado da Release, não só localmente.
+- Notas da Release: colar o corpo do CHANGELOG.md `[0.1.0]`.
+
+### Wheels Python no PyPI (`[MANUAL — founder]`)
+
+Bindings (`bindings/python/`, roadmap 2.5) publicam separado do crates.io,
+via `maturin` — não fazem parte da ordem core→mcp→cli acima.
+
+```bash
+cd bindings/python
+maturin build --release           # smoke test local do wheel antes do upload
+maturin publish                   # sobe para pypi.org — requer conta/token PyPI configurado
+```
+
+`pyproject.toml` já está em `0.1.0` (PEP 440; sem sufixo `.dev0`). Wheel
+builda contra o `embedmind-core` local por `path` (bindings ficam fora do
+workspace principal — ver nota em `bindings/python/Cargo.toml`), então não
+depende do crate já estar publicado no crates.io.

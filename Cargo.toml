@@ -14,7 +14,7 @@ members = [
 exclude = ["fuzz", "bindings/python"]
 
 [workspace.package]
-version = "0.1.0-dev"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Rodrigo Escorsim <rodrigo.escorsim@gmail.com>"]
@@ -27,8 +27,8 @@ homepage = "https://github.com/rodrigoescorsim/embedmind"
 [workspace.dependencies]
 # Inter-crate deps carry both `path` (local builds) and `version` (crates.io
 # strips `path` on publish and needs the version to resolve — docs/RELEASING.md).
-embedmind-core = { path = "crates/embedmind-core", version = "0.1.0-dev" }
-embedmind-mcp = { path = "crates/embedmind-mcp", version = "0.1.0-dev" }
+embedmind-core = { path = "crates/embedmind-core", version = "0.1.0" }
+embedmind-mcp = { path = "crates/embedmind-mcp", version = "0.1.0" }
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
