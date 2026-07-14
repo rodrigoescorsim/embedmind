@@ -486,6 +486,107 @@ distribuição realista é, se algo, pior para o BMW. Nenhuma das opções resta
 o número e a causa raiz estão reportados sem meias-palavras no README/CHANGELOG, e a escolha entre
 elas fica pendente.
 
+## Resultado do profiling confirmatório pós-sidecar (FTOPT-5, 2026-07-14)
+
+A FTOPT-1 ([ADR 0027](0027-sidecar-filter-meta-para-keep-e-doc-len.md)) moveu `keep`/`doc_len`
+para o sidecar `filter_meta`, eliminando a recarga de registro que a FT1/S24 tinha medido em
+88,8% do meio full-text. A rodada oficial pós-sidecar do founder (2026-07-14, datasets
+regenerados para `format_version` 7,
+[`benches/results/0.1.0-dev.json`](../../benches/results/0.1.0-dev.json)) mostrou melhora real
+(`query p99 @100k`: 224,00 ms → **135,74 ms**, ~40%) mas **o NFR `< 50 ms` continua reprovado**, e
+um dado novo intrigante: a busca lexical isolada (`lexical_lift.hybrid_query_p99_ms`) fica em
+**37,71 ms** — dentro do NFR — enquanto a query `engine` sobre a amostra geral (não só casos
+lexicais) mede **129,50 ms**, quase 4x o vetor-puro isolado (36,16 ms). Isso pedia profiling de
+novo: o gargalo dominante pode ter mudado de lugar depois do sidecar, e a FT1/BMW-3 tinham medido
+fases diferentes das que importam agora.
+
+**Instrumentação nova, não reaproveitada da FT1/FTOPT-0**: `search_profiled`/`profile_fts` (FT1)
+media o *scan linear exaustivo* pré-BMW — não o caminho que `Store::recall`/`search_text` de fato
+rodam num arquivo fv ≥ 6 (que despacha para `search_bmw_counted`, ADR 0025). Medir aquele scan de
+novo teria respondido a pergunta errada. Esta task adicionou:
+
+- `index::fts::search_bmw_profiled` (`fts.rs`, `#[doc(hidden)]`) — espelha `search_bmw_counted`
+  exatamente (mesmo algoritmo, resultado bit-idêntico), com `Instant` ao redor de: abertura de
+  cursor (`dict::get` + decode de listas pequenas), o laço de bound WAND/block-max (decidir
+  pular vs. avaliar, sem decodificar bloco), decodificação de bloco (`advance_to`/
+  `advance_past`/`current_tf`), `keep`, `doc_len`, scoring.
+- `Store::recall_profiled` (`api.rs`, `#[doc(hidden)]`) — espelha `recall_detailed` (sem lista de
+  recência, sem expansão de grafo — fora do escopo desta medição), cronometrando o pipeline
+  híbrido inteiro: vetor (embed + busca HNSW), o meio BMW acima, fusão RRF, carga final dos hits.
+- `benches/src/bin/profile_recall.rs` — roda a **amostra geral de queries do harness**
+  (`recall::query_texts`, a mesma da FT1/`profile_fts`, não só casos lexicais) sobre o dataset já
+  vacuum'ado (`agent-mem-100k.mind`, `format_version` 7 confirmado byte a byte), 50 queries de
+  aquecimento + 1000 medidas — mesmo tamanho do harness oficial.
+
+### `agent-mem-100k` (1000 queries, `format_version` 7, amostra geral)
+
+`Store::recall_profiled` wall time — p50 326,54 ms, p99 645,26 ms (mais alto que o `query_engine`
+oficial porque roda em `dev`-adjacent single-run sem o isolamento de processo do harness; a
+distribuição percentual entre fases, não o valor absoluto, é o dado que importa aqui).
+
+| fase | total ms | % do tempo medido |
+|---|---:|---:|
+| vetor (embed da query + busca HNSW) | 126.409,9 | 36,0% |
+| fts: abertura de cursor (dict lookup + decode de listas pequenas) | 28.860,9 | 8,2% |
+| fts: laço de bound WAND/block-max (pular vs. avaliar) | 39.997,8 | 11,4% |
+| **fts: decodificação de bloco (postings materializadas)** | **114.829,2** | **32,7%** |
+| fts: `keep` (sidecar/registro) | 3.876,1 | 1,1% |
+| fts: `doc_len` (sidecar/registro) | 1.038,5 | 0,3% |
+| fts: scoring (BM25 + insert top-k) | 32.075,7 | 9,1% |
+| fusão RRF (listas vetor + texto) | 7,6 | 0,0% |
+| carga final dos hits retornados | 4.137,1 | 1,2% |
+| **soma das fases** | 351.232,7 | 100,0% |
+
+Contadores agregados do BlockMax-WAND na mesma rodada: 6.816.080 documentos avaliados
+exatamente, 1.664.556 candidatos-pivô descartados pelo refinamento block-max sem avaliação,
+2.872.240 blocos decodificados, **apenas 1.955 blocos pulados sem decodificar (taxa de skip
+0,07%)** — consistente com a causa raiz já registrada na BMW-3/BMW-5 acima (o refinamento quase
+sempre aterrissa *dentro* de um bloco coberto em vez de pular um bloco inteiro nesta distribuição
+de postings).
+
+### Leitura do achado
+
+1. **`keep`/`doc_len` deixaram de ser o gargalo — o sidecar funcionou exatamente como a FTOPT-1
+   previu.** Juntos são 1,4% do tempo agora, contra 88,8%+4,5% pré-sidecar (FT1). Esta parte da
+   pergunta original da FTOPT-0 está fechada.
+2. **O novo gargalo dominante é `decode` de blocos de postings (32,7%)**, seguido de perto por
+   **busca vetorial/HNSW (36,0%)** — juntos, quase 69% do tempo. O laço de bound WAND/block-max
+   em si (decidir pular vs. avaliar, sem decodificar) é só 11,4%: a maior parte do tempo "BMW" não
+   é a lógica de decisão do BMW, é o trabalho de decodificação que a taxa de skip de 0,07%
+   praticamente não evita — a mesma causa raiz da BMW-3/BMW-5 (postings de alta frequência
+   distribuídas de forma densa/uniforme no espaço de ids não deixam o block-max provar exclusão de
+   blocos inteiros), agora vista pelo lado de onde o *tempo de parede* vai, não só pela contagem de
+   blocos.
+3. **Scoring (9,1%) e abertura de cursor (8,2%)** são não-triviais mas secundários frente à
+   decodificação.
+4. A comparação lexical-isolado (37,71 ms, dentro do NFR) vs. `engine` geral (129,50 ms) da rodada
+   oficial é consistente com este achado: uma query cujo ground truth é um termo exato tende a
+   casar poucos termos e/ou termos menos ambíguos, decodificando menos blocos por candidato
+   avaliado; a amostra geral do harness mistura queries com mais termos/termos mais frequentes,
+   ampliando exatamente a fase que domina (decode).
+
+### Opções em aberto (não decididas nesta task — guard-rail FTOPT-5)
+
+Esta task mede; não escolhe a próxima rota. Com o dado em mãos, as opções conhecidas são:
+
+- **Aceitar o patamar atual (135,74 ms) e o NFR reprovado como documentado.** O ganho da FTOPT-1
+  (~40%) já é real e o full-text lift (FT6) segue valendo como diferencial de produto.
+- **Investir em reduzir o custo de decodificação em si** (não em pular mais blocos — a BMW-5 já
+  fechou que o algoritmo de skip não tem mais o que explorar nesta distribuição de dado): layout de
+  postings mais barato de decodificar, cache de blocos decodificados entre queries próximas, ou
+  reduzir o número de candidatos avaliados por outra via (ex.: revisar o `k`/`ef_search` efetivo).
+- **Investir no lado vetorial (36,0% do tempo, maior fase isolada)** — fora do escopo original desta
+  fase FT (que mirava só o full-text), mas o dado mostra que otimizar só o BMW não fecha o NFR
+  sozinho mesmo que a decodificação caia a zero (36,0% de vetor + o resto ainda passa de 50 ms).
+- **Revisitar se o NFR de 50 ms @ 100k continua o critério certo** — decisão de produto do founder,
+  não técnica.
+
+Nenhuma dessas foi escolhida aqui. Resultado bruto em
+`benches/results/profile-recall-100k-ftopt5.txt` (stdout) e `.log` (stderr/build), ambos gerados
+por `cargo run -p embedmind-bench --release --bin profile_recall -- agent-mem-100k` sobre o dataset
+já vacuum'ado; nenhum benchmark oficial (`run_all.sh`/`benches/results/0.1.0-dev.json`) foi
+re-rodado por esta task.
+
 ## Alternativas rejeitadas
 
 - **Modo `vector_only` opcional exposto ao usuário, sem otimizar o FTS**:
