@@ -31,7 +31,7 @@ Format-level guarantees:
 ## 2. Encoding conventions
 
 - **Endianness:** all multi-byte integers are **little-endian**, always.
-- **Integers:** fixed-width (`u16`/`u32`/`u64`). No varints in versions ≤ 3 (simplicity > space; pages are the compression unit anyway). `format_version` 4 introduces **LEB128 varints** (7 data bits per byte, low bits first, high bit = continuation, minimal-length) in exactly one place: the entries of a full-text postings body (§11); `format_version` 5 keeps those varints and adds a fixed-width skip index in front of a large postings body (§11). Everything else stays fixed-width.
+- **Integers:** fixed-width (`u16`/`u32`/`u64`). No varints in versions ≤ 3 (simplicity > space; pages are the compression unit anyway). `format_version` 4 introduces **LEB128 varints** (7 data bits per byte, low bits first, high bit = continuation, minimal-length) in exactly one place: the entries of a full-text postings body (§11); `format_version` 5 keeps those varints and adds a fixed-width skip index in front of a large postings body (§11); `format_version` 8 replaces a large block's intercalated varints with fixed-width frame-of-reference streams (§11), so a block decodes without the continuation-bit branch. Everything else stays fixed-width.
 - **Strings / blobs:** `u32` byte-length prefix + UTF-8 bytes (strings) or raw bytes (blobs). No NUL terminators.
 - **Checksums:** `xxh3_64` (64-bit). Stored little-endian like everything else.
 - **Nothing is `memcpy`'d from structs.** Every field is explicitly (de)serialized so the parsers are fuzzable and layout is compiler-independent (DESIGN §3.1).
@@ -74,7 +74,7 @@ Format-level guarantees:
 | offset | size | field | notes |
 |---|---|---|---|
 | 0 | 8 | magic | ASCII `MINDFMT1` |
-| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12); **4** once postings bodies are delta+varint encoded (ADR 0021, §11); **5** once large postings bodies carry a skip index (ADR 0022, §11); **6** once each skip entry carries the block's `last_id` (per-block impact bound for BlockMax-WAND) (ADR 0024, §11); **7** once the filter-meta sidecar exists (ADR 0027, §13) |
+| 8 | 4 | `format_version` (u32) | 1 for v0.1; **2** once the full-text index exists (ADR 0011, §11); **3** once the graph layer exists (ADR 0012, §12); **4** once postings bodies are delta+varint encoded (ADR 0021, §11); **5** once large postings bodies carry a skip index (ADR 0022, §11); **6** once each skip entry carries the block's `last_id` (per-block impact bound for BlockMax-WAND) (ADR 0024, §11); **7** once the filter-meta sidecar exists (ADR 0027, §13); **8** once large postings block bodies are frame-of-reference encoded (ADR 0028, §11) |
 | 12 | 4 | `page_size` (u32) | default 4096 |
 | 16 | 8 | `page_count` (u64) | total pages incl. header |
 | 24 | 8 | `root_btree_page` (u64) | record B-tree root |
@@ -351,10 +351,29 @@ so such a file degrades to vector-only recall).
     stored `first_id`/`last_id`/`max_term_freq` that disagrees with the block's
     decoded entries; the strict-ascending order is enforced across block seams
     too.
+  - **`format_version` ≥ 8 (frame-of-reference block bodies):** the header
+    (`doc_freq`, `block_count`), the skip index (version-6 skip entries), the
+    block boundaries, the re-basing, and the small-term (`block_count = 0`)
+    plain delta+varint body are **all unchanged** from version 6; only each
+    large-term block's *body bytes* differ. Instead of `len` intercalated
+    delta+varint pairs, a block body is: `delta_width` (u8, 1..=16) · `tf_width`
+    (u8, 1..=4) · a **fixed-width delta stream** (`len` deltas, each
+    `delta_width` LE bytes, contiguous) · a **fixed-width term_freq stream**
+    (`len` term_freqs, each `tf_width` LE bytes). `delta_width`/`tf_width` are
+    the minimum bytes covering the block's largest delta / term_freq
+    (frame-of-reference: one width per block). This makes a block decode two
+    branch-free fixed-step loops instead of a varint continuation-bit loop
+    (ADR 0028) — the deltas are still re-based per block (the first entry's
+    delta is its absolute id), so a block still decodes on its own and BM25,
+    BlockMax-WAND, and the block-skipping lookup produce identical results.
+    Readers reject `delta_width` outside 1..=16, `tf_width` outside 1..=4, a
+    stream that overruns the body, a delta of 0 after the first entry, an id sum
+    past `u128::MAX`, and `term_freq` 0 — all typed errors, never a panic (G4).
   A build reading **or writing** an older file uses that file's own layout
   (fixed-width for v≤3, skip-less delta+varint for v4, 24-byte skip entries for
-  v5), so the file stays uniform and readable by the build that created it;
-  `vacuum`'s copy-based rebuild is the migration path to the current layout.
+  v5, v6 delta+varint blocks for v6/v7), so the file stays uniform and readable
+  by the build that created it; `vacuum`'s copy-based rebuild is the migration
+  path to the current layout.
 - **FTS_POSTINGS** pages chain an oversized postings body: common header with
   `entry_count` = payload bytes on this page (`next_page` = 0 ends the chain),
   payload at offset 16. The dictionary cell records the exact `total_len`;
@@ -375,9 +394,10 @@ memory is never re-`remember`ed (content is immutable after write), a
 
 All FTS parsers are fully bounds-checked and panic-free — they are a fuzz
 target (`fuzz_fts_page`, [TESTING.md](TESTING.md) §3, which decodes every
-input under **all four** postings layouts — fixed-width, delta+varint, and
-delta+varint+skip with both the v5 (24-byte) and v6 (40-byte) skip entry — and
-drives the block-skipping lookup over the same bytes under both entry widths),
+input under **all five** postings layouts — fixed-width, delta+varint,
+delta+varint+skip with both the v5 (24-byte) and v6 (40-byte) skip entry, and
+frame-of-reference (v8) blocks — and drives the block-skipping lookup and the
+BlockMax-WAND cursor over the same bytes under both block-body encodings),
 and the record crash harness now exercises FTS pages because `remember` writes
 them in the same transaction as the record.
 
