@@ -28,6 +28,19 @@ pub mod thresholds {
     /// Max tolerated end-to-end `remember` p99 regression (same class as the
     /// query-latency threshold; spec S15 names both latencies).
     pub const REMEMBER_P99_MAX_REGRESS_PCT: f64 = 15.0;
+    /// Absolute noise floor for the two latency regression checks: a p99 that
+    /// crosses the percentage threshold above only *fails* if it ALSO grew by
+    /// more than this many milliseconds. At 10k the p99s are single/low-double
+    /// digits (query ~22ms, remember ~12ms), where 15% is under 2ms — smaller
+    /// than the shared-runner I/O jitter, so an fsync-stalled sample "regresses"
+    /// on identical code (observed on main 2026-07-14: remember p99 11.87ms
+    /// baseline vs. a 15-19ms steady state — and a 169ms fsync spike on one run
+    /// — all same code, failing the guard on every push; §5). A real latency
+    /// regression on a metric this small still clears 8ms; a regression on the
+    /// large 100k p99s (~130ms, where 15% is ~20ms) clears it comfortably. Only
+    /// the machine-dependent latency checks use this floor — recall@10 and file
+    /// size are deterministic and stay pure-percentage.
+    pub const LATENCY_REGRESS_MIN_ABS_MS: f64 = 8.0;
     /// Max tolerated on-disk file growth (§5: "> 10%").
     pub const FILE_BYTES_MAX_GROWTH_PCT: f64 = 10.0;
     /// Max tolerated peak-RSS growth (§5: "> 15%").
@@ -127,45 +140,52 @@ pub fn check_regressions(
             },
         });
 
-        // on-disk size: deterministic — always enforced.
-        checks.push(pct_check(
-            &cur.dataset,
-            "file size",
-            base.file_bytes,
-            cur.file_bytes,
-            thresholds::FILE_BYTES_MAX_GROWTH_PCT,
-            "growth > 10%",
-            true, // enforced regardless of env
-        ));
+        // on-disk size: deterministic — always enforced, pure percentage (no
+        // runner jitter to absorb).
+        checks.push(pct_check(PctCheck {
+            dataset: &cur.dataset,
+            metric: "file size",
+            base: base.file_bytes,
+            cur: cur.file_bytes,
+            limit_pct: thresholds::FILE_BYTES_MAX_GROWTH_PCT,
+            limit: "growth > 10%",
+            enforced: true,      // enforced regardless of env
+            min_abs_delta: None, // deterministic: no absolute noise floor
+        }));
 
-        // Machine-dependent metrics: enforced only on a same-env baseline.
-        checks.push(pct_check(
-            &cur.dataset,
-            "query p99",
-            base.query_p99_ms,
-            cur.query_p99_ms,
-            thresholds::QUERY_P99_MAX_REGRESS_PCT,
-            "regress > 15%",
-            same_env,
-        ));
-        checks.push(pct_check(
-            &cur.dataset,
-            "remember p99",
-            base.remember_p99_ms,
-            cur.remember_p99_ms,
-            thresholds::REMEMBER_P99_MAX_REGRESS_PCT,
-            "regress > 15%",
-            same_env,
-        ));
-        checks.push(pct_check(
-            &cur.dataset,
-            "peak RSS",
-            base.peak_rss_mib,
-            cur.peak_rss_mib,
-            thresholds::PEAK_RSS_MAX_GROWTH_PCT,
-            "growth > 15%",
-            same_env,
-        ));
+        // Machine-dependent latencies: enforced only on a same-env baseline,
+        // and only when the regression clears BOTH the percentage and the
+        // absolute noise floor (small p99s are pure runner jitter otherwise).
+        checks.push(pct_check(PctCheck {
+            dataset: &cur.dataset,
+            metric: "query p99",
+            base: base.query_p99_ms,
+            cur: cur.query_p99_ms,
+            limit_pct: thresholds::QUERY_P99_MAX_REGRESS_PCT,
+            limit: "regress > 15% & > 8ms",
+            enforced: same_env,
+            min_abs_delta: Some(thresholds::LATENCY_REGRESS_MIN_ABS_MS),
+        }));
+        checks.push(pct_check(PctCheck {
+            dataset: &cur.dataset,
+            metric: "remember p99",
+            base: base.remember_p99_ms,
+            cur: cur.remember_p99_ms,
+            limit_pct: thresholds::REMEMBER_P99_MAX_REGRESS_PCT,
+            limit: "regress > 15% & > 8ms",
+            enforced: same_env,
+            min_abs_delta: Some(thresholds::LATENCY_REGRESS_MIN_ABS_MS),
+        }));
+        checks.push(pct_check(PctCheck {
+            dataset: &cur.dataset,
+            metric: "peak RSS",
+            base: base.peak_rss_mib,
+            cur: cur.peak_rss_mib,
+            limit_pct: thresholds::PEAK_RSS_MAX_GROWTH_PCT,
+            limit: "growth > 15%",
+            enforced: same_env,
+            min_abs_delta: None, // RSS growth is already a coarse MiB check; no ms floor
+        }));
     }
 
     if checks.is_empty() {
@@ -184,23 +204,36 @@ fn names(ds: &[DatasetMetrics]) -> String {
     v.join(", ")
 }
 
-/// "grew more than `limit_pct`% over baseline" check. When `enforced` is false
-/// (cross-env machine-dependent metric) an over-threshold result is a Warn.
-fn pct_check(
-    dataset: &str,
+/// Inputs for one "grew more than `limit_pct`% over baseline" check.
+struct PctCheck<'a> {
+    dataset: &'a str,
     metric: &'static str,
     base: f64,
     cur: f64,
     limit_pct: f64,
+    /// Human-readable limit shown in the report.
     limit: &'static str,
+    /// False for a cross-env machine-dependent metric: over-threshold is a Warn.
     enforced: bool,
-) -> RegressionCheck {
+    /// Optional absolute floor (ms) for latency metrics: crossing the percentage
+    /// alone does not *fail* unless `cur - base` also exceeds it. A small p99
+    /// over the percentage but under the floor is runner jitter, not a code
+    /// regression (see `LATENCY_REGRESS_MIN_ABS_MS`); it surfaces as a Warn,
+    /// never silently as a Pass, so genuine small drift stays visible.
+    min_abs_delta: Option<f64>,
+}
+
+fn pct_check(c: PctCheck<'_>) -> RegressionCheck {
     // A non-positive baseline value can't produce a meaningful percentage;
     // report it as a warning rather than dividing by zero or silently passing.
-    let verdict = if base <= 0.0 {
+    let verdict = if c.base <= 0.0 {
         Verdict::Warn
-    } else if (cur - base) / base * 100.0 > limit_pct {
-        if enforced {
+    } else if (c.cur - c.base) / c.base * 100.0 > c.limit_pct {
+        // Over the percentage. A latency metric must also clear the absolute
+        // noise floor to count as a real regression; below it, the crossing is
+        // runner jitter — flag as Warn (visible, non-failing) rather than Fail.
+        let clears_abs_floor = c.min_abs_delta.is_none_or(|floor| c.cur - c.base > floor);
+        if c.enforced && clears_abs_floor {
             Verdict::Fail
         } else {
             Verdict::Warn
@@ -209,11 +242,11 @@ fn pct_check(
         Verdict::Pass
     };
     RegressionCheck {
-        dataset: dataset.to_string(),
-        metric,
-        baseline: fmt_metric(metric, base),
-        current: fmt_metric(metric, cur),
-        limit,
+        dataset: c.dataset.to_string(),
+        metric: c.metric,
+        baseline: fmt_metric(c.metric, c.base),
+        current: fmt_metric(c.metric, c.cur),
+        limit: c.limit,
         verdict,
     }
 }
@@ -262,10 +295,19 @@ pub fn render_markdown(
         "| Dataset | Metric | Baseline | Current | Limit | Verdict |"
     );
     let _ = writeln!(out, "|---|---|---:|---:|---|:---:|");
+    let comparable = baseline.same_env(current);
     for c in checks {
+        // Two distinct reasons a machine-dependent check warns instead of
+        // failing: the baseline env isn't comparable, or (same env) the
+        // regression is under the absolute noise floor — real jitter, not code.
+        let warn_label = if comparable {
+            "⚠️ warn (within noise floor)"
+        } else {
+            "⚠️ warn (not comparable)"
+        };
         let verdict = match c.verdict {
             Verdict::Pass => "✅ pass",
-            Verdict::Warn => "⚠️ warn (not comparable)",
+            Verdict::Warn => warn_label,
             Verdict::Fail => "❌ **regression**",
         };
         let _ = writeln!(
@@ -612,7 +654,8 @@ mod tests {
     #[test]
     fn latency_regression_fails_same_env_but_warns_cross_env() {
         let mut m = metrics("agent-mem-10k");
-        m.query_p99_ms *= 1.3; // +30%, over the 15% threshold
+        // +100% on a 14ms base = +14ms: clears both the 15% and the 8ms floor.
+        m.query_p99_ms *= 2.0;
         let base = summary("linux", vec![metrics("agent-mem-10k")]);
 
         let cur_same = summary("linux", vec![m.clone()]);
@@ -625,6 +668,37 @@ mod tests {
         let q = checks.iter().find(|c| c.metric == "query p99").unwrap();
         assert_eq!(q.verdict, Verdict::Warn);
         assert!(!has_failures(&checks));
+    }
+
+    #[test]
+    fn small_latency_jitter_over_pct_but_under_abs_floor_warns_not_fails() {
+        // The main-branch false positive (2026-07-14): same env, a small p99
+        // that clears +15% but is only a few ms of runner jitter must NOT fail.
+        let base = summary("linux", vec![metrics("agent-mem-10k")]);
+        let mut m = metrics("agent-mem-10k");
+        m.remember_p99_ms = base.datasets[0].remember_p99_ms + 5.0; // +5ms, ~23%
+        let cur = summary("linux", vec![m]);
+        assert!(base.same_env(&cur));
+
+        let checks = check_regressions(&base, &cur).unwrap();
+        let r = checks.iter().find(|c| c.metric == "remember p99").unwrap();
+        // Over 15% but under the 8ms floor: visible as Warn, does not fail.
+        assert_eq!(r.verdict, Verdict::Warn);
+        assert!(!has_failures(&checks));
+    }
+
+    #[test]
+    fn large_latency_regression_clears_abs_floor_and_fails() {
+        // A real regression on the same small metric still exceeds 8ms and fails.
+        let base = summary("linux", vec![metrics("agent-mem-10k")]);
+        let mut m = metrics("agent-mem-10k");
+        m.remember_p99_ms = base.datasets[0].remember_p99_ms + 12.0; // +12ms
+        let cur = summary("linux", vec![m]);
+
+        let checks = check_regressions(&base, &cur).unwrap();
+        let r = checks.iter().find(|c| c.metric == "remember p99").unwrap();
+        assert_eq!(r.verdict, Verdict::Fail);
+        assert!(has_failures(&checks));
     }
 
     #[test]
