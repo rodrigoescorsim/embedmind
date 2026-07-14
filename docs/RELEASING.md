@@ -190,6 +190,13 @@ o `~/.embedmind/memory.mind` real do founder nunca é tocado.
 > num **segundo agente** (ex. Cursor) e confirmar `recall` do outro lado — a
 > prova de integração ponta a ponta que precisa de um cliente MCP externo.
 
+Complementar, [`scripts/smoke_gif_script.sh`](../scripts/smoke_gif_script.sh) valida
+literalmente o roteiro do [GIF de demo](launch/gif-script.md) (30s, 5 beats:
+`remember` ×2 → `recall` → `stats`, arquivo padrão `~/.embedmind/memory.mind`, fora de
+um repo git) contra o binário real, comando a comando — inclusive a alegação de que o
+`recall` do beat 3 vence por semântica (a memória top-ranked é conferida, não só
+presente no output). Roda com a mesma variável `EMBEDMIND_BIN`.
+
 ## Portabilidade do `.mind` entre plataformas (verificação cross-platform)
 
 Garantia de formato **G3** ([docs/FORMAT.md](FORMAT.md) §1): o arquivo é
