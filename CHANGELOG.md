@@ -36,6 +36,25 @@ Pre-v0.1 — under active development, repo private until M1 completes
   **No @100k gain is claimed here**: measuring it is FTOPT-4's job, and whether
   the resulting number closes the `recall p99 < 50 ms` NFR (or another route is
   taken) remains the founder's call.
+- **Pre-computed `doc_len` for BM25 length normalization** (FTOPT-2,
+  [ADR 0027](docs/adr/0027-filter-meta-sidecar-fv7.md) /
+  [ADR 0011](docs/adr/0011-full-text-indice-invertido-proprio.md), 2026-07-13).
+  FT1 measured the BM25 `doc_len` callback — a *second* record load per
+  candidate, just to re-tokenize the content for the length term — at 4.5% of
+  query time. This reopens ADR 0011's deliberate choice **not** to persist `|D|`
+  ("one less thing that can diverge on disk"): that trade rested on the record
+  read being free because `keep` already did it, which stopped holding once
+  `keep` moved off the record (FTOPT-1). The FILTER_META entry already carries
+  `doc_len: u32`, computed from the exact content `index_document` tokenized in
+  the same transaction (content is immutable after `remember`, so the stored
+  count can never go stale), and the BM25 closures now read it from the sidecar
+  instead of reloading + re-tokenizing. Non-divergence is enforced by
+  `verify_filter_meta_invariant` and covered by two dedicated tests: a *positive*
+  one proving the score shifts when the sidecar's `doc_len` is corrupted (so the
+  stored count is genuinely the one read, not the content), and a *negative* one
+  proving a divergent entry is a typed invariant error. BM25 formula unchanged;
+  result equivalence against the v6 record-path oracle already covers scoring
+  parity. No @100k benchmark here — that stays with FTOPT-4.
 - **Full-text-only (BM25) external comparison: EmbedMind vs. tantivy** (founder
   review 2026-07-13) — the measurement gap flagged in the same review that
   produced BMW-3/BMW-4/BMW-5: every prior external comparison

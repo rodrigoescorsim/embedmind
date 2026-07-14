@@ -75,6 +75,14 @@ previa e é consistente com "tudo num arquivo".
   candidato para re-checar tombstone/escopo (como o caminho vetorial faz), então
   a contagem de tokens sai de graça ali e há **um dado a menos que pode divergir
   em disco**.
+  > **Revisto pelo [ADR 0027](0027-filter-meta-sidecar-fv7.md) (FTOPT-2):** a
+  > premissa "a leitura do registro é grátis porque o keep já a faz" caiu quando
+  > o profiling (ADR 0017) mostrou o keep como 88,8% do tempo @100k. Ao mover
+  > keep para o filter-meta sidecar, `|D|` deixou de sair de graça — passou a
+  > exigir uma **segunda** recarga só para re-tokenizar (4,5%). O sidecar
+  > acomoda o campo `doc_len: u32` sem custo estrutural, então persistí-lo virou
+  > a escolha certa; o risco de divergência é fechado pela invariante
+  > `verify_filter_meta_invariant` (a mesma transação escreve registro e entry).
 
 ### Deleção e degradação
 
