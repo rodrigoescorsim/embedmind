@@ -60,7 +60,13 @@ score, escopados ao projeto em que estou.
   (×4 por rodada, teto = grafo inteiro) — degrada rumo a scan honesto, nunca
   sub-retorna em silêncio.
 - **Borda:** arquivo vazio → `hits: []`, não erro. `limit: 0` → lista vazia.
-- **NFR:** p99 < 50 ms com 100k memórias (CPU-only, cache quente).
+- **NFR:** p99 < 100 ms com 100k memórias (CPU-only, cache quente) — recalibrado de
+  50 ms em 2026-07-14 (ver ADR 0017, seção "Revisão do NFR"): o alvo original não
+  contava o custo do full-text híbrido (o diferencial de produto), e nenhum
+  concorrente embarcado/local comparável soma embed+busca+fusão no mesmo número
+  (a maioria isola só o vetor). O patamar pós-FTOPT-1/2 (135,74 ms) ainda reprova
+  este alvo — decisão consciente do founder para manter pressão por otimizar o
+  formato de postings (ADR 0017, "mudar o formato de postings").
 - **Verificação:** `cargo test -p embedmind-core recall` + property tests vs. modelo
   de referência linear.
 
@@ -571,7 +577,7 @@ de 300 MiB — hoje passa por pouco, mas passa.
 |---|---|---|
 | Durabilidade | zero perda confirmada sob kill -9/queda de energia | crash harness (S4) |
 | Integridade | arquivo nunca irrecuperável; recovery automático | crash harness + fuzzing |
-| Latência `recall` | < 50 ms p99 @ 100k memórias, CPU-only | benchmark harness |
+| Latência `recall` | < 100 ms p99 @ 100k memórias, CPU-only (recalibrado 2026-07-14, ADR 0017) | benchmark harness |
 | Recall@10 @ 100k | ≥ 0,95 média · ≥ 0,70 pior query (alvos propostos — S16) | benchmark harness |
 | Latência `remember` | < 200 ms p99 (dominada pelo embedding) | benchmark harness |
 | Artefato de release | < 40 MB comprimido, incluindo modelo (ADR 0010) | CI de release |

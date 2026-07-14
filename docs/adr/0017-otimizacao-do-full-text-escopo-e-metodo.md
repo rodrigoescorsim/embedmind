@@ -739,6 +739,40 @@ FTOPT-6 já havia identificado como fora do escopo de uma mudança segura e pont
 Nenhuma dessas foi escolhida aqui — mesma disciplina de FT6/BMW-3/BMW-5/FTOPT-1/2/5/6: esta task
 mede e reporta, não decide mudança de formato nem revisita o NFR.
 
+## Revisão do NFR (decisão do founder, 2026-07-14)
+
+O NFR original (`docs/01-spec.md` §NFR, "p99 < 50 ms @ 100k") foi definido antes de qualquer
+medição real do custo do full-text híbrido. A cadeia FTOPT-0 a FTOPT-7 mostrou que esse alvo nunca
+correspondeu à arquitetura do produto: o vetor puro (`vector-only`, sem BM25/fusão) já mede p99
+36,16 ms — dentro do alvo original sozinho —, mas o full-text (o diferencial de posicionamento do
+produto, "híbrido de verdade" no `00-prd.md` §3) acrescenta um custo estrutural que nenhuma
+otimização de baixo risco eliminou (FTOPT-1/2 atacaram e resolveram o gargalo de `keep`/`doc_len`;
+FTOPT-6/7 mediram e confirmaram que o que resta — o parsing varint das postings — não tem
+ineficiência local corrigível).
+
+**Pesquisa de mercado (2026-07-14)**: nenhum concorrente embarcado/local-first comparável mede
+exatamente o mesmo workload (BM25 + vetor + fusão, mesmo arquivo, CPU-only, sem servidor). Os
+números mais próximos: LanceDB embarcado mede ~25 ms p50 só de vetor e ~50 ms p99 quando soma
+filtro de metadado (ainda sem full-text nem embed); Chroma embarcado mede p95 ~51 ms num corpus
+menor (10k), também sem o full-text que o EmbedMind soma. Ferramentas com p50 de poucos ms (Qdrant,
+Weaviate) são servidores dedicados com processo próprio e cache quente — categoria diferente de um
+arquivo único sem servidor. Nenhum concorrente testado soma embed + busca + fusão no mesmo número
+que o EmbedMind reporta (a maioria isola só o índice) — o número do EmbedMind é mais honesto
+(end-to-end) que a maioria das comparações de mercado disponíveis, o que também significa que não
+há um "alvo de mercado" direto para copiar.
+
+**Decisão**: o NFR de latência do `recall` híbrido muda de **< 50 ms** para **< 100 ms** p99 @ 100k
+(CPU-only). Justificativa: 50 ms nunca foi alcançável para o workload híbrido real sem uma mudança
+de formato de postings (fora do escopo de uma correção pontual); mas o founder optou por **não**
+recalibrar direto para o patamar já medido (135,74 ms), mantendo 100 ms como pressão explícita para
+investir na próxima frente identificada — mudar o formato de postings (SIMD/vetorizado, layout de
+largura fixa; ver "Opções em aberto" acima) — antes de aceitar o número atual como definitivo. O
+patamar de 135,74 ms **continua reprovando** mesmo o NFR revisado: a fase FTOPT não fecha ainda.
+
+Este ADR registra a decisão tomada pelo founder; não decide sozinho — a escolha de 100 ms (em vez
+de aceitar 135,74 ms ou manter 50 ms) foi feita explicitamente fora desta pipeline de tasks
+automatizadas, com pesquisa de mercado como insumo, não como cálculo determinístico.
+
 ## Alternativas rejeitadas
 
 - **Modo `vector_only` opcional exposto ao usuário, sem otimizar o FTS**:
