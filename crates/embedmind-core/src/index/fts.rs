@@ -1092,6 +1092,17 @@ pub struct BmwCounters {
     pub docs_evaluated: u64,
     /// Pivot candidates discarded by the block-max check without evaluation.
     pub pivot_skips: u64,
+    /// Time spent in the `decode_delta_run` varint-parsing loop inside
+    /// [`BmwCursor::decode_block`], nanoseconds — FTOPT-7's granular split of
+    /// the `decode_ns` phase FTOPT-5/6 could only measure as a whole
+    /// (`docs/adr/0017`). Always-on like the rest of this struct: one
+    /// `Instant::now()` pair per block decoded, negligible next to the work
+    /// it measures.
+    pub decode_varint_ns: u64,
+    /// Time spent re-verifying a decoded block's `first_id`/`last_id`/
+    /// `max_term_freq` against its skip entry, nanoseconds — the other half
+    /// of `decode_block`'s cost FTOPT-7 isolated from the varint loop above.
+    pub decode_revalidate_ns: u64,
 }
 
 impl BmwCounters {
@@ -1279,7 +1290,10 @@ impl BmwCursor {
             .ok_or_else(|| malformed(self.page_no, "fts skip byte_offset overflow"))?;
         self.entries.clear();
         self.entries.reserve(len);
+        let varint_started = Instant::now();
         decode_delta_run(&self.body, &mut off, len, self.page_no, &mut self.entries)?;
+        counters.decode_varint_ns += varint_started.elapsed().as_nanos() as u64;
+        let revalidate_started = Instant::now();
         if self.entries.first().map(|p| u128::from(p.record_id)) != Some(first_id) {
             return Err(malformed(self.page_no, "fts skip first_id mismatch"));
         }
@@ -1289,6 +1303,7 @@ impl BmwCursor {
         if self.entries.iter().map(|p| p.term_freq).max() != Some(max_tf) {
             return Err(malformed(self.page_no, "fts skip max_term_freq mismatch"));
         }
+        counters.decode_revalidate_ns += revalidate_started.elapsed().as_nanos() as u64;
         self.cur_block = b;
         counters.blocks_decoded += 1;
         Ok(())
@@ -1626,6 +1641,12 @@ pub struct BmwPhaseTimings {
     /// Blocks whose bounds were consulted but never decoded (mirrors
     /// [`BmwCounters::blocks_total`] minus `blocks_decoded`).
     pub blocks_skipped: u64,
+    /// The `decode_delta_run` varint loop's share of `decode_ns` (FTOPT-7,
+    /// mirrors [`BmwCounters::decode_varint_ns`]).
+    pub decode_varint_ns: u64,
+    /// The `first_id`/`last_id`/`max_term_freq` revalidation's share of
+    /// `decode_ns` (FTOPT-7, mirrors [`BmwCounters::decode_revalidate_ns`]).
+    pub decode_revalidate_ns: u64,
 }
 
 /// [`search_bmw_counted`] — the production BlockMax-WAND path a
@@ -1828,6 +1849,8 @@ pub fn search_bmw_profiled(
     timings.pivot_skips = counters.pivot_skips;
     timings.blocks_decoded = counters.blocks_decoded;
     timings.blocks_skipped = counters.blocks_skipped();
+    timings.decode_varint_ns = counters.decode_varint_ns;
+    timings.decode_revalidate_ns = counters.decode_revalidate_ns;
     Ok((hits, timings))
 }
 
