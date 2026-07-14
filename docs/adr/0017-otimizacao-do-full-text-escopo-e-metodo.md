@@ -662,6 +662,83 @@ sessão da fase FT: profiling granular dentro de `decode_block` (ex.: `Instant` 
 `decode_delta_run` vs. só das 3 revalidações) antes de tentar a hipótese 2 ou 3 às cegas — a mesma
 disciplina de medir-antes-de-mudar desta e das tasks anteriores.
 
+## Resultado do profiling granular do interior de `decode_block` (FTOPT-7, 2026-07-14)
+
+A FTOPT-6 deixou em aberto qual parte do *interior* de `decode_block` respondia pelos 32,7%/32,8%
+de tempo em decodificação de bloco — só media a fase inteira. Esta task instrumentou o interior da
+função em dois pontos com `Instant`, sem tocar o algoritmo:
+
+- `decode_varint_ns` — só o laço `decode_delta_run` (o parsing varint em si, incluindo a
+  reconstrução delta→id e a checagem de ordem estrita).
+- `decode_revalidate_ns` — só as 3 revalidações pós-decode (`first`/`last`/`.iter().map(...).max()`
+  para `max_tf`).
+
+Os dois campos foram adicionados a `BmwCounters` (`crates/embedmind-core/src/index/fts.rs`) —
+`#[doc(hidden)]`, always-on como o resto da struct (custo de dois `Instant::now()` por bloco
+decodificado é desprezível frente ao trabalho medido) — e propagados a `BmwPhaseTimings` no fim de
+`search_bmw_profiled`, reportados por `profile_recall` como um detalhamento da linha "fts: block
+decode" já existente.
+
+**Método**: mesmo binário `profile_recall`, mesmo dataset `agent-mem-100k.mind` (`format_version`
+7), mesma amostra de 1000 queries da FTOPT-5/6. Rodada única nesta sessão (sem antes/depois de
+código, porque a medição granular **não motivou nenhuma mudança de algoritmo** — ver conclusão
+abaixo); saída bruta em `benches/results/profile-recall-100k-ftopt7-before.txt`/`.log`.
+
+### Decomposição do interior de `decode_block` (1000 queries, `agent-mem-100k`, fv7)
+
+| sub-fase de `decode_block` | tempo (ms) | % da fase "block decode" |
+|---|---:|---:|
+| **laço `decode_delta_run` (parsing varint)** | **65.087,8** | **59,9%** |
+| revalidação `first_id`/`last_id`/`max_tf` | 696,0 | 0,6% |
+| outro (bookkeeping do cursor: `advance_to`/`current_tf` ao redor da chamada a `decode_block`, não o decode em si) | 42.835,3 | 39,4% |
+| **fts: block decode (total)** | **108.619,1** | **100,0%** |
+
+Contexto da mesma rodada: vetor 37,7%, cursor open 8,3%, bound WAND/block-max 11,0%, block decode
+31,6%, keep 1,1%, doc_len 0,3%, scoring 8,9% — mesma ordem de grandeza da FTOPT-5/6 (dentro do ruído
+de máquina compartilhada entre sessões, como já registrado).
+
+### Leitura do achado
+
+A hipótese registrada na FTOPT-6 **se confirma**: o próprio laço de decodificação varint domina —
+quase 60% do tempo de "block decode" e sozinho já é ~19% do tempo total medido (maior que o laço de
+bound WAND/block-max inteiro, 11,0%). A revalidação (`first`/`last`/`max_tf`), que incluía a
+segunda varredura O(len) que o enunciado desta task cogitava fundir no loop de decode, é
+**irrelevante** (0,6%) — fundir o cálculo de `max_tf` dentro do laço de decode eliminaria, na
+melhor das hipóteses, uma fração de 0,6% da fase de decode (bem dentro do ruído observado nesta e
+nas sessões anteriores, onde a fase "vetor" variou quase 2x entre rodadas sem nenhuma mudança de
+código). **Por isso essa fusão não foi implementada**: seria uma mudança de código real (e portanto
+risco de regressão real, ainda que pequeno) para um ganho não mensurável — o guard-rail desta task
+já previa medir antes de mudar, e a medição aqui diz explicitamente "não vale a pena".
+
+A fatia "outro" (39,4%, bookkeeping de `advance_to`/`current_tf` ao redor de `decode_block` que o
+`decode_ns` do bracket em `search_bmw_profiled` também captura, mas que não é o próprio
+`decode_block`) não foi decomposta além disso nesta sessão — é overhead de navegação do cursor
+(partition_point, comparações), não do decode de bytes, e não estava no escopo da hipótese 2 do
+enunciado.
+
+### Conclusão: gargalo é o formato de postings, não uma ineficiência local corrigível
+
+O achado da FTOPT-6 vira fato medido: o custo é o parsing varint em si — cada campo (delta do id,
+term_freq) é lido byte a byte com checagem de overflow, até `MAX_VARINT_LEN` = 19 iterações no pior
+caso, para ~2 campos × 128 entradas × 2.872.240 blocos decodificados nesta rodada. Não há
+ineficiência de código óbvia aqui para corrigir sem mudar o layout on-disk: o loop já opera direto
+sobre `&[u8]`, sem alocação por campo, sem branch previsível a mais do que o necessário para
+segurança contra bytes hostis (G4). As únicas rotas que reduziriam esse custo de fato são as que a
+FTOPT-6 já havia identificado como fora do escopo de uma mudança segura e pontual:
+
+- **Aceitar o patamar.** ~32% em decode de blocos de postings é o custo estrutural do formato
+  delta+varint atual; nenhuma mudança local (alocação, fusão de revalidação) o reduz de forma
+  mensurável.
+- **Mudar o formato de postings** (ex.: layout de largura fixa para term_freq, ou decodificação
+  vetorizada/SIMD de deltas) — reduziria o custo do laço varint em si, mas é uma mudança de formato
+  on-disk com risco de equivalência maior e exigiria bump de `format_version` — explicitamente fora
+  do escopo desta task (guard-rail da sessão).
+- **Revisitar o NFR de <50 ms @ 100k** — decisão de produto do founder, não técnica; mesmo se o
+  decode caísse a zero, a fase vetorial (37,7% nesta rodada) sozinha já ultrapassa o orçamento.
+
+Nenhuma dessas foi escolhida aqui — mesma disciplina de FT6/BMW-3/BMW-5/FTOPT-1/2/5/6: esta task
+mede e reporta, não decide mudança de formato nem revisita o NFR.
+
 ## Alternativas rejeitadas
 
 - **Modo `vector_only` opcional exposto ao usuário, sem otimizar o FTS**:

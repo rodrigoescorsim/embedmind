@@ -131,6 +131,8 @@ struct PhaseTotals {
     pivot_skips: u64,
     blocks_decoded: u64,
     blocks_skipped: u64,
+    decode_varint_ns: u64,
+    decode_revalidate_ns: u64,
 }
 
 impl PhaseTotals {
@@ -148,6 +150,8 @@ impl PhaseTotals {
         self.pivot_skips += t.fts.pivot_skips;
         self.blocks_decoded += t.fts.blocks_decoded;
         self.blocks_skipped += t.fts.blocks_skipped;
+        self.decode_varint_ns += t.fts.decode_varint_ns;
+        self.decode_revalidate_ns += t.fts.decode_revalidate_ns;
     }
 
     fn report(&self, dataset: &str, queries: usize, wall_ns: &mut [u64]) {
@@ -166,6 +170,13 @@ impl PhaseTotals {
                 0.0
             } else {
                 100.0 * ns as f64 / phases_ns as f64
+            }
+        };
+        let pct_of = |ns: u64, whole: u64| {
+            if whole == 0 {
+                0.0
+            } else {
+                100.0 * ns as f64 / whole as f64
             }
         };
 
@@ -229,6 +240,20 @@ impl PhaseTotals {
             pct(self.hit_load_ns)
         );
         println!("| **sum of phases** | {:.3} | 100.0% |", ms(phases_ns));
+
+        let decode_other_ns = self
+            .decode_ns
+            .saturating_sub(self.decode_varint_ns + self.decode_revalidate_ns);
+        println!(
+            "\nFTOPT-7 split of `fts: block decode` ({:.3} ms): varint loop (`decode_delta_run`) {:.3} ms ({:.1}%), first/last/max_tf revalidation {:.3} ms ({:.1}%), other (cursor bookkeeping) {:.3} ms ({:.1}%).",
+            ms(self.decode_ns),
+            ms(self.decode_varint_ns),
+            pct_of(self.decode_varint_ns, self.decode_ns),
+            ms(self.decode_revalidate_ns),
+            pct_of(self.decode_revalidate_ns, self.decode_ns),
+            ms(decode_other_ns),
+            pct_of(decode_other_ns, self.decode_ns),
+        );
 
         println!(
             "\nBlockMax-WAND work: {} docs evaluated exactly, {} pivot candidates skipped by the block-max check, {} blocks decoded, {} blocks skipped (skip rate {:.2}%).",
