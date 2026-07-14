@@ -175,7 +175,7 @@ a recarga do registro completo por candidato na closure `keep` (88,8% do tempo @
 |---|---|---|
 | FTOPT-0 | Profiling confirmatório do `keep` (breakdown aceito × rejeitado, `KeepOutcome`) @10k e @100k | ✅ ENTREGUE — 97,9% aceitos @10k, **99,9% @100k**: "pular I/O nos rejeitados" tem teto ~0,1% (ADR 0017 §FTOPT-0) |
 | FTOPT-1 | Filter-meta sidecar (`format_version` 7, [ADR 0027](docs/adr/0027-filter-meta-sidecar-fv7.md)): `record_id → (flags, project, agent, doc_len)` fora do registro, escrito na mesma transação; `keep`/`doc_len` decidem sem tocar o B-tree para aceitos E rejeitados; registro completo só para top-k e filtros custom. Redesenho imposto pelo dado da FTOPT-0 | ✅ ENTREGUE (equivalência vs. oráculo fv6, crash sweep, fuzz; ganho @100k **não medido** — fica para a task de fechamento) |
-| FTOPT-2 | `doc_len` (se ainda relevante após o sidecar, que já o serve) | ⬜ |
+| FTOPT-2 | `doc_len` pré-computado (elimina a 2ª recarga da normalização BM25, 4,5% no FT1). Reabre o trade-off do [ADR 0011](docs/adr/0011-fulltext-index.md) (que rejeitou persistir `doc_len`): o sidecar da FTOPT-1 já acomoda o campo sem custo estrutural | ✅ ENTREGUE — absorvida pela FTOPT-1: o campo `doc_len` já entrou no sidecar fv7 e as closures BM25 já leem dele. Esta task fechou as pontas do critério de pronto: teste **positivo** (score muda com `doc_len` do sidecar corrompido ⇒ leitura vem do sidecar, não do conteúdo) + teste **negativo** de invariante (divergência é erro tipado). Sem benchmark @100k (FTOPT-4) |
 | FTOPT-4 | Medição @100k pelo harness oficial e veredito do NFR `recall p99 < 50 ms` — decisão de produto do founder sobre o resultado | ⬜ |
 
 ---
