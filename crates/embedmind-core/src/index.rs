@@ -44,6 +44,7 @@
 //!   never go stale across operations because it never outlives one.
 
 pub(crate) mod dict;
+pub mod filter_meta;
 pub mod fts;
 pub mod graph;
 

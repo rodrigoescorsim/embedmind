@@ -2849,8 +2849,9 @@ mod tests {
         assert_eq!(hits.len(), 3);
     }
 
-    /// A file created by this build (`format_version` 6) stores postings in
-    /// the version-6 skip layout — verified on the raw dictionary body. A small
+    /// A file created by this build (`format_version` 7 — the filter-meta
+    /// sidecar bump, which left postings untouched) stores postings in the
+    /// version-6 skip layout — verified on the raw dictionary body. A small
     /// term carries `block_count = 0` (no skip index, plain delta+varint
     /// entries), so it costs just 4 bytes over the version-4 body and is
     /// byte-identical to the v5 small body.
@@ -2858,7 +2859,7 @@ mod tests {
     fn new_files_store_postings_as_delta_varint_skip() {
         let mut pager = pager(4096);
         assert_eq!(pager.header().format_version, crate::format::FORMAT_VERSION);
-        assert_eq!(pager.header().format_version, 6);
+        assert_eq!(pager.header().format_version, 7);
         let ids = index_all(&mut pager, &["memory one", "memory two", "memory three"]);
         let meta = load_meta(&pager, pager.header().fts_root_page)
             .unwrap()

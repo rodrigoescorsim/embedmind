@@ -56,6 +56,13 @@ pub fn fuzz_graph_page(data: &[u8]) {
     crate::index::graph::fuzz_decode_page(data);
 }
 
+/// `fuzz_filter_meta_page`: filter-meta sidecar entry and symbol-table page
+/// parsers — the format that landed with FTOPT-1 (`docs/adr/0027`,
+/// `docs/FORMAT.md` §13). Must return, never panic/OOM, on arbitrary input.
+pub fn fuzz_filter_meta_page(data: &[u8]) {
+    crate::index::filter_meta::fuzz_decode_page(data);
+}
+
 /// `fuzz_wal_replay`: full recovery with arbitrary bytes as the WAL sidecar
 /// of a valid base store. Recovery must yield an openable store or a typed
 /// error; every page read after it must be `Ok` or a typed error.
@@ -147,6 +154,7 @@ mod tests {
             fuzz_page(&data);
             fuzz_fts_page(&data);
             fuzz_graph_page(&data);
+            fuzz_filter_meta_page(&data);
             // The whole-store bodies are heavier; sample them.
             if round % 10 == 0 {
                 fuzz_wal_replay(&data);
@@ -171,6 +179,7 @@ mod tests {
             ("fuzz_page", fuzz_page),
             ("fuzz_fts_page", fuzz_fts_page),
             ("fuzz_graph_page", fuzz_graph_page),
+            ("fuzz_filter_meta_page", fuzz_filter_meta_page),
             ("fuzz_wal_replay", fuzz_wal_replay),
             ("fuzz_open_full", fuzz_open_full),
         ];

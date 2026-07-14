@@ -215,6 +215,14 @@ quando rejeitado), ou ser abandonada — essa é uma decisão de produto/arquite
 task apenas mede e reporta o número que a decisão precisa; com os dois tamanhos confirmados, não há
 mais dúvida de metodologia pendente.
 
+**Adendo (FTOPT-1, 2026-07-13):** a rota de redesenho foi tomada — a estrutura leve foi
+reescopada para servir também (principalmente) os candidatos **aceitos**: `keep` só precisa da
+decisão e `doc_len` só precisa da contagem de tokens, nenhum dos dois precisa do corpo do registro,
+que passa a ser carregado apenas para os top-k `Hit`s e para filtros de metadados customizados.
+Desenho, layout (`format_version` 7) e suite de equivalência no
+[ADR 0027](0027-filter-meta-sidecar-fv7.md); a medição do ganho @100k continua reservada à task de
+fechamento (FTOPT-4), e a decisão de produto sobre o NFR continua do founder.
+
 ## Fechamento da fase FT — números finais @ 10k e @ 100k
 
 Medição oficial `benches/run_all.sh --full` (1000 queries, ambos os datasets, `agent-mem-10k`

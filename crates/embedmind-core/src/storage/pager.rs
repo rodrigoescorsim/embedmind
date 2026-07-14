@@ -292,6 +292,12 @@ impl Pager {
         if let Some(graph_root) = pending.graph_root {
             new_header.graph_root_page = graph_root;
         }
+        if let Some(filter_meta) = pending.filter_meta {
+            new_header.filter_meta_page = filter_meta;
+        }
+        if let Some(filter_symbols) = pending.filter_symbols {
+            new_header.filter_symbols_page = filter_symbols;
+        }
         if let Some((model_id, dims)) = pending.embedding {
             new_header.embedding_model_id = model_id;
             new_header.embedding_dims = dims;
@@ -343,6 +349,10 @@ struct PendingHeader {
     fts_root: Option<u64>,
     /// Graph meta page move (`docs/adr/0012`).
     graph_root: Option<u64>,
+    /// Filter-meta sidecar head move (`docs/adr/0027`).
+    filter_meta: Option<u64>,
+    /// Filter-meta symbol-table head move (`docs/adr/0027`).
+    filter_symbols: Option<u64>,
     /// Embedding model id + dims stamp (set once on a fresh store,
     /// `docs/adr/0004`).
     embedding: Option<(String, u16)>,
@@ -354,6 +364,8 @@ impl PendingHeader {
             && self.hnsw_meta.is_none()
             && self.fts_root.is_none()
             && self.graph_root.is_none()
+            && self.filter_meta.is_none()
+            && self.filter_symbols.is_none()
             && self.embedding.is_none()
     }
 }
@@ -497,6 +509,34 @@ impl Txn<'_> {
     /// frame; discarded on rollback like any other buffered write.
     pub fn set_graph_root_page(&mut self, page_no: u64) {
         self.pending.graph_root = Some(page_no);
+    }
+
+    /// Filter-meta sidecar head as seen by this transaction (its own pending
+    /// move included); 0 = no sidecar yet (`docs/adr/0027`).
+    pub fn filter_meta_page(&self) -> u64 {
+        self.pending
+            .filter_meta
+            .unwrap_or(self.pager.header.filter_meta_page)
+    }
+
+    /// Moves the filter-meta sidecar head pointer. Becomes durable with the
+    /// commit frame; discarded on rollback like any other buffered write.
+    pub fn set_filter_meta_page(&mut self, page_no: u64) {
+        self.pending.filter_meta = Some(page_no);
+    }
+
+    /// Filter-meta symbol-table head as seen by this transaction (its own
+    /// pending move included); 0 = no interned strings yet (`docs/adr/0027`).
+    pub fn filter_symbols_page(&self) -> u64 {
+        self.pending
+            .filter_symbols
+            .unwrap_or(self.pager.header.filter_symbols_page)
+    }
+
+    /// Moves the filter-meta symbol-table head pointer. Becomes durable with
+    /// the commit frame; discarded on rollback like any other buffered write.
+    pub fn set_filter_symbols_page(&mut self, page_no: u64) {
+        self.pending.filter_symbols = Some(page_no);
     }
 
     /// Stamps the header's embedding `model_id` + `dims` — done once against a
@@ -832,6 +872,39 @@ mod tests {
         drop(pager); // reopen via WAL recovery
         let pager = Pager::open(vfs, path(), opts()).unwrap();
         assert_eq!(pager.header().fts_root_page, p);
+    }
+
+    #[test]
+    fn filter_meta_moves_commit_roll_back_and_survive_reopen() {
+        let (vfs, _) = sim();
+        let mut pager = Pager::create(Arc::clone(&vfs), path(), opts()).unwrap();
+        let mut txn = pager.begin().unwrap();
+        let m = txn.allocate_page().unwrap();
+        let s = txn.allocate_page().unwrap();
+        txn.write_page(m, &filled(5)).unwrap();
+        txn.write_page(s, &filled(6)).unwrap();
+        assert_eq!(txn.filter_meta_page(), 0);
+        assert_eq!(txn.filter_symbols_page(), 0);
+        txn.set_filter_meta_page(m);
+        txn.set_filter_symbols_page(s);
+        assert_eq!(txn.filter_meta_page(), m);
+        assert_eq!(txn.filter_symbols_page(), s);
+        txn.commit().unwrap();
+        assert_eq!(pager.header().filter_meta_page, m);
+        assert_eq!(pager.header().filter_symbols_page, s);
+
+        // Rollback discards both pending moves.
+        let mut txn = pager.begin().unwrap();
+        txn.set_filter_meta_page(0);
+        txn.set_filter_symbols_page(0);
+        drop(txn);
+        assert_eq!(pager.header().filter_meta_page, m);
+        assert_eq!(pager.header().filter_symbols_page, s);
+
+        drop(pager); // reopen via WAL recovery
+        let pager = Pager::open(vfs, path(), opts()).unwrap();
+        assert_eq!(pager.header().filter_meta_page, m);
+        assert_eq!(pager.header().filter_symbols_page, s);
     }
 
     #[test]
