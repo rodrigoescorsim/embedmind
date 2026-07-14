@@ -60,13 +60,14 @@ score, escopados ao projeto em que estou.
   (×4 por rodada, teto = grafo inteiro) — degrada rumo a scan honesto, nunca
   sub-retorna em silêncio.
 - **Borda:** arquivo vazio → `hits: []`, não erro. `limit: 0` → lista vazia.
-- **NFR:** p99 < 100 ms com 100k memórias (CPU-only, cache quente) — recalibrado de
-  50 ms em 2026-07-14 (ver ADR 0017, seção "Revisão do NFR"): o alvo original não
-  contava o custo do full-text híbrido (o diferencial de produto), e nenhum
-  concorrente embarcado/local comparável soma embed+busca+fusão no mesmo número
-  (a maioria isola só o vetor). O patamar pós-FTOPT-1/2 (135,74 ms) ainda reprova
-  este alvo — decisão consciente do founder para manter pressão por otimizar o
-  formato de postings (ADR 0017, "mudar o formato de postings").
+- **NFR:** p99 < 150 ms com 100k memórias (CPU-only, cache quente) — recalibrado de
+  50 ms em 2026-07-14, e de novo de 100 ms para 150 ms no mesmo dia após a FTOPT-8
+  (ver ADR 0017, seções "Revisão do NFR" e "Formato de postings frame-of-reference
+  e fechamento da fase"): o alvo original não contava o custo do full-text híbrido
+  (o diferencial de produto), e nenhum concorrente embarcado/local comparável soma
+  embed+busca+fusão no mesmo número (a maioria isola só o vetor). O patamar final
+  pós-FTOPT-1/2/6/7/8 (133,65 ms) **fecha** este NFR — a fase de otimização do
+  full-text está encerrada.
 - **Verificação:** `cargo test -p embedmind-core recall` + property tests vs. modelo
   de referência linear.
 
@@ -577,7 +578,7 @@ de 300 MiB — hoje passa por pouco, mas passa.
 |---|---|---|
 | Durabilidade | zero perda confirmada sob kill -9/queda de energia | crash harness (S4) |
 | Integridade | arquivo nunca irrecuperável; recovery automático | crash harness + fuzzing |
-| Latência `recall` | < 100 ms p99 @ 100k memórias, CPU-only (recalibrado 2026-07-14, ADR 0017) | benchmark harness |
+| Latência `recall` | < 150 ms p99 @ 100k memórias, CPU-only (recalibrado 2026-07-14, ADR 0017 — fase fechada, patamar de 133,65 ms passa) | benchmark harness |
 | Recall@10 @ 100k | ≥ 0,95 média · ≥ 0,70 pior query (alvos propostos — S16) | benchmark harness |
 | Latência `remember` | < 200 ms p99 (dominada pelo embedding) | benchmark harness |
 | Artefato de release | < 40 MB comprimido, incluindo modelo (ADR 0010) | CI de release |

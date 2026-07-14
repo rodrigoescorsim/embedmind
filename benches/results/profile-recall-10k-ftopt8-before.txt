@@ -1,0 +1,20 @@
+# FTOPT-5 post-sidecar hybrid recall phase profile — agent-mem-10k, 1000 queries (ADR 0017)
+
+`Store::recall_profiled` wall time — p50 18.114 ms, p99 31.326 ms
+
+| phase | total ms | share of measured phases |
+|---|---:|---:|
+| vector (embed query + HNSW search) | 12788.438 | 68.4% |
+| fts: cursor open (dict lookup + small-list decode) | 895.396 | 4.8% |
+| fts: WAND/block-max bound loop (skip vs. evaluate) | 1152.229 | 6.2% |
+| fts: block decode (postings materialized) | 2483.485 | 13.3% |
+| fts: keep (sidecar/record re-check) | 170.829 | 0.9% |
+| fts: doc_len (sidecar/record lookup) | 34.859 | 0.2% |
+| fts: scoring (BM25 + top-k insert) | 881.374 | 4.7% |
+| RRF fusion (vector + text lists) | 3.041 | 0.0% |
+| hit load (final record fetch for returned hits) | 287.010 | 1.5% |
+| **sum of phases** | 18696.661 | 100.0% |
+
+FTOPT-7 split of `fts: block decode` (2483.485 ms): varint loop (`decode_delta_run`) 1093.316 ms (44.0%), first/last/max_tf revalidation 20.888 ms (0.8%), other (cursor bookkeeping) 1369.280 ms (55.1%).
+
+BlockMax-WAND work: 947813 docs evaluated exactly, 130869 pivot candidates skipped by the block-max check, 295763 blocks decoded, 872 blocks skipped (skip rate 0.29%).

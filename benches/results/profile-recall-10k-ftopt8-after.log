@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.39s
+     Running `target\release\profile_recall.exe agent-mem-10k`
+[agent-mem-10k] warming up (50 queries)...
+[agent-mem-10k] timing 1000 queries...
+  250/1000
+  500/1000
+  750/1000
+  1000/1000

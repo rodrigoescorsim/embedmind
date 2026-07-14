@@ -65,7 +65,18 @@ pub const WAL_MAGIC: [u8; 8] = *b"MINDWAL1";
 ///   it mirrors, never independently. An older file decodes with both roots 0
 ///   = no sidecar, and `keep` degrades to the full record load — never an
 ///   error; `vacuum`'s rebuild-by-copy is the upgrade path.
-pub const FORMAT_VERSION: u32 = 7;
+/// - `8` (FTOPT-8, `docs/adr/0028`): each full-text **skip block body** switches
+///   from intercalated delta+varint to **frame-of-reference** — `delta_width`
+///   (u8) · `tf_width` (u8) · a fixed-width LE delta stream · a fixed-width LE
+///   term_freq stream — so decoding a block is two branch-free fixed-step loops
+///   instead of a varint continuation-bit loop (the FTOPT-7 decode hotspot). The
+///   skip index, `SkipEntry` (version-6 shape), block bounds, and small-list
+///   (`block_count = 0`) delta+varint body are unchanged (`docs/FORMAT.md` §11).
+///   Same "layout selected by the file's version, never mixed" rule; a
+///   version-≤7 file keeps reading and writing its own layout, and `vacuum`
+///   re-encodes it into a fresh version-8 file. No header field or page type
+///   changes.
+pub const FORMAT_VERSION: u32 = 8;
 
 /// Default page size in bytes. The authoritative value for an existing file is
 /// the one recorded in its header.

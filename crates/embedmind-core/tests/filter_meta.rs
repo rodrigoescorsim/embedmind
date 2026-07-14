@@ -266,7 +266,7 @@ fn vacuum_upgrades_a_v6_file_and_preserves_results() {
     store.vacuum().unwrap();
     assert_eq!(
         file_format_version(&vfs),
-        7,
+        8,
         "vacuum's rebuild-by-copy is the upgrade path"
     );
     store.verify_filter_meta_invariant().unwrap();
