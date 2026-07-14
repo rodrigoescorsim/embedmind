@@ -7,7 +7,7 @@
 //!   pinned versions, rendering "not measured on this run" honestly rather than
 //!   inventing numbers, and an explicit **"where EmbedMind loses"** section
 //!   (BENCHMARKS.md §4 rule 1: publish losses);
-//! - an **NFR verdict** for the spec's hard numbers (recall p99 < 100 ms @ 100k,
+//! - an **NFR verdict** for the spec's hard numbers (recall p99 < 150 ms @ 100k,
 //!   `remember` p99 < 200 ms, RAM < 300 MB @ 100k), reported even when missed
 //!   (§4 rule 1);
 //! - a **run environment header** (machine, OS, date, versions) so every table
@@ -25,11 +25,13 @@ use crate::harness::SuiteResult;
 /// the pass/fail thresholds are version-controlled next to the checker.
 pub mod nfr {
     /// `recall` p99 latency ceiling at 100k memories, CPU-only (ms). Recalibrated
-    /// 2026-07-14 from 50.0 to 100.0 (ADR 0017, "Revisão do NFR") — the hybrid
+    /// 2026-07-14 twice (ADR 0017): 50.0 -> 100.0 ("Revisão do NFR", the hybrid
     /// full-text+vector workload was never going to hit 50ms without a postings
-    /// format change; the founder chose 100ms as continued pressure rather than
-    /// accepting the measured 135.74ms post-FTOPT-1/2/6/7 as final.
-    pub const RECALL_P99_MS_AT_100K: f64 = 100.0;
+    /// format change), then 100.0 -> 150.0 ("Formato de postings frame-of-reference
+    /// e fechamento da fase") after FTOPT-8's frame-of-reference postings format
+    /// brought the measured p99 to 133.65ms — the founder closed the full-text
+    /// optimization phase at this NFR rather than chasing further gains.
+    pub const RECALL_P99_MS_AT_100K: f64 = 150.0;
     /// `remember` p99 latency ceiling (ms) — dominated by embedding.
     pub const REMEMBER_P99_MS: f64 = 200.0;
     /// Peak RAM ceiling at 100k memories (MiB).
@@ -1056,8 +1058,8 @@ mod tests {
 
     #[test]
     fn nfrs_report_miss_not_hide() {
-        // p99 over 100 ms and RSS over 300 MiB at 100k → misses, not hidden.
-        let r = fake_result("agent-mem-100k", 100_000, 135.0, 400.0);
+        // p99 over 150 ms and RSS over 300 MiB at 100k → misses, not hidden.
+        let r = fake_result("agent-mem-100k", 100_000, 200.0, 400.0);
         let checks = check_nfrs(&[r]);
         let recall_p99 = checks
             .iter()

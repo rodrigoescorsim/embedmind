@@ -1,0 +1,10 @@
+   Compiling embedmind-core v0.1.0-dev (C:\workspace\Rodrigo\embedmind\crates\embedmind-core)
+   Compiling embedmind-bench v0.1.0-dev (C:\workspace\Rodrigo\embedmind\benches)
+    Finished `release` profile [optimized] target(s) in 56.09s
+     Running `target\release\profile_recall.exe agent-mem-100k`
+[agent-mem-100k] warming up (50 queries)...
+[agent-mem-100k] timing 1000 queries...
+  250/1000
+  500/1000
+  750/1000
+  1000/1000

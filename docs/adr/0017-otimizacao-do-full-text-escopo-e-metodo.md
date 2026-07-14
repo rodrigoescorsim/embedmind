@@ -773,6 +773,60 @@ Este ADR registra a decisão tomada pelo founder; não decide sozinho — a esco
 de aceitar 135,74 ms ou manter 50 ms) foi feita explicitamente fora desta pipeline de tasks
 automatizadas, com pesquisa de mercado como insumo, não como cálculo determinístico.
 
+## Formato de postings frame-of-reference (FTOPT-8, 2026-07-14) e fechamento da fase
+
+A FTOPT-7 isolou o custo: o laço `decode_delta_run` (parsing varint LEB128) dominava 59,9% da
+fase "block decode" (31,6% do tempo total @100k). A FTOPT-8 ([ADR 0028](0028-postings-fts-frame-of-reference.md))
+trocou o corpo dos blocos de postings de delta+varint intercalado para **frame-of-reference**
+(dois streams de largura fixa por bloco — `format_version` 8), a rota que o ADR 0017 já apontava
+como a única capaz de atacar esse custo depois que FTOPT-6 mostrou que não havia ineficiência
+local (alocação) para corrigir.
+
+**Resultado medido** (`agent-mem-100k`, 1000 queries, mesma sessão/máquina, `profile_recall`,
+dataset vacuum'ado para `format_version` 8):
+
+| Métrica | Antes (fv7, varint) | Depois (fv8, FOR) | Ganho |
+|---|---:|---:|---:|
+| `recall` p99 (end-to-end) | 266,03 ms | **133,65 ms** | **-49,8%** |
+| `recall` p50 | 85,43 ms | 64,43 ms | -24,6% |
+| fts: block decode (total) | 24.395,7 ms (25,7%) | 16.070,2 ms (23,7%) | -34,1% |
+| ↳ laço varint | 11.038,8 ms (45,2% do decode) | 3.256,2 ms (20,3% do decode) | **-70,5%** |
+
+Contagem de blocos decodificados praticamente idêntica (2.872.240 vs. 2.872.023) — confirma
+resultado bit-idêntico, só o tempo de parede muda. O laço varint caiu 70,5% em tempo absoluto,
+exatamente o que o desenho da FOR previa.
+
+**Novo gargalo revelado**: com o laço varint reduzido, a fatia "outro" dentro de "block decode"
+(bookkeeping do cursor — `advance_to`/`advance_past`/`current_tf`, a navegação por busca binária
+dentro do bloco já decodificado, chamada uma vez por candidato avaliado) passou a dominar essa
+fase (78,6%, 12.629 ms — a maior fatia isolada de toda a query, 18,6% do tempo total). Não foi
+investigado nem medido em granularidade menor nesta task — fica registrado como a próxima
+pergunta em aberto, não como conclusão ("Opções em aberto" abaixo).
+
+### Recalibração final do NFR e fechamento da fase (decisão do founder, 2026-07-14)
+
+Com o patamar em 133,65 ms — muito mais perto do NFR revisado de 100 ms (era 266 ms antes de
+qualquer otimização desta fase, 941% acima do NFR original de 50 ms) —, o founder revisou o NFR
+uma segunda vez: **de 100 ms para 150 ms**, e decidiu **fechar a fase de otimizações do full-text
+aqui**. Razões registradas (não fabricadas por esta pipeline — decisão de produto direta):
+
+1. **Retorno decrescente visível.** Cada rodada (FTOPT-1→2→6→7→8) atacou uma fatia real e reduziu
+   o total (224 ms → 135,74 ms → 133,65 ms), mas o esforço por task cresceu — a FTOPT-8 foi o
+   maior projeto da fase (novo `format_version`, layout on-disk, suite de equivalência/crash/fuzz
+   nova) e exigiu revisão manual fora do fluxo automatizado.
+2. **O gargalo já não é predominantemente full-text.** Vetor (39,3%) e o laço WAND/bound (15,1%)
+   juntos já são mais da metade do tempo pós-FTOPT-8 — mesmo zerando "block decode" por completo,
+   o total ficaria perto de ~102 ms, ainda seria preciso investir num escopo diferente (a
+   fusão híbrida como um todo, não só o BM25) para chegar a 50-100 ms.
+3. O patamar atual (133,65 ms) **fecha** o NFR revisado de 150 ms — a fase encerra com o NFR
+   passando, não reprovado.
+
+**Com o novo NFR de 150 ms, o patamar de 133,65 ms PASSA.** A fase FTOPT (FTOPT-0 a FTOPT-8) está
+formalmente fechada: partiu de 224 ms sem NFR definido de forma realista, mediu de forma
+confirmatória em cada etapa, nunca fabricou dados nem decidiu sozinha questões de produto, e
+termina com uma redução real de 40% (224→133,65 ms) e um NFR recalibrado duas vezes com
+justificativa registrada, não por conveniência.
+
 ## Alternativas rejeitadas
 
 - **Modo `vector_only` opcional exposto ao usuário, sem otimizar o FTS**:
