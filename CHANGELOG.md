@@ -11,8 +11,31 @@ postmortem.
 
 ## [Unreleased]
 
-Pre-v0.1 — under active development, repo private until M1 completes
-(see [ROADMAP.md](ROADMAP.md)).
+No changes yet since [0.1.0].
+
+## [0.1.0] - 2026-07-14
+
+First release: M1 end-to-end (single-file crash-safe store, HNSW vector
+recall, MCP server + CLI), plus the hybrid vector+full-text search built on
+top of it (FR, FT, BMW, FTOPT phases below). See [ROADMAP.md](ROADMAP.md) for
+the full 90-day plan this closes out.
+
+**Known limitations at this release, recorded honestly rather than buried:**
+- `recall p99 @ 100k` NFR was recalibrated twice during the FT/FTOPT phases
+  (50 ms → 100 ms → 150 ms) and closes at 133.65 ms — met against the revised
+  target, not the original one (see "FTOPT phase closed" below).
+- BlockMax-WAND's block-skipping benefit did not materialize on this
+  benchmark corpus's postings shape (BMW-3/BMW-5): the algorithm is correct
+  and equivalence-tested, but contributes ~0% measured skip rate on both the
+  uniform and session-locality synthetic corpora.
+- Full-text-only (BM25) latency trails tantivy on this harness (p50 0.04 ms
+  vs. 0.11 ms @ 10k) — expected for a young purpose-built inverted index
+  against a mature dedicated engine, not a regression to chase inside M1.
+- `benches/results/0.1.0-dev.json` still reflects a pre-FTOPT-8
+  (`format_version` 7) harness run; regenerating it in `format_version` 8 on
+  a clean/idle machine is a founder follow-up, not blocking this release (the
+  FTOPT-8 closing number, 133.65 ms, comes from the isolated `profile_recall`
+  measurement cited in ADR 0017, not from that committed JSON).
 
 ### Added
 - **Filter-meta sidecar — `format_version` 7** (FTOPT-1,

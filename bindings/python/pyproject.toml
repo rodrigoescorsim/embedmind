@@ -4,9 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "embedmind"
-# Kept in lockstep with the Rust crates' 0.1.0-dev; PEP 440 spells a dev
-# pre-release `0.1.0.dev0`, not `0.1.0-dev`.
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Persistent memory for AI agents — one local file, no server. Python bindings for the EmbedMind engine."
 readme = "README.md"
 requires-python = ">=3.9"
